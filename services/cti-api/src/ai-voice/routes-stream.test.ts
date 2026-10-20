@@ -36,6 +36,7 @@ import { activeEntry, CALL_SID, fakeSocket, fakeStore, fakeTwilio, silentLog, ty
 import { streamToken } from './twilio.js';
 import type { BridgeHooks, BridgeOptions } from './bridge.js';
 import { DETAILS_TOOL_NAME } from './caller-details.js';
+import { liveStreamCount, resetDrainForTests } from './drain.js';
 
 const SECRET = 's'.repeat(40);
 const ID = '11111111-2222-4333-8444-555555555555';
@@ -100,6 +101,7 @@ beforeEach(async () => {
 afterEach(async () => {
   clearActiveCalls();
   await app.close();
+  resetDrainForTests();
 });
 
 const sign = (url = WSS) => twilio.getExpectedTwilioSignature(TOKEN, url, {});
@@ -141,6 +143,14 @@ describe('GET /telephony/twilio/ai-voice/stream (WebSocket)', () => {
     expect(bridgeOpts?.instructions).toContain('AI assistant calling for GG Homes');
     expect(getActiveCall(ID)?.bridge).not.toBeNull();
     ws.terminate();
+  });
+
+  it('a media stream counts as a live call (a deploy waits for it) until its socket closes', async () => {
+    resetDrainForTests();
+    const ws = await connect(sign());
+    await vi.waitFor(() => expect(liveStreamCount()).toBe(1));
+    ws.close();
+    await vi.waitFor(() => expect(liveStreamCount()).toBe(0));
   });
 
   it('an inbound call that ends is finalized with the details the after-call model filled in (the routes hand it to the stream session)', async () => {

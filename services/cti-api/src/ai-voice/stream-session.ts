@@ -35,6 +35,7 @@ import { phoneForms, promptPriority, promptSlots } from './prompt-context.js';
 import { logTemplateError } from './prompt-saved.js';
 import { claimClose, getActiveCall, updateActiveCall, type ActiveAiCall, type ActiveBridge } from './registry.js';
 import { localTimeFor } from './local-time.js';
+import { trackAfterCallWork } from './drain.js';
 import { finalizeAiCall } from './service-finalize.js';
 import { handleToolCall, type ToolEffects } from './service-tools.js';
 import type { AiCallStatus, AiCallStore } from './store.js';
@@ -297,7 +298,8 @@ function onBridgeEnd(
   const { aiCallId } = entry;
   deps.log.info({ aiCallId, reason, detail }, 'ai-voice: conversation ended');
   void transcript.flush();
-  if (entry.direction === 'inbound') return void endInboundCall(entry, reason, bridge, deps);
+  // Tracked so a deploy waits for it: Twilio sends an inbound call no status callback (drain.ts).
+  if (entry.direction === 'inbound') return void trackAfterCallWork(endInboundCall(entry, reason, bridge, deps));
   if (reason === 'twilio_closed') return; // hung up, redirected, or stopped — finalize does the rest
   if (!claimClose(aiCallId)) return; // end_call / transfer / voicemail already owns the call
   void (async () => {

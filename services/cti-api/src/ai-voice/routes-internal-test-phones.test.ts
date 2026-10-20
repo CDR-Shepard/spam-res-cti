@@ -9,6 +9,7 @@ import { internalRequestHeaders } from '@cti/auth';
 import { INTERNAL_AI_AVAILABILITY_PATH } from '@cti/contracts';
 import type { AppConfig } from '../config.js';
 import type { Db } from '../dialer/pick-did.js';
+import { drainLiveCalls, resetDrainForTests } from './drain.js';
 import { registerInternalAiCallRoutes, type InternalAiDeps } from './routes-internal.js';
 
 const SECRET = 'z'.repeat(48);
@@ -43,10 +44,22 @@ beforeEach(async () => {
 });
 afterEach(async () => {
   await app.close();
+  resetDrainForTests();
 });
 
 const get = (url: string) =>
   app.inject({ method: 'GET', url, headers: { host: HOST, ...internalRequestHeaders(SECRET, { method: 'GET', path: url, body: '' }, NOW) } });
+
+describe('GET /internal/ai-calls/availability while this process drains for a deploy', () => {
+  it('says AI calls are unavailable (the pacer skips a tick) and closes the connection, so the next request reaches the new process', async () => {
+    expect((await get(INTERNAL_AI_AVAILABILITY_PATH)).headers.connection).not.toBe('close');
+    void drainLiveCalls({ maxWaitMs: 1_000, settleMs: 0, log });
+    const res = await get(INTERNAL_AI_AVAILABILITY_PATH);
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toMatchObject({ available: false });
+    expect(res.headers.connection).toBe('close');
+  });
+});
 
 describe('GET /internal/ai-calls/availability — test numbers', () => {
   it("with ?orgId: the env list, then the org's own phones (each number once)", async () => {

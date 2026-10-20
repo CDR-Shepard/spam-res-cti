@@ -55,6 +55,8 @@ export interface AiVoiceDeps {
   requests?: AiCallRequestStore;
   /** Sam's recorded voicemail (AI_VOICE_VOICEMAIL_TTS); null = the stock `<Say>` voice. */
   voicemail: VoicemailAudio | null;
+  /** The status webhook's wait for a drained call's last transcript lines (routes-webhooks.ts); tests pass a fake. */
+  sleep?: (ms: number) => Promise<void>;
 }
 
 /** Live wiring; the Salesforce/summary pieces are built on the store and clock actually in use. */
@@ -93,6 +95,7 @@ export async function registerAiVoiceRoutes(app: FastifyInstance, overrides: Par
     log,
     afterCall: deps.afterCall,
     voicemail: deps.voicemail,
+    sleep: deps.sleep,
   });
   if (deps.voicemail) registerVoicemailAudioRoute(app, deps.voicemail);
 

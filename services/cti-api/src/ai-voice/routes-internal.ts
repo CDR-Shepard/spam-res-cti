@@ -40,6 +40,7 @@ import type { Db } from '../dialer/pick-did.js';
 import { UUID_RE } from '../telephony/webhooks.js';
 import type { BridgeLog } from './bridge.js';
 import { browserCallsAvailable, registerBrowserTokenRoute } from './browser-token.js';
+import { isDraining } from './drain.js';
 import { checkInternalRequest, checkInternalTransport, INTERNAL_RATE_MAX } from './internal-auth.js';
 import { checkTemplate } from './prompt-template.js';
 import type { AiCallRecord } from './record.js';
@@ -170,12 +171,18 @@ export async function registerInternalAiCallRoutes(app: FastifyInstance, deps: I
       if (guard.status === 401) deps.log.warn({ url: req.url, reason: guard.reason }, 'ai-voice internal: signature refused');
       return reply.code(guard.status).send({ error: guard.error });
     });
+    // Draining for a deploy: outreach-api's kept-alive connection would bring every next request back to this process.
+    scope.addHook('onSend', async (_req, reply, payload) => {
+      if (isDraining()) reply.header('connection', 'close');
+      return payload;
+    });
     const rateLimit = { max: INTERNAL_RATE_MAX, timeWindow: '1 minute', keyGenerator: () => 'internal-outreach' };
 
     scope.get(INTERNAL_AI_AVAILABILITY_PATH, { config: { rateLimit } }, async (req): Promise<AiAvailability> => {
       const cfg = cfgOf();
       return {
-        available: aiVoiceAvailable(cfg),
+        // Not while draining: the pacer waits a tick instead of placing a call this process would refuse.
+        available: aiVoiceAvailable(cfg) && !isDraining(),
         testNumbers: await availableTestNumbers(deps, cfg, (req.query as { orgId?: unknown } | undefined)?.orgId),
         browserCalls: browserCallsAvailable(cfg),
       };
@@ -191,6 +198,9 @@ export async function registerInternalAiCallRoutes(app: FastifyInstance, deps: I
     });
 
     scope.post(INTERNAL_AI_CALLS_PATH, { config: { rateLimit } }, async (req, reply) => {
+      // Shutting down for a deploy: a call placed here would stream to the new process, which does not know it.
+      // A 503 is a transport outcome for outreach-api, which retries the same key on the new process.
+      if (isDraining()) return reply.code(503).send({ error: 'draining' });
       const parsed = InternalAiCallRequest.safeParse(req.body);
       if (!parsed.success) return reply.code(400).send({ error: 'invalid_body' });
       const answer = await handleTrigger(deps, cfgOf, parsed.data, requestHash((req as RawRequest).rawBody ?? ''));

@@ -49,6 +49,7 @@ const ORG = 'oooooooo-0000-4000-8000-000000000001';
 const REP = 'aaaaaaaa-0000-4000-8000-000000000001';
 const ADMIN = 'aaaaaaaa-0000-4000-8000-000000000002';
 const ID = '11111111-2222-4333-8444-555555555555';
+const OTHER_ID = '11111111-2222-4333-8444-666666666666';
 const REP_AUTH = 'Bearer rep';
 const ADMIN_AUTH = 'Bearer admin';
 const NOW = new Date('2026-10-05T18:00:00Z');
@@ -297,6 +298,28 @@ describe('POST /telephony/twilio/ai-voice/status', () => {
     expect(bridge.stop).toHaveBeenCalled();
     await signedPost(path, { ...body, CallStatus: 'completed', CallDuration: '9' });
     expect(store.rows.get(ID)).toMatchObject({ outcome: 'no_answer', durationSeconds: 0 });
+  });
+
+  it("a talking call this process is not running (one a deploy's old process is draining) waits a moment before it is finalized", async () => {
+    const sleep = vi.fn(async () => {});
+    await app.close();
+    await build(false, { sleep });
+    await store.insert({ id: ID, orgId: ORG, startedBy: REP, toE164: '+16195550100', fromE164: '+16195550000', status: 'in_progress', callSid: CALL_SID });
+    expect((await signedPost(path, { CallSid: CALL_SID, CallStatus: 'completed', CallDuration: '40' })).statusCode).toBe(200);
+    expect(sleep).toHaveBeenCalledWith(3_000);
+    expect(store.rows.get(ID)).toMatchObject({ status: 'completed', durationSeconds: 40, endedAt: NOW });
+  });
+
+  it('a call live in this process, or one that never got talking, is finalized without waiting', async () => {
+    const sleep = vi.fn(async () => {});
+    await app.close();
+    await build(false, { sleep });
+    await liveCall('in_progress');
+    await signedPost(path, { CallSid: CALL_SID, CallStatus: 'completed', CallDuration: '30' });
+    await store.insert({ id: OTHER_ID, orgId: ORG, startedBy: REP, toE164: '+16195550101', fromE164: '+16195550000', status: 'ringing', callSid: `CA${'c'.repeat(32)}` });
+    await signedPost(`/telephony/twilio/ai-voice/status?aiCallId=${OTHER_ID}`, { CallSid: `CA${'c'.repeat(32)}`, CallStatus: 'no-answer', CallDuration: '0' });
+    expect(sleep).not.toHaveBeenCalled();
+    expect(store.rows.get(OTHER_ID)?.endedAt).toEqual(NOW);
   });
 
   it('replies at once and leaves the summary / Salesforce work running behind it', async () => {

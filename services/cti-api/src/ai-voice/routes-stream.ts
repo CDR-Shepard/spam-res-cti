@@ -17,6 +17,7 @@ import websocket from '@fastify/websocket';
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import twilio from 'twilio';
 import type { AppConfig } from '../config.js';
+import { trackLiveStream } from './drain.js';
 import { runStreamSession, type StreamSessionDeps } from './stream-session.js';
 import { STREAM_PATH, streamWssUrl } from './twilio.js';
 import { wsToBridgeSocket } from './ws-adapter.js';
@@ -79,6 +80,8 @@ export async function registerAiVoiceStreamRoute(
         },
       },
       (socket, req) => {
+        // A deploy waits for this call to end before the server closes (drain.ts).
+        trackLiveStream(socket);
         void runStreamSession(wsToBridgeSocket(socket), deps(req));
       },
     );

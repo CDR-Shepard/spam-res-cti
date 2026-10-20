@@ -43,7 +43,17 @@ export interface WebhookDeps {
   afterCall?: AfterCall;
   /** Sam's recorded voicemail (voicemail-audio.ts); null = always `<Say>`. */
   voicemail: Pick<VoicemailAudio, 'playUrl' | 'forget'> | null;
+  /** Waits `ms` (DRAINED_CALL_SETTLE_MS); tests pass a fake. Default: a timer. */
+  sleep?: (ms: number) => Promise<void>;
 }
+
+/**
+ * How long the end of a talking call this process is not running waits before it is finalized: the call was live on the
+ * old process a deploy is draining (drain.ts), which writes the transcript's last lines as its stream closes, and the
+ * summary and Salesforce Task read the transcript the finalize returns.
+ */
+export const DRAINED_CALL_SETTLE_MS = 3_000;
+const timerSleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
 const EMPTY_TWIML = '<?xml version="1.0" encoding="UTF-8"?><Response/>';
 const HANGUP_TWIML = '<?xml version="1.0" encoding="UTF-8"?><Response><Hangup/></Response>';
@@ -146,6 +156,7 @@ export async function onStatus(row: AiCallRow, body: unknown, deps: WebhookDeps)
   const callStatus = field(body, 'CallStatus');
   const callSid = field(body, 'CallSid') || null;
   if (isTerminalCallStatus(callStatus)) {
+    if (row.status === 'in_progress' && getActiveCall(row.id) === null) await (deps.sleep ?? timerSleep)(DRAINED_CALL_SETTLE_MS);
     // The call is over, so its voicemail has played (or never will): the audio and its link go now.
     try {
       deps.voicemail?.forget(row.id);

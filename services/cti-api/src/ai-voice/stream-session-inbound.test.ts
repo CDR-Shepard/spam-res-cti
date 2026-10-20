@@ -18,6 +18,7 @@ import { runStreamSession, type StreamSessionDeps } from './stream-session.js';
 import { activeEntry, CALL_SID, fakeSocket, fakeStore, fakeTwilio, silentLog, type FakeSocket, type FakeStore, type FakeTwilio } from './testing.js';
 import { streamToken } from './twilio.js';
 import { DETAILS_TOOL_NAME } from './caller-details.js';
+import { afterCallWorkCount, resetDrainForTests } from './drain.js';
 
 const SECRET = 's'.repeat(40);
 const ID = '11111111-2222-4333-8444-555555555555';
@@ -92,7 +93,10 @@ beforeEach(async () => {
     log: silentLog,
   };
 });
-afterEach(() => clearActiveCalls());
+afterEach(() => {
+  clearActiveCalls();
+  resetDrainForTests();
+});
 
 async function begin() {
   const done = runStreamSession(twilioWs, deps);
@@ -187,6 +191,25 @@ describe('an inbound call is finalized when the conversation ends', () => {
     expect(getActiveCall(ID)).toBeNull();
     expect(bridge.stop).toHaveBeenCalled();
     expect(twilio.hangups).toEqual([]);
+  });
+
+  it('its after-call work counts until the row is finalized, so a deploy waits for it (drain.ts)', async () => {
+    type Reply = { content: readonly { type: string; id?: string; name?: string; input?: unknown }[] };
+    let answer: (v: Reply) => void = () => {};
+    const create = vi.fn(() => new Promise<Reply>((resolve) => (answer = resolve)));
+    deps = { ...deps, details: { client: { create }, model: 'claude-haiku-4-5-20251001', log: silentLog } };
+    await begin();
+    say();
+    captured!.hooks.onEnd('twilio_closed');
+    expect(afterCallWorkCount()).toBe(1);
+    await settle();
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(afterCallWorkCount()).toBe(1);
+    answer({ content: [{ type: 'tool_use', id: 'tu_1', name: DETAILS_TOOL_NAME, input: { status: 'callback' } }] });
+    await settle();
+    await settle();
+    expect(store.rows.get(ID)).toMatchObject({ status: 'completed', outcome: 'callback' });
+    expect(afterCallWorkCount()).toBe(0);
   });
 
   it('an invalid status from the model: outcome incomplete, the other details kept', async () => {

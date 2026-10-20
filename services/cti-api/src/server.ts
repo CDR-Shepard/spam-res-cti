@@ -32,6 +32,7 @@ import { startReputationWorker } from './reputation/worker.js';
 import { startDirectoryLoop } from './mobile/directory-build.js';
 import { startRepLegReconcileLoop } from './dialer/rep-leg-reconcile.js';
 import { maybeStartIdleRunLoop } from './dialer/idle-runs.js';
+import { DRAIN_MARGIN_SECONDS, DRAIN_SETTLE_MS, drainLiveCalls, gracefulClose } from './ai-voice/drain.js';
 
 async function main(): Promise<void> {
   const cfg = loadConfig();
@@ -158,21 +159,32 @@ async function main(): Promise<void> {
   // AI calls whose status callback never came → finalized from Twilio's record (unref'd; null when AI voice is off).
   const aiCallSweepTimer = startAiCallSweeper(cfg, app.log);
 
-  const close = async () => {
-    clearInterval(syncTimer);
-    clearInterval(followupTimer);
-    clearInterval(nudgeTimer);
-    if (noAnswerChatterTimer) clearInterval(noAnswerChatterTimer);
-    if (inboundTextTimer) clearInterval(inboundTextTimer);
-    if (dialerConnectTimer) clearInterval(dialerConnectTimer);
-    if (dialerTimeTimer) clearInterval(dialerTimeTimer);
-    clearInterval(reputationTimer);
-    clearInterval(directoryTimer);
-    clearInterval(repLegTimer);
-    if (idleRunTimer) clearInterval(idleRunTimer);
-    if (aiCallSweepTimer) clearInterval(aiCallSweepTimer);
-    await app.close();
-  };
+  // A deploy (SIGTERM) waits for the live AI calls to end before the server closes them (ai-voice/drain.ts); a second
+  // signal stops the wait. An inbound call's after-call work (its details, then its row) is waited for too.
+  const close = gracefulClose({
+    stopTimers: () => {
+      clearInterval(syncTimer);
+      clearInterval(followupTimer);
+      clearInterval(nudgeTimer);
+      if (noAnswerChatterTimer) clearInterval(noAnswerChatterTimer);
+      if (inboundTextTimer) clearInterval(inboundTextTimer);
+      if (dialerConnectTimer) clearInterval(dialerConnectTimer);
+      if (dialerTimeTimer) clearInterval(dialerTimeTimer);
+      clearInterval(reputationTimer);
+      clearInterval(directoryTimer);
+      clearInterval(repLegTimer);
+      if (idleRunTimer) clearInterval(idleRunTimer);
+      if (aiCallSweepTimer) clearInterval(aiCallSweepTimer);
+    },
+    drain: (signal) => drainLiveCalls({ maxWaitMs: (cfg.AI_VOICE_MAX_CALL_SECONDS + DRAIN_MARGIN_SECONDS) * 1000, settleMs: DRAIN_SETTLE_MS, signal, log: app.log }),
+    closeServer: async () => {
+      await app.close();
+    },
+    log: app.log,
+    setExitCode: (code) => {
+      process.exitCode = code;
+    },
+  });
   process.on('SIGTERM', close);
   process.on('SIGINT', close);
 

@@ -20,6 +20,7 @@ import type { AppConfig } from '../config.js';
 import type { Db } from '../dialer/pick-did.js';
 import type { AiGateBlock } from './gate.js';
 import { STALE_REQUEST_MS, type AiCallRequestRow, type AiCallRequestStore, type FoundCall } from './request-store.js';
+import { drainLiveCalls, resetDrainForTests } from './drain.js';
 import { registerInternalAiCallRoutes, toInternalResponse, type InternalAiDeps } from './routes-internal.js';
 import type { StartBlock, StartInput, StartResult } from './service.js';
 
@@ -116,6 +117,7 @@ beforeEach(async () => {
 });
 afterEach(async () => {
   await app.close();
+  resetDrainForTests();
 });
 
 function post(body: unknown, opts: { raw?: string; headers?: Record<string, string | undefined>; sign?: boolean } = {}) {
@@ -130,6 +132,16 @@ function post(body: unknown, opts: { raw?: string; headers?: Record<string, stri
 const startInput = (n = 0) => deps.start.mock.calls[n]![0] as StartInput;
 
 describe('POST /internal/ai-calls', () => {
+  it('while this process drains for a deploy it places nothing and answers 503, so outreach-api retries on the new one', async () => {
+    void drainLiveCalls({ maxWaitMs: 1_000, settleMs: 0, log });
+    const res = await post(recordBody());
+    expect(res.statusCode).toBe(503);
+    expect(res.json()).toEqual({ error: 'draining' });
+    expect(deps.start).not.toHaveBeenCalled();
+    // Nothing is reserved under the key, so the retry runs it fresh.
+    expect(store.rows.size).toBe(0);
+  });
+
   it('1: a valid record request starts the call as the approver, on the tenant integration, and stores the answer', async () => {
     const res = await post(recordBody());
     expect(res.statusCode).toBe(200);
