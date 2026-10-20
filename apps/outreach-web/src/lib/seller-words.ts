@@ -55,6 +55,21 @@ const SWITCH_BLOCKS: ReadonlySet<EmailBlock> = new Set<EmailBlock>(['disabled', 
 
 export const isSwitchBlock = (block: EmailBlock | null): boolean => block !== null && SWITCH_BLOCKS.has(block);
 
+/**
+ * Behind the switch, the seller's own block that also stops a draft (`draftBlock`; absent from an older API reads as
+ * none); null when the switch is not the block or nothing stands behind it.
+ */
+export const blockBehindSwitch = (emailBlock: EmailBlock | null, draftBlock: EmailBlock | null | undefined): EmailBlock | null =>
+  isSwitchBlock(emailBlock) ? (draftBlock ?? null) : null;
+
+/** Whether Sam's draft can be read as a preview: the switch is the only block. */
+export const mayPreview = (emailBlock: EmailBlock | null, draftBlock: EmailBlock | null | undefined): boolean =>
+  isSwitchBlock(emailBlock) && blockBehindSwitch(emailBlock, draftBlock) === null;
+
+/** The switch's words with the seller's block behind it: "Email from Sam is turned off. No approved call plan yet, so there is no preview either." */
+export const switchAndSellerWords = (emailBlock: EmailBlock, behind: EmailBlock): string =>
+  `${EMAIL_BLOCK_WORDS[emailBlock]}. ${EMAIL_BLOCK_WORDS[behind]}, so there is no preview either.`;
+
 /** Shown with the switch's words when Sam's draft can still be read. */
 export const PREVIEW_WORDS = 'Sam can still write a draft for you to read. Nothing is sent while email is off.';
 

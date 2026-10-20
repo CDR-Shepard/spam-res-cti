@@ -238,13 +238,23 @@ describe('SellerConversationPage: Email from Sam', () => {
     expect(screen.getByRole('button', { name: 'Write draft' })).toBeEnabled();
   });
 
-  it('the switch off and a seller block behind it: no preview, both reasons in words, and no practice copy', async () => {
-    stubApi({ [`GET ${CONV}`]: sellerView({ mayEmail: false, emailBlock: 'disabled', draftBlock: 'not_approved' }) });
+  it.each([
+    ['disabled', 'not_approved', 'Email from Sam is turned off. No approved call plan yet, so there is no preview either.'],
+    ['paused', 'sf_opt_out', 'Email from Sam is paused after a spam complaint. Salesforce says this person opted out of email, so there is no preview either.'],
+  ] as const)('the switch (%s) with a seller block behind it (%s): no preview, both reasons in words, and no practice copy', async (emailBlock, draftBlock, words) => {
+    stubApi({ [`GET ${CONV}`]: sellerView({ mayEmail: false, emailBlock, draftBlock }) });
     page(null, { isAdmin: true });
     const preview = await screen.findByRole('button', { name: "Preview Sam's email" });
     expect(preview).toBeDisabled();
-    expect(preview).toHaveAccessibleDescription('Email from Sam is turned off. No approved call plan yet');
+    expect(preview).toHaveAccessibleDescription(words);
     expect(screen.queryByRole('button', { name: 'Send a practice copy to me' })).not.toBeInTheDocument();
+  });
+
+  it('an older outreach-api that sends no draftBlock: the switch alone reads as a preview (the server still decides)', async () => {
+    const { draftBlock: _absent, ...older } = sellerView({ mayEmail: false, emailBlock: 'disabled' });
+    stubApi({ [`GET ${CONV}`]: older });
+    page(null, { isAdmin: true });
+    expect(await screen.findByRole('button', { name: "Preview Sam's email" })).toBeEnabled();
   });
 
   it('while the composer is open, a hand-over turns the real Send off with the block in words (the draft stays)', async () => {

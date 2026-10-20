@@ -8,7 +8,7 @@ import { Button } from '@/components/ui/button';
 import { useAuth } from '@/lib/auth';
 import { getSellerConversation, outreachKeys, setSellerHandler } from '@/lib/outreach-api';
 import { errorText } from '@/lib/outreach-words';
-import { EMAIL_BLOCK_WORDS, isSwitchBlock, practiceAllowed, sellerStatus } from '@/lib/seller-words';
+import { blockBehindSwitch, EMAIL_BLOCK_WORDS, isSwitchBlock, mayPreview, practiceAllowed, sellerStatus, switchAndSellerWords } from '@/lib/seller-words';
 import { SellerEmailComposer } from './seller-email-composer';
 import { SellerTimeline } from './seller-timeline';
 
@@ -37,9 +37,9 @@ export function SellerConversationPage({ sfRecordId, focusEventId = null }: { sf
   const view = conversation.data;
   const status = sellerStatus(view);
   const block = view.emailBlock;
-  // Behind the switch, the seller's own block (which stops the draft too) is said as well; null: a preview can be written.
-  const behindSwitch = isSwitchBlock(block) ? (view.draftBlock ?? null) : null;
-  const mayPreview = isSwitchBlock(block) && behindSwitch === null;
+  // Behind the switch, the seller's own block (which stops the draft too) is said as well.
+  const behindSwitch = blockBehindSwitch(block, view.draftBlock);
+  const preview = mayPreview(block, view.draftBlock);
   return (
     <div className="space-y-6">
       <PageHeader
@@ -51,7 +51,7 @@ export function SellerConversationPage({ sfRecordId, focusEventId = null }: { sf
             {view.mayChangeHandler && <HandoverButton view={view} busy={handover.isPending} onChange={(handler) => handover.mutate(handler)} />}
             {isAdmin && (
               // With only the switch in the way, the button opens the composer to read Sam's draft; its Send stays off.
-              <Button size="sm" disabled={!view.mayEmail && !mayPreview} aria-describedby={block ? blockId : undefined} onClick={() => setComposing(true)}>
+              <Button size="sm" disabled={!view.mayEmail && !preview} aria-describedby={block ? blockId : undefined} onClick={() => setComposing(true)}>
                 {isSwitchBlock(block) ? "Preview Sam's email" : 'Email from Sam'}
               </Button>
             )}
@@ -64,7 +64,7 @@ export function SellerConversationPage({ sfRecordId, focusEventId = null }: { sf
       >
         {isAdmin && block && (
           <p id={blockId} className="text-[13px] text-muted-foreground">
-            {behindSwitch ? `${EMAIL_BLOCK_WORDS[block]}. ${EMAIL_BLOCK_WORDS[behindSwitch]}` : EMAIL_BLOCK_WORDS[block]}
+            {behindSwitch ? switchAndSellerWords(block, behindSwitch) : EMAIL_BLOCK_WORDS[block]}
           </p>
         )}
       </PageHeader>

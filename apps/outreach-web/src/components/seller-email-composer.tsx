@@ -7,7 +7,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
 import { draftSellerEmail, outreachKeys, sendSellerEmail } from '@/lib/outreach-api';
-import { EMAIL_BLOCK_WORDS, emailErrorWords, isSwitchBlock, practiceAllowed, PREVIEW_WORDS, sendAfterWords } from '@/lib/seller-words';
+import { blockBehindSwitch, EMAIL_BLOCK_WORDS, emailErrorWords, mayPreview, practiceAllowed, PREVIEW_WORDS, sendAfterWords, switchAndSellerWords } from '@/lib/seller-words';
 import { cn } from '@/lib/utils';
 import { ConfirmAction } from './confirm-action';
 
@@ -95,8 +95,8 @@ function StartPanel({ writing, error, emailBlock, draftBlock, onWrite }: StartPa
   const hintId = useId();
   const realWords = blockWords(emailBlock, false);
   const practiceWords = blockWords(emailBlock, true);
-  const behindSwitch = isSwitchBlock(emailBlock) ? draftBlock : null;
-  const preview = isSwitchBlock(emailBlock) && behindSwitch === null;
+  const behindSwitch = blockBehindSwitch(emailBlock, draftBlock);
+  const preview = mayPreview(emailBlock, draftBlock);
   return (
     <div className="space-y-3">
       <p className="text-sm text-muted-foreground">Sam writes a first draft. You can edit it before anything is sent.</p>
@@ -105,9 +105,9 @@ function StartPanel({ writing, error, emailBlock, draftBlock, onWrite }: StartPa
         <Button variant="outline" disabled={writing || practiceWords !== null} aria-describedby={practiceWords ? hintId : undefined} onClick={() => onWrite(true)}>Send a practice copy to me</Button>
       </div>
       {/* One reason is shown: the real draft's, which is also the practice copy's whenever the practice copy is off too. */}
-      {realWords && <p id={hintId} className="text-sm text-muted-foreground">{realWords}</p>}
+      {/* Both buttons point here, so a seller block behind the switch is in the same words. */}
+      {realWords && <p id={hintId} className="text-sm text-muted-foreground">{emailBlock && behindSwitch ? switchAndSellerWords(emailBlock, behindSwitch) : realWords}</p>}
       {preview && <p className="text-sm text-muted-foreground">{PREVIEW_WORDS}</p>}
-      {behindSwitch && <p className="text-sm text-muted-foreground">{EMAIL_BLOCK_WORDS[behindSwitch]}</p>}
       {writing && <p role="status" className="text-sm text-muted-foreground">Sam is writing a draft…</p>}
       {error !== null && <ErrorBlock error={error} />}
     </div>

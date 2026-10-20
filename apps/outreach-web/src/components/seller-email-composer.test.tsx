@@ -257,11 +257,13 @@ describe('SellerEmailComposer: when Sam may not email', () => {
     expect(await screen.findByRole('status')).toHaveTextContent('Practice copy queued for admin@gg.co.');
   });
 
-  it('the switch with a seller block behind it: no preview either, with the seller block in words', () => {
+  it('the switch with a seller block behind it: no preview either, both reasons in the words both buttons point to', () => {
     open('disabled', 'not_approved');
+    const words = 'Email from Sam is turned off. No approved call plan yet, so there is no preview either.';
     expect(screen.getByRole('button', { name: 'Write draft' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Write draft' })).toHaveAccessibleDescription(words);
     expect(screen.getByRole('button', { name: PRACTICE })).toBeDisabled();
-    expect(screen.getByText('No approved call plan yet')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: PRACTICE })).toHaveAccessibleDescription(words);
     expect(screen.queryByText(PREVIEW_WORDS)).not.toBeInTheDocument();
   });
 
