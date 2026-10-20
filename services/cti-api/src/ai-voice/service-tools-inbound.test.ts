@@ -12,6 +12,8 @@ import { CALL_SID, fakeStore, fakeTwilio, silentLog, type FakeStore, type FakeTw
 const ID = '11111111-2222-4333-8444-555555555555';
 const CALLER = '+16195550142';
 const UNKNOWN_TOOL = '{"error":"unknown tool"}';
+/** An inbound call never carries one; given one anyway, book_priority_appointment is still refused. */
+const GRANT = { specialistSfUserId: '0058X00000Fsx39QAB', specialistFirstName: 'Grant', timeZone: 'America/Los_Angeles', defaultStart: '2030-01-07T17:00:00.000Z' };
 
 let store: FakeStore;
 let twilio: FakeTwilio;
@@ -23,7 +25,7 @@ beforeEach(async () => {
   store = fakeStore();
   twilio = fakeTwilio();
   await store.insert({ id: ID, orgId: 'o1', startedBy: 'u1', toE164: CALLER, status: 'in_progress', callSid: CALL_SID, isTest: true, direction: 'inbound' });
-  const base = { store, aiCallId: ID, orgId: 'o1', toE164: CALLER, log: silentLog, now: () => new Date(), slots: [], isTest: true };
+  const base = { store, aiCallId: ID, orgId: 'o1', toE164: CALLER, log: silentLog, now: () => new Date(), slots: [], priority: null, consultations: null, isTest: true };
   inbound = { ...base, direction: 'inbound' };
   outbound = base;
   call = {
@@ -55,9 +57,14 @@ describe('INBOUND_TOOLS', () => {
       'schedule_callback',
       'wait_for_user',
     ]);
-    expect(toolsFor([])).toBe(AI_CALL_TOOLS);
-    expect(toolsFor([{ id: 'p1' } as never]).map((t) => t.name)).toEqual([...AI_CALL_TOOLS.map((t) => t.name), 'book_appointment']);
-    expect([...OUTBOUND_TOOL_NAMES]).toEqual(['transfer_to_rep', 'end_call', 'mark_do_not_call', 'save_qualification', 'schedule_callback', 'book_appointment']);
+    expect(toolsFor({ slots: [], priority: null, alreadyBooked: false })).toBe(AI_CALL_TOOLS);
+    expect(toolsFor({ slots: [{ id: 'p1' } as never], priority: null, alreadyBooked: false }).map((t) => t.name)).toEqual([
+      ...AI_CALL_TOOLS.map((t) => t.name),
+      'book_appointment',
+    ]);
+    expect([...OUTBOUND_TOOL_NAMES]).toEqual([
+      'transfer_to_rep', 'end_call', 'mark_do_not_call', 'save_qualification', 'schedule_callback', 'book_appointment', 'book_priority_appointment',
+    ]);
   });
 
   it('save_caller_details is not a tool any call is offered, and not a tool name the call service knows', () => {
@@ -93,10 +100,11 @@ describe('save_caller_details, should the model still send it', () => {
 });
 
 describe('an inbound call is offered only its own tools', () => {
-  it.each(['transfer_to_rep', 'mark_do_not_call', 'save_qualification', 'schedule_callback', 'book_appointment'] as const)(
+  it.each(['transfer_to_rep', 'mark_do_not_call', 'save_qualification', 'schedule_callback', 'book_appointment', 'book_priority_appointment'] as const)(
     '%s is refused as an unknown tool, with no side effect',
     async (name) => {
-      expect(await run(inbound, name, { reason: 'interested', summary: 's', note: 'stop', motivation: 'm', when: 'now', slot_id: 'p1' })).toEqual({
+      const args = { reason: 'interested', summary: 's', note: 'stop', motivation: 'm', when: 'now', slot_id: 'p1', start: '2030-01-07T10:00', address_confirmed: true };
+      expect(await run({ ...inbound, priority: GRANT }, name, args)).toEqual({
         output: UNKNOWN_TOOL,
       });
       expect(call.claimClose).not.toHaveBeenCalled();

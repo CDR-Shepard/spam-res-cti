@@ -70,7 +70,13 @@ export const OPENER_DELAY_MS = 3000;
 /** End_call outcomes the goodbye guard never sends back: an opt-out must be written at once, and a hang-up has no one to say goodbye to. */
 const NEVER_SENT_BACK: ReadonlySet<string> = new Set(['do_not_call', 'wrong_number', 'hung_up']);
 /** Tools after which a sent-back end_call is stale: the call went somewhere else (end_call itself is handled apart). */
-const MOVES_PAST_AN_END: ReadonlySet<string> = new Set<ToolName>(['book_appointment', 'schedule_callback', 'mark_do_not_call', 'transfer_to_rep']);
+const MOVES_PAST_AN_END: ReadonlySet<string> = new Set<ToolName>([
+  'book_appointment',
+  'book_priority_appointment',
+  'schedule_callback',
+  'mark_do_not_call',
+  'transfer_to_rep',
+]);
 
 /** Default cap on waiting for the agent's last words before a hangup/transfer (stretched to the audio still queued: bridge-playback.ts). */
 export const PLAYBACK_DRAIN_MAX_MS = 8000;

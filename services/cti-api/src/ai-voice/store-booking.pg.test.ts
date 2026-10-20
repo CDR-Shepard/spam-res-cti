@@ -189,6 +189,46 @@ describe.skipIf(!server)('ai_calls appointment booking (real Postgres)', () => {
     expect(await run(await call(), booked(t, 15))).toBe('booked');
   });
 
+  describe('routing step 1: high priority (slot h1)', () => {
+    const urgent = (start: string): BookedAppointment => ({
+      ...booked(start, 60), slotId: 'h1', kind: 'walkthrough', addressConfirmed: true, note: 'Urgent: Auction on Friday.', priority: true,
+    });
+
+    it('books over another real call\'s standing booking with the same rep, and then holds that time like any booking', async () => {
+      const t = '2030-04-01T17:00:00.000Z';
+      expect(await run(await call(), booked(t, 60))).toBe('booked');
+      expect(await run(await call(), urgent(t))).toBe('booked');
+      expect(await run(await call(), urgent(t))).toBe('booked');
+      expect(await run(await call(), booked('2030-04-01T17:30:00.000Z', 15))).toBe('taken');
+    });
+
+    it('never books on a call that already ended', async () => {
+      const id = await call({ ended: true });
+      expect(await run(id, urgent('2030-04-02T17:00:00.000Z'))).toBe('not_live');
+      expect(await appointmentOf(id)).toBeNull();
+    });
+
+    it('still waits for the rep\'s booking lock', async () => {
+      const id = await call();
+      const holder = await pool.connect();
+      try {
+        await holder.query('begin');
+        await holder.query("select pg_advisory_xact_lock(hashtextextended($1, 0))", [`ai_call_appointment:${OWNER.slice(0, 15)}`]);
+        let settled = false;
+        const booking = run(id, urgent('2030-04-03T17:00:00.000Z')).finally(() => {
+          settled = true;
+        });
+        await new Promise((r) => setTimeout(r, 300));
+        expect(settled).toBe(false);
+        await holder.query('commit');
+        expect(await booking).toBe('booked');
+      } finally {
+        holder.release();
+      }
+      expect(await appointmentOf(id)).toMatchObject({ slotId: 'h1', priority: true });
+    });
+  });
+
   it('an ended call books nothing', async () => {
     const id = await call({ ended: true });
     expect(await run(id, booked('2030-01-13T18:00:00.000Z', 15))).toBe('not_live');

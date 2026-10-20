@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { AppointmentSlot } from '@cti/contracts';
+import type { AppointmentSlot, PriorityOffer } from '@cti/contracts';
 import {
   AI_CALL_TOOLS,
   TOOL_NAMES,
@@ -9,7 +9,7 @@ import {
   type PromptInput,
   type RealtimeFunctionTool,
 } from './prompt.js';
-import { END_CALL_OUTCOMES, OUTBOUND_TOOL_NAMES } from './prompt-tools.js';
+import { END_CALL_OUTCOMES, OUTBOUND_TOOL_NAMES, bookPriorityAppointmentTool, type BookingTools } from './prompt-tools.js';
 
 const FENCE_OPEN = '<crm_notes>';
 const FENCE_CLOSE = '</crm_notes>';
@@ -39,6 +39,11 @@ const SLOTS: AppointmentSlot[] = [
     specialistSfUserId: '0058X00000Fsx39QAB', specialistFirstName: 'Grant', timeZone: 'America/Los_Angeles',
   },
 ];
+
+const GRANT: PriorityOffer = {
+  specialistSfUserId: '0058X00000Fsx39QAB', specialistFirstName: 'Grant', timeZone: 'America/Los_Angeles', defaultStart: '2026-10-20T16:00:00.000Z',
+};
+const booking = (over: Partial<BookingTools> = {}): BookingTools => ({ slots: [], priority: null, alreadyBooked: false, ...over });
 
 function fenced(text: string): string {
   const open = text.indexOf(FENCE_OPEN);
@@ -191,11 +196,13 @@ describe('buildInstructions', () => {
     expect(text).toMatch(/vary these, don't repeat them verbatim/i);
   });
 
+  // book_priority_appointment is not named yet: the instructions learn about high priority in routing step 1 Task 11.
   it('names every tool so the model knows when to call it (book_appointment only with slots)', () => {
+    const named = OUTBOUND_TOOL_NAMES.filter((n) => n !== 'book_priority_appointment');
     const text = buildInstructions(input({ slots: SLOTS }));
-    for (const name of OUTBOUND_TOOL_NAMES) expect(text).toContain(name);
+    for (const name of named) expect(text).toContain(name);
     const plain = buildInstructions(input());
-    for (const name of OUTBOUND_TOOL_NAMES.filter((n) => n !== 'book_appointment')) expect(plain).toContain(name);
+    for (const name of named.filter((n) => n !== 'book_appointment')) expect(plain).toContain(name);
   });
 
   it("states the recipient's local time", () => {
@@ -381,52 +388,134 @@ describe('natural turn-taking rules (2026-10-09)', () => {
 });
 
 describe('AI_CALL_TOOLS', () => {
-  it('has the outbound TOOL_NAMES in order, all but book_appointment (offered only with slots), then wait_for_user', () => {
-    const base = OUTBOUND_TOOL_NAMES.filter((n) => n !== 'book_appointment');
+  it('has the outbound TOOL_NAMES in order, all but the booking tools (offered only with times or a priority offer), then wait_for_user', () => {
+    const base = OUTBOUND_TOOL_NAMES.filter((n) => n !== 'book_appointment' && n !== 'book_priority_appointment');
     expect(AI_CALL_TOOLS.map((t) => t.name)).toEqual([...base, 'wait_for_user']);
-    expect(toolsFor(SLOTS).map((t) => t.name)).toEqual([...base, 'wait_for_user', 'book_appointment']);
+    expect(toolsFor(booking({ slots: SLOTS })).map((t) => t.name)).toEqual([...base, 'wait_for_user', 'book_appointment']);
+    expect(toolsFor(booking({ slots: SLOTS, priority: GRANT })).map((t) => t.name)).toEqual([
+      ...base, 'wait_for_user', 'book_appointment', 'book_priority_appointment',
+    ]);
   });
 
   it('offers wait_for_user on every call, with no parameters', () => {
     const t = AI_CALL_TOOLS.find((x) => x.name === 'wait_for_user');
     expect(t?.parameters).toEqual({ type: 'object', properties: {}, additionalProperties: false });
-    expect(toolsFor([]).some((x) => x.name === 'wait_for_user')).toBe(true);
-    expect(toolsFor(SLOTS).some((x) => x.name === 'wait_for_user')).toBe(true);
+    expect(toolsFor(booking()).some((x) => x.name === 'wait_for_user')).toBe(true);
+    expect(toolsFor(booking({ slots: SLOTS })).some((x) => x.name === 'wait_for_user')).toBe(true);
   });
 
   it('wait_for_user is answered by the bridge, so it is not a call-service tool name', () => {
     expect((TOOL_NAMES as readonly string[]).includes('wait_for_user')).toBe(false);
   });
 
-  it('toolsFor without slots is exactly AI_CALL_TOOLS', () => {
-    expect(toolsFor([])).toEqual(AI_CALL_TOOLS);
+  it('toolsFor with nothing to book or confirm is exactly AI_CALL_TOOLS (the same object)', () => {
+    expect(toolsFor(booking())).toBe(AI_CALL_TOOLS);
   });
 
-  it('toolsFor with slots: book_appointment takes one listed slot id, address_confirmed and note, all required, closed', () => {
-    const tools = toolsFor(SLOTS);
+  it('toolsFor with slots: book_appointment takes one listed slot id, address_confirmed, what_changed and note, all required, closed', () => {
+    const tools = toolsFor(booking({ slots: SLOTS }));
     const book = tools.find((t) => t.name === 'book_appointment')!;
     expect(book.type).toBe('function');
     expect(book.description.length).toBeGreaterThan(20);
     expect(book.parameters).toMatchObject({
       type: 'object',
-      required: ['slot_id', 'address_confirmed', 'note'],
+      required: ['slot_id', 'address_confirmed', 'what_changed', 'note'],
       additionalProperties: false,
-      properties: { slot_id: { type: 'string', enum: ['p1', 'w1'] }, address_confirmed: { type: 'boolean' }, note: { type: 'string' } },
+      properties: {
+        slot_id: { type: 'string', enum: ['p1', 'w1'] },
+        address_confirmed: { type: 'boolean' },
+        what_changed: { type: 'string', description: 'What has changed since their earlier consultation, in their words; empty when they had none.' },
+        note: { type: 'string' },
+      },
     });
     const end = tools.find((t) => t.name === 'end_call')!.parameters as { properties: Record<string, { enum?: string[] }> };
     expect(end.properties.outcome?.enum).toEqual(['not_interested', 'do_not_call', 'wrong_number', 'qualified_callback', 'hung_up', 'other', 'appointment_set']);
   });
 
-  // Task 9: end_call ACCEPTS already_booked; Task 10's toolsFor decides when it is OFFERED. Until then no call is offered it.
-  it('end_call accepts already_booked but does not offer it: not on a call without slots, not on one with slots', () => {
-    expect([...END_CALL_OUTCOMES]).toContain('already_booked');
-    const offered = (tools: RealtimeFunctionTool[]) =>
-      (tools.find((t) => t.name === 'end_call')!.parameters as { properties: Record<string, { enum?: string[] }> }).properties.outcome?.enum;
-    expect(offered(AI_CALL_TOOLS)).not.toContain('already_booked');
-    expect(offered(toolsFor(SLOTS))).not.toContain('already_booked');
-    expect(offered(toolsFor(SLOTS))).toContain('appointment_set');
-    // Everything offered is accepted (an offered outcome the parser dropped would end as 'other').
-    for (const outcome of [...(offered(AI_CALL_TOOLS) ?? []), ...(offered(toolsFor(SLOTS)) ?? [])]) expect([...END_CALL_OUTCOMES]).toContain(outcome);
+  it('book_priority_appointment: start, address_confirmed, reason, what_changed and note, all required, closed, described as written', () => {
+    const t = bookPriorityAppointmentTool();
+    expect(t).toEqual({
+      type: 'function',
+      name: 'book_priority_appointment',
+      description:
+        "Book a high-priority in-person consultation for a seller who wants to sell as soon as possible or has an urgent situation (a foreclosure, an auction date), at the time they ask for. Call silently after they confirm the property; then confirm the day and time in one line with your goodbye and end_call with outcome appointment_set. If it says the time doesn't work, offer one that does.",
+      parameters: {
+        type: 'object',
+        properties: {
+          start: { type: 'string', description: 'The agreed start as YYYY-MM-DDTHH:MM in Pacific time' },
+          address_confirmed: { type: 'boolean', description: expect.any(String) },
+          reason: { type: 'string', description: 'Why it is urgent, in their words' },
+          what_changed: { type: 'string', description: 'What has changed since their earlier consultation, in their words; empty when they had none.' },
+          note: { type: 'string', description: expect.any(String) },
+        },
+        required: ['start', 'address_confirmed', 'reason', 'what_changed', 'note'],
+        additionalProperties: false,
+      },
+    });
+    expect(toolsFor(booking({ priority: GRANT })).at(-1)).toEqual(t);
+  });
+
+  describe('toolsFor gates the booking tools and the end_call outcomes (routing step 1)', () => {
+    const BASE = ['not_interested', 'do_not_call', 'wrong_number', 'qualified_callback', 'hung_up', 'other'];
+    const BASE_WORDS = 'qualified_callback = a callback was scheduled; hung_up = they left or the line went dead.';
+    const ALREADY_WORDS = ' already_booked = they already had a consultation booked and you confirmed it.';
+    const names = (tools: RealtimeFunctionTool[]) => tools.map((t) => t.name);
+    const endCall = (tools: RealtimeFunctionTool[]) => tools.find((t) => t.name === 'end_call')!;
+    const outcome = (tools: RealtimeFunctionTool[]) =>
+      (endCall(tools).parameters as { properties: Record<string, { enum: string[]; description: string }> }).properties.outcome!;
+
+    it('slots only: book_appointment; end_call offers appointment_set but not already_booked', () => {
+      const tools = toolsFor(booking({ slots: SLOTS }));
+      expect(names(tools)).toEqual([...names(AI_CALL_TOOLS), 'book_appointment']);
+      expect(outcome(tools).enum).toEqual([...BASE, 'appointment_set']);
+    });
+
+    it('a priority offer and no slots: book_priority_appointment and appointment_set, no book_appointment', () => {
+      const tools = toolsFor(booking({ priority: GRANT }));
+      expect(names(tools)).toEqual([...names(AI_CALL_TOOLS), 'book_priority_appointment']);
+      expect(outcome(tools).enum).toEqual([...BASE, 'appointment_set']);
+    });
+
+    it('already booked, with no slots and no priority offer: end_call offers already_booked, and there is no booking tool', () => {
+      const tools = toolsFor(booking({ alreadyBooked: true }));
+      expect(names(tools)).toEqual(names(AI_CALL_TOOLS));
+      expect(outcome(tools).enum).toEqual([...BASE, 'already_booked']);
+    });
+
+    it('everything at once: both booking tools, and end_call offers appointment_set, then already_booked', () => {
+      const tools = toolsFor(booking({ slots: SLOTS, priority: GRANT, alreadyBooked: true }));
+      expect(names(tools)).toEqual([...names(AI_CALL_TOOLS), 'book_appointment', 'book_priority_appointment']);
+      expect(outcome(tools).enum).toEqual([...BASE, 'appointment_set', 'already_booked']);
+    });
+
+    it('only end_call changes: every other base tool is the same object', () => {
+      const tools = toolsFor(booking({ slots: SLOTS, priority: GRANT, alreadyBooked: true }));
+      for (const base of AI_CALL_TOOLS.filter((t) => t.name !== 'end_call')) expect(tools.find((t) => t.name === base.name)).toBe(base);
+    });
+
+    it('everything offered is accepted (an offered outcome the parser dropped would end as other)', () => {
+      for (const slots of [[], SLOTS]) {
+        for (const priority of [null, GRANT]) {
+          for (const alreadyBooked of [false, true]) {
+            for (const o of outcome(toolsFor({ slots, priority, alreadyBooked })).enum) expect([...END_CALL_OUTCOMES]).toContain(o);
+          }
+        }
+      }
+    });
+
+    it("end_call's words: today's, byte for byte, unless already_booked is offered; appointment_set names the tool that books", () => {
+      expect(endCall(toolsFor(booking({ slots: SLOTS }))).description).toBe(endCall(AI_CALL_TOOLS).description);
+      expect(outcome(AI_CALL_TOOLS).description).toBe(BASE_WORDS);
+      expect(outcome(toolsFor(booking({ slots: SLOTS }))).description).toBe(`${BASE_WORDS} appointment_set = book_appointment booked a time.`);
+      expect(outcome(toolsFor(booking({ priority: GRANT }))).description).toBe(`${BASE_WORDS} appointment_set = book_priority_appointment booked a time.`);
+      expect(outcome(toolsFor(booking({ slots: SLOTS, priority: GRANT }))).description).toBe(
+        `${BASE_WORDS} appointment_set = book_appointment or book_priority_appointment booked a time.`,
+      );
+      expect(outcome(toolsFor(booking({ alreadyBooked: true }))).description).toBe(`${BASE_WORDS}${ALREADY_WORDS}`);
+      expect(outcome(toolsFor(booking({ slots: SLOTS, alreadyBooked: true }))).description).toBe(
+        `${BASE_WORDS} appointment_set = book_appointment booked a time.${ALREADY_WORDS}`,
+      );
+    });
   });
 
   it('every tool is a strict function schema with a description', () => {

@@ -21,7 +21,7 @@
  * ends; finalize first fills its details and status in from the transcript
  * (service-finalize.ts, caller-details.ts).
  */
-import type { AiCallTurnStats, AppointmentSlot } from '@cti/contracts';
+import type { AiCallTurnStats } from '@cti/contracts';
 import { aiVoiceAvailable, type AppConfig } from '../config.js';
 import { UUID_RE, TWILIO_CALL_SID_RE } from '../telephony/webhooks.js';
 import { AiCallBridge, MIN_CALL_MS, type BridgeHooks, type BridgeLog, type BridgeOptions, type BridgeSocket, type EndReason } from './bridge.js';
@@ -30,8 +30,8 @@ import type { CallerDetailsDeps } from './caller-details.js';
 import { withExternalVoice, type OpenTts } from './external-voice.js';
 import { INBOUND_OPENER } from './bridge-session.js';
 import { sayGoodbyeWithNumber } from './bridge-tools.js';
-import { INBOUND_TOOLS, buildInboundInstructions, buildInstructions, toolsFor, type PromptInput } from './prompt.js';
-import { phoneForms, promptSlots } from './prompt-context.js';
+import { INBOUND_TOOLS, buildInboundInstructions, buildInstructions, toolsFor, type BookingTools, type PromptInput } from './prompt.js';
+import { phoneForms, promptPriority, promptSlots } from './prompt-context.js';
 import { logTemplateError } from './prompt-saved.js';
 import { claimClose, getActiveCall, updateActiveCall, type ActiveAiCall, type ActiveBridge } from './registry.js';
 import { localTimeFor } from './local-time.js';
@@ -176,7 +176,7 @@ async function onStart(socket: BridgeSocket, start: Msg, deps: StreamSessionDeps
  */
 function conversationFor(
   entry: ActiveAiCall,
-  slots: AppointmentSlot[],
+  booking: BookingTools,
   deps: StreamSessionDeps,
 ): Pick<BridgeOptions, 'instructions' | 'tools' | 'opener' | 'goodbyeBeforeEnd' | 'goodbyeNote'> {
   // Part 6 B: a practice call rings a test number but says the seller's local time (the record's phone; service.ts).
@@ -191,7 +191,7 @@ function conversationFor(
   }
   return {
     instructions: buildInstructions(prompt, logTemplateError(deps.log)),
-    tools: toolsFor(slots),
+    tools: toolsFor(booking),
     goodbyeBeforeEnd: true,
     goodbyeNote: sayGoodbyeWithNumber(phoneForms(prompt.callbackNumber)?.spoken ?? null),
   };
@@ -199,8 +199,10 @@ function conversationFor(
 
 function startBridge(socket: BridgeSocket, entry: ActiveAiCall & { callSid: string }, streamSid: string, deps: StreamSessionDeps): void {
   const { cfg } = deps;
-  // The times the prompt lists are exactly the ones the agent can name and book (Fix 1, M-2).
+  // The times the prompt lists are exactly the ones the agent can name and book (Fix 1, M-2); the priority offer likewise.
   const slots = promptSlots(entry.prompt.slots, entry.prompt.address);
+  const priority = promptPriority(entry.prompt.priority, entry.prompt.address);
+  const consultations = entry.prompt.consultations ?? null;
   const realtime = deps.openRealtime(realtimeUrl(cfg.AI_VOICE_MODEL), cfg.OPENAI_API_KEY ?? '');
   const openai = deps.openTts ? withExternalVoice(realtime, deps.openTts, deps.log) : realtime;
   const transcript = new TranscriptBuffer((lines) => deps.store.appendTranscript(entry.aiCallId, lines), { log: deps.log });
@@ -216,6 +218,8 @@ function startBridge(socket: BridgeSocket, entry: ActiveAiCall & { callSid: stri
           log: deps.log,
           now: deps.now,
           slots,
+          priority,
+          consultations,
           isTest: entry.isTest,
           ...(entry.direction === 'inbound' ? { direction: 'inbound' as const } : {}),
           ...(entry.localTimeE164 ? { zoneE164: entry.localTimeE164 } : {}),
@@ -240,7 +244,7 @@ function startBridge(socket: BridgeSocket, entry: ActiveAiCall & { callSid: stri
       twilio: socket,
       openai,
       streamSid,
-      ...conversationFor(entry, slots, deps),
+      ...conversationFor(entry, { slots, priority, alreadyBooked: entry.prompt.consultations?.next != null }, deps),
       voice: cfg.AI_VOICE_VOICE,
       model: cfg.AI_VOICE_MODEL,
       reasoningEffort: cfg.AI_VOICE_REASONING,

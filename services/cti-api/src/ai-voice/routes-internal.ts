@@ -17,7 +17,8 @@
  * Plan 1D: a record target may carry `slots` (appointment times, structured, never plan text) and
  * `context.returning`; a `practice` target rings an admin's test number with a real record's plan and
  * context (service-target.ts). Plan 1E: a `practice_browser` target is the same practice call ringing the admin's
- * browser (`client:<clientIdentity>`). Every switch on the target kind below is explicit (D-2).
+ * browser (`client:<clientIdentity>`). Every switch on the target kind below is explicit (D-2). Routing step 1: those
+ * targets may also carry `priority` (the high-priority offer, possibly with no slots) and `context.consultations`.
  */
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import {
@@ -102,27 +103,34 @@ function targetKeys(body: Body): Pick<CallLookup, 'sfRecordId' | 'toE164' | 'kin
   }
 }
 
+type BookingExtras = Pick<StartInput, 'slots' | 'returning' | 'consultations' | 'priority'>;
+
+/** Plan 1D and routing step 1: what a record or practice target carries for booking (slots, the context, the priority offer). */
+function bookingExtras(t: Extract<Body['target'], { kind: 'record' | 'practice' | 'practice_browser' }>): BookingExtras {
+  return {
+    slots: t.slots,
+    returning: t.context?.returning ?? false,
+    consultations: t.context?.consultations ?? null,
+    priority: t.priority ?? null,
+  };
+}
+
 /**
- * The service's target, and the plan 1D extras (slots and the returning flag) for record and practice calls. Task 14: only a
- * record call carries the seller's conversation history (a practice call must not read a seller's emails aloud to an admin's phone).
+ * The service's target, and the booking extras for record and practice calls. Task 14: only a record call carries the seller's
+ * conversation history (a practice call must not read a seller's emails aloud to an admin's phone).
  */
-function startTarget(t: Body['target']): Pick<StartInput, 'target' | 'slots' | 'returning' | 'history'> {
+function startTarget(t: Body['target']): Pick<StartInput, 'target' | 'history'> & BookingExtras {
   switch (t.kind) {
     case 'record':
-      return { target: { objectType: t.objectType, recordId: t.recordId }, slots: t.slots, returning: t.context?.returning ?? false, history: t.history };
+      return { target: { objectType: t.objectType, recordId: t.recordId }, ...bookingExtras(t), history: t.history };
     case 'practice':
-      return {
-        target: { practice: { objectType: t.objectType, recordId: t.recordId, to: t.to } },
-        slots: t.slots,
-        returning: t.context?.returning ?? false,
-      };
+      return { target: { practice: { objectType: t.objectType, recordId: t.recordId, to: t.to } }, ...bookingExtras(t) };
     case 'test':
       return { target: { testTo: t.to } };
     case 'practice_browser':
       return {
         target: { practiceBrowser: { objectType: t.objectType, recordId: t.recordId, identity: t.clientIdentity } },
-        slots: t.slots,
-        returning: t.context?.returning ?? false,
+        ...bookingExtras(t),
       };
   }
 }

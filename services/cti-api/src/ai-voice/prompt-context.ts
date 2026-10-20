@@ -4,7 +4,7 @@
  * markup stripped, the spoken street, the property phrase and the callback
  * number in words. prompt-view.ts turns them into template values.
  */
-import { SLOT_ID, type AppointmentSlot } from '@cti/contracts';
+import { SLOT_ID, type AppointmentSlot, type PriorityOffer } from '@cti/contracts';
 import { approvedPlanText, neutraliseFences } from './prompt-plan.js';
 import type { PromptInput } from './prompt.js';
 
@@ -122,6 +122,12 @@ function isZone(tz: string | null | undefined): tz is string {
 /** The record's address flattened for speech (`#` said "unit"). */
 const spokenAddress = (address: string | null): string | null => oneLine(unitWord(address), ADDRESS_MAX);
 
+/** Does the record's address have a street to confirm with the seller (an in-person visit needs one)? */
+function hasStreet(address: string | null): boolean {
+  const spoken = spokenAddress(address);
+  return spoken !== null && placeOf(spoken).street !== null;
+}
+
 /**
  * Slots as the prompt renders them: a valid id and real times only, the first name flattened like any record value. The
  * stream session builds the book_appointment enum and the bookable list from this same list (Fix 1, M-2).
@@ -129,12 +135,21 @@ const spokenAddress = (address: string | null): string | null => oneLine(unitWor
  * here, so the prompt, the tool enum and the bookable list all lose them together. Phone slots are unaffected.
  */
 export function promptSlots(slots: readonly AppointmentSlot[] | undefined, address: string | null): AppointmentSlot[] {
-  const spoken = spokenAddress(address);
-  const hasStreet = spoken !== null && placeOf(spoken).street !== null;
+  const street = hasStreet(address);
   return (slots ?? [])
     .filter((s) => SLOT_ID.test(s.id) && Number.isFinite(Date.parse(s.start)) && Number.isFinite(Date.parse(s.end)) && isZone(s.timeZone))
-    .filter((s) => s.kind !== 'walkthrough' || hasStreet)
+    .filter((s) => s.kind !== 'walkthrough' || street)
     .map((s) => ({ ...s, specialistFirstName: oneLine(s.specialistFirstName, FIRST_NAME_MAX) }));
+}
+
+/**
+ * The high-priority offer as the call uses it (routing step 1): it books an in-person visit, so without a street to confirm
+ * it is dropped (null), by the same rule as walkthrough slots, and the prompt, the tools and the booking all lose it
+ * together. The first name is flattened like a slot's.
+ */
+export function promptPriority(priority: PriorityOffer | undefined, address: string | null): PriorityOffer | null {
+  if (!priority || !hasStreet(address) || !Number.isFinite(Date.parse(priority.defaultStart)) || !isZone(priority.timeZone)) return null;
+  return { ...priority, specialistFirstName: oneLine(priority.specialistFirstName, FIRST_NAME_MAX) };
 }
 
 export function context(p: PromptInput): Ctx {

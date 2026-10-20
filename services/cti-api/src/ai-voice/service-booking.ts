@@ -6,15 +6,38 @@
  * practice call's booking is never written anywhere else). A time another AI call already holds with the same owner is
  * refused atomically (D-10, store-booking.ts) and the agent is told to offer another. Every other failure is bookkeeping:
  * logged, never thrown, and the agent falls back to a callback.
+ *
+ * Routing step 1: `book_priority_appointment` books a high-priority in-person consultation with the call's priority rep
+ * (`ctx.priority`) at the time the seller asks for, within PRIORITY_RULES; D-10 does not apply to it. Either booking
+ * carries the seller's earlier consultation (`ctx.consultations.last`) and what they say changed since. Logs carry ids,
+ * slot ids and codes only: never the reason, what changed, the note, or an address.
  */
-import { BookedAppointment, type AppointmentSlot } from '@cti/contracts';
+import {
+  BookedAppointment,
+  CONSULTATION_MINUTES,
+  PRIORITY_RULES,
+  PRIORITY_SLOT_ID,
+  ROUTING_ZONE,
+  type AppointmentSlot,
+  type ConsultationFact,
+  type PriorityOffer,
+} from '@cti/contracts';
 import type { ToolResult } from './bridge.js';
+import { wallTimeToDate } from './local-time.js';
 import type { ToolCtx, ToolEnv } from './service-tools.js';
 
 export const WALKTHROUGH_NEEDS_ADDRESS =
   'Confirm the property address with them first (is it the house we are calling about?), then call book_appointment again with address_confirmed true.';
 export const SLOT_TAKEN =
   'That time was just taken by someone else — nothing was booked. Apologise briefly and offer them the other time you mentioned, or another time from the list.';
+export const PRIORITY_UNAVAILABLE = "High-priority booking isn't available on this call — nothing was booked. Offer the listed times or a callback.";
+export const PRIORITY_NEEDS_ADDRESS =
+  'Confirm the property address with them first, then call book_priority_appointment again with address_confirmed true.';
+export const PRIORITY_BAD_TIME =
+  "That time couldn't be read — nothing was booked. Use the date and a time on the quarter hour, in Pacific time, like 2026-10-21T14:00.";
+export const PRIORITY_TOO_SOON = "That's less than two hours away — nothing was booked. Offer a time at least two hours from now.";
+export const PRIORITY_OUTSIDE_HOURS =
+  'The visit has to start at 8 AM or later and finish by 8 PM (latest start 7 PM), any day — nothing was booked. Offer a time in that range.';
 const NOT_LISTED = 'That time is not on your list. Offer one of the listed times.';
 const PASSED = 'That time has already passed (or is only minutes away) — nothing was booked. Offer a later time from the list.';
 /** A slot starting sooner than this is refused as passed (final review m2): nobody can be ready for it. */
@@ -25,15 +48,29 @@ const BOOKED =
   'booked — confirm the day and time in one line with your goodbye, then end_call with outcome appointment_set';
 const FAILED = 'booking failed — offer to have the specialist call them back instead (schedule_callback)';
 const NOTE_MAX = 300;
+const WHAT_CHANGED_MAX = 300;
+/** A high-priority start exactly as the tool asks for it: a Pacific wall-clock time, no seconds, no zone. */
+const LOCAL_START = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/;
+const MINUTE_MS = 60_000;
 /** The summary line a booking leaves (summary.ts carries it through rewrites). */
 export const BOOKED_LINE_PREFIX = 'Appointment booked:';
+const KIND_WORDS = { phone: 'phone consultation', walkthrough: 'in-person consultation' } as const;
+const PRIORITY_WORDS = 'high-priority in-person consultation';
 
 const errText = (e: unknown): string => (e instanceof Error ? e.message : String(e));
 const field = (args: unknown, key: string): unknown =>
   args !== null && typeof args === 'object' ? (args as Record<string, unknown>)[key] : undefined;
+const trimmed = (v: unknown, max: number): string => (typeof v === 'string' ? v.trim().slice(0, max) : '');
+const flat = (v: unknown): string => (typeof v === 'string' ? v.replace(/\s+/g, ' ').trim() : '');
 
-function bookingFor(slot: AppointmentSlot, args: unknown, now: Date): BookedAppointment {
-  const note = field(args, 'note');
+/** What either booking carries about the seller's earlier consultation: what changed (left out when empty) and that consultation. */
+function followUp(args: unknown, ctx: ToolCtx): { whatChanged?: string; previousConsultation?: ConsultationFact } {
+  const whatChanged = trimmed(field(args, 'what_changed'), WHAT_CHANGED_MAX);
+  const previous = ctx.consultations?.last ?? null;
+  return { ...(whatChanged ? { whatChanged } : {}), ...(previous !== null ? { previousConsultation: previous } : {}) };
+}
+
+function bookingFor(slot: AppointmentSlot, args: unknown, ctx: ToolCtx): BookedAppointment {
   return BookedAppointment.parse({
     slotId: slot.id,
     kind: slot.kind,
@@ -41,11 +78,13 @@ function bookingFor(slot: AppointmentSlot, args: unknown, now: Date): BookedAppo
     end: slot.end,
     specialistSfUserId: slot.specialistSfUserId,
     addressConfirmed: field(args, 'address_confirmed') === true,
-    note: typeof note === 'string' ? note.trim().slice(0, NOTE_MAX) : '',
-    bookedAt: now.toISOString(),
+    note: trimmed(field(args, 'note'), NOTE_MAX),
+    bookedAt: ctx.now().toISOString(),
     // Fix 1 I-3: the time the slot blocks (its buffer included), for the D-10 check and outreach-api's next offer.
     ...(slot.blockStart !== undefined ? { blockStart: slot.blockStart } : {}),
     ...(slot.blockEnd !== undefined ? { blockEnd: slot.blockEnd } : {}),
+    ...(slot.region !== undefined ? { region: slot.region } : {}),
+    ...followUp(args, ctx),
   });
 }
 
@@ -64,13 +103,22 @@ export function ptWords(at: Date): string {
  * summary only ever names the time that is booked.
  */
 async function noteBooking(ctx: ToolCtx, booked: BookedAppointment): Promise<void> {
-  const line = `${BOOKED_LINE_PREFIX} ${booked.kind === 'phone' ? 'phone call' : 'walkthrough'} ${ptWords(new Date(booked.start))}`;
+  const line = bookedLine(ctx, booked);
   const lines = (await ctx.store.get(ctx.aiCallId))?.summary?.split('\n') ?? [];
   if (lines.includes(line)) return;
   if (!lines.some((l) => l.startsWith(BOOKED_LINE_PREFIX))) return ctx.store.appendSummary(ctx.aiCallId, line);
   const kept = lines.filter((l) => !l.startsWith(BOOKED_LINE_PREFIX));
   const at = lines.findIndex((l) => l.startsWith(BOOKED_LINE_PREFIX));
   await ctx.store.update(ctx.aiCallId, { summary: [...kept.slice(0, at), line, ...kept.slice(at)].join('\n') });
+}
+
+/** "Appointment booked: in-person consultation with Blake Thu Oct 8, 9:00 AM PT": the rep is the slot's, or the priority rep. */
+function bookedLine(ctx: ToolCtx, booked: BookedAppointment): string {
+  const first = booked.priority
+    ? ctx.priority?.specialistFirstName
+    : ctx.slots.find((s) => s.id === booked.slotId)?.specialistFirstName;
+  const kind = booked.priority ? PRIORITY_WORDS : KIND_WORDS[booked.kind];
+  return `${BOOKED_LINE_PREFIX} ${kind}${first ? ` with ${first}` : ''} ${ptWords(new Date(booked.start))}`;
 }
 
 /** Logged, never thrown: the booking itself is stored, so the agent must still hear that it is booked. */
@@ -105,7 +153,7 @@ export async function bookAppointment(args: unknown, env: ToolEnv): Promise<Tool
   if (Date.parse(slot.start) <= ctx.now().getTime() + MIN_LEAD_MS) return { output: PASSED };
   if (slot.kind === 'walkthrough' && field(args, 'address_confirmed') !== true) return { output: WALKTHROUGH_NEEDS_ADDRESS };
   try {
-    const result = await effects.bookAppointment(ctx, bookingFor(slot, args, ctx.now()));
+    const result = await effects.bookAppointment(ctx, bookingFor(slot, args, ctx));
     if (result === 'taken') {
       ctx.log.info({ aiCallId: ctx.aiCallId, slotId: slot.id }, 'ai-voice: appointment time already taken');
       return { output: SLOT_TAKEN, then: 'continue' };
@@ -113,6 +161,73 @@ export async function bookAppointment(args: unknown, env: ToolEnv): Promise<Tool
     return { output: BOOKED, then: 'continue' };
   } catch (e) {
     ctx.log.error({ aiCallId: ctx.aiCallId, what: 'book_appointment', err: errText(e) }, 'ai-voice: call bookkeeping failed');
+    return { output: FAILED };
+  }
+}
+
+/** "Urgent: <reason>. <note>", one line of at most 300 characters (no second full stop when the reason ends a sentence). */
+function urgentNote(args: unknown): string {
+  const reason = flat(field(args, 'reason'));
+  const head = reason ? `Urgent: ${reason}` : 'Urgent';
+  const sentence = /[.!?]$/.test(head) ? head : `${head}.`;
+  const note = flat(field(args, 'note'));
+  return (note ? `${sentence} ${note}` : sentence).slice(0, NOTE_MAX).trim();
+}
+
+/** The start's minutes after local midnight, from its wall-clock "HH:MM" (Pacific: PRIORITY_RULES' hours are wall-clock). */
+const wallMinutes = (local: string): number => Number(local.slice(11, 13)) * 60 + Number(local.slice(14, 16));
+
+/** The checks, in order: the refusal Sam hears with its log code, or the start as an instant and the priority rep. */
+function priorityStart(args: unknown, ctx: ToolCtx): { refusal: string; code: string } | { start: Date; rep: PriorityOffer } {
+  const rep = ctx.priority;
+  if (rep === null) return { refusal: PRIORITY_UNAVAILABLE, code: 'unavailable' };
+  if (field(args, 'address_confirmed') !== true) return { refusal: PRIORITY_NEEDS_ADDRESS, code: 'needs_address' };
+  const local = field(args, 'start');
+  const start = typeof local === 'string' && LOCAL_START.test(local) ? wallTimeToDate(local, ROUTING_ZONE) : null;
+  if (typeof local !== 'string' || start === null || wallMinutes(local) % PRIORITY_RULES.stepMinutes !== 0) {
+    return { refusal: PRIORITY_BAD_TIME, code: 'bad_time' };
+  }
+  if (start.getTime() < ctx.now().getTime() + PRIORITY_RULES.minLeadMinutes * MINUTE_MS) return { refusal: PRIORITY_TOO_SOON, code: 'too_soon' };
+  const from = wallMinutes(local);
+  if (from < PRIORITY_RULES.firstStartHour * 60 || from + CONSULTATION_MINUTES > PRIORITY_RULES.endByHour * 60) {
+    return { refusal: PRIORITY_OUTSIDE_HOURS, code: 'outside_hours' };
+  }
+  return { start, rep };
+}
+
+/** The high-priority booking: slot h1, in person with the address confirmed, an hour with the priority rep. */
+function priorityBookingFor(start: Date, rep: PriorityOffer, args: unknown, ctx: ToolCtx): BookedAppointment {
+  return BookedAppointment.parse({
+    slotId: PRIORITY_SLOT_ID,
+    kind: 'walkthrough',
+    start: start.toISOString(),
+    end: new Date(start.getTime() + CONSULTATION_MINUTES * MINUTE_MS).toISOString(),
+    specialistSfUserId: rep.specialistSfUserId,
+    addressConfirmed: true,
+    note: urgentNote(args),
+    bookedAt: ctx.now().toISOString(),
+    priority: true,
+    ...followUp(args, ctx),
+  });
+}
+
+export async function bookPriorityAppointment(args: unknown, env: ToolEnv): Promise<ToolResult> {
+  const { ctx, effects } = env;
+  const checked = priorityStart(args, ctx);
+  if ('refusal' in checked) {
+    ctx.log.info({ aiCallId: ctx.aiCallId, slotId: PRIORITY_SLOT_ID, refused: checked.code }, 'ai-voice: high-priority booking refused');
+    return { output: checked.refusal };
+  }
+  try {
+    const result = await effects.bookAppointment(ctx, priorityBookingFor(checked.start, checked.rep, args, ctx));
+    if (result === 'taken') {
+      // The store never refuses a high-priority time (D-10 is skipped for it); an effect that does is answered as a slot's.
+      ctx.log.info({ aiCallId: ctx.aiCallId, slotId: PRIORITY_SLOT_ID }, 'ai-voice: appointment time already taken');
+      return { output: SLOT_TAKEN, then: 'continue' };
+    }
+    return { output: BOOKED, then: 'continue' };
+  } catch (e) {
+    ctx.log.error({ aiCallId: ctx.aiCallId, what: 'book_priority_appointment', err: errText(e) }, 'ai-voice: call bookkeeping failed');
     return { output: FAILED };
   }
 }

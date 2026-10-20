@@ -3054,7 +3054,12 @@ describe('a silent end_call after the caller spoke (goodbyeBeforeEnd)', () => {
     expect(onTool.mock.calls.map((c) => c[0])).toEqual(['book_appointment']);
   });
 
-  it.each([['book_appointment', '{"slot_id":"s1","address_confirmed":true}'], ['schedule_callback', '{"when":"Thursday 6 PM"}'], ['mark_do_not_call', '{"note":"stop"}']])(
+  it.each([
+    ['book_appointment', '{"slot_id":"s1","address_confirmed":true}'],
+    ['book_priority_appointment', '{"start":"2030-01-07T10:00","address_confirmed":true}'],
+    ['schedule_callback', '{"when":"Thursday 6 PM"}'],
+    ['mark_do_not_call', '{"note":"stop"}'],
+  ])(
     'forgets a sent-back end_call once %s runs',
     async (tool, args) => {
       const onTool = vi.fn(async (name: string) => (name === 'end_call' ? { output: 'ending', then: 'hangup' as const } : { output: '{"ok":true}', then: 'continue' as const }));

@@ -22,7 +22,7 @@ let closing: boolean;
 let call: CallControl;
 
 const settle = () => new Promise((r) => setTimeout(r, 0));
-const ctxFor = (isTest: boolean): ToolCtx => ({ store, aiCallId: ID, orgId: ORG, toE164: TO, log: silentLog, now: () => NOW, slots: [], isTest });
+const ctxFor = (isTest: boolean): ToolCtx => ({ store, aiCallId: ID, orgId: ORG, toE164: TO, log: silentLog, now: () => NOW, slots: [], priority: null, consultations: null, isTest });
 const run = (isTest: boolean, name: Parameters<typeof handleToolCall>[0], args: unknown) =>
   handleToolCall(name, args, { ctx: ctxFor(isTest), effects: defaultToolEffects, call });
 

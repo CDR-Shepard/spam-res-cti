@@ -7,6 +7,7 @@
 import { INBOUND_STATUSES, bookingStands } from '@cti/contracts';
 import type { BridgeSocket } from './bridge.js';
 import type { ActiveAiCall } from './registry.js';
+import { checkPriorityPairing } from './store-booking.js';
 import type { AiCallRow, AiCallStore, NewAiCall, NewCtiCall, TranscriptEntry } from './store.js';
 import type { AiVoiceTwilio, FetchedCall } from './twilio.js';
 
@@ -136,10 +137,12 @@ export function fakeStore(): FakeStore {
       put(id, { qualification: { ...(r.qualification as object), ...fields }, ...(status && r.endedAt ? { outcome: status } : {}) });
     },
     async setAppointment(id, a) {
+      checkPriorityPairing(a);
       const r = rows.get(id);
       if (!r || r.endedAt) return 'not_live';
       const core = a.specialistSfUserId.slice(0, 15);
-      const taken = [...rows.values()].some((o) => {
+      // As store-booking.ts: a high-priority booking skips only the conflict check.
+      const taken = a.priority !== true && [...rows.values()].some((o) => {
         const b = o.appointment as { specialistSfUserId: string; start: string; end: string; blockStart?: string; blockEnd?: string } | null;
         return (
           o.id !== id && o.orgId === r.orgId && !o.isTest && b !== null && bookingStands(o) && b.specialistSfUserId.slice(0, 15) === core &&

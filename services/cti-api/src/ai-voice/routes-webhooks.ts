@@ -84,7 +84,7 @@ const refuse = (reply: FastifyReply, code: 400 | 403) => reply.code(code).type('
 
 function toolCtx(row: AiCallRow, deps: WebhookDeps): ToolCtx {
   // Webhooks never book an appointment (only the live conversation's tools do).
-  return { store: deps.store, aiCallId: row.id, orgId: row.orgId, toE164: row.toE164, log: deps.log, now: deps.now, slots: [], isTest: row.isTest };
+  return { store: deps.store, aiCallId: row.id, orgId: row.orgId, toE164: row.toE164, log: deps.log, now: deps.now, slots: [], priority: null, consultations: null, isTest: row.isTest };
 }
 
 async function hangUp(callSid: string, deps: WebhookDeps, aiCallId: string): Promise<void> {

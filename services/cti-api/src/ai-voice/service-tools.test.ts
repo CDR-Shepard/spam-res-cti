@@ -21,7 +21,7 @@ beforeEach(async () => {
   store = fakeStore();
   twilio = fakeTwilio();
   await store.insert({ id: ID, orgId: ORG, startedBy: 'u1', toE164: TO, status: 'in_progress', callSid: CALL_SID });
-  ctx = { store, aiCallId: ID, orgId: ORG, toE164: TO, log: silentLog, now: () => NOW, slots: [] };
+  ctx = { store, aiCallId: ID, orgId: ORG, toE164: TO, log: silentLog, now: () => NOW, slots: [], priority: null, consultations: null };
   closing = false;
   call = {
     callSid: CALL_SID,

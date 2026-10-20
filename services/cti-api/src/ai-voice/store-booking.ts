@@ -16,7 +16,7 @@
  * interested and so on frees it (the row keeps the appointment as a record of what was said).
  */
 import { and, eq, isNotNull, isNull, ne, sql, type SQL } from 'drizzle-orm';
-import { BOOKING_STANDS_OUTCOMES, BookedAppointment } from '@cti/contracts';
+import { BOOKING_STANDS_OUTCOMES, BookedAppointment, PRIORITY_SLOT_ID } from '@cti/contracts';
 import { getDb, schema } from '@cti/db';
 
 type Db = ReturnType<typeof getDb>;
@@ -79,12 +79,22 @@ export const setAppointmentQuery = (db: Conn, id: string, a: BookedAppointment) 
     .where(and(eq(t.id, id), isNull(t.endedAt)))
     .returning({ id: t.id });
 
-/** Book `a` for call `id`, atomically refusing a time another real call already holds with the same owner. */
+/** Only slot h1 is high priority, and it always is (the pairing BookedAppointment leaves to cti-api). */
+export function checkPriorityPairing(a: BookedAppointment): void {
+  if ((a.priority === true) !== (a.slotId === PRIORITY_SLOT_ID)) throw new RangeError('a high-priority booking is slot h1, and only it');
+}
+
+/**
+ * Book `a` for call `id`, atomically refusing a time another real call already holds with the same owner. A high-priority
+ * booking (routing step 1) is the time the seller asked for with the priority rep: it skips only that conflict read. It
+ * still takes the owner's lock (so a booking racing it sees it) and still writes only to a live row.
+ */
 export async function setAppointment(db: Db, id: string, a: BookedAppointment): Promise<SetAppointmentResult> {
   const booking = BookedAppointment.parse(a);
+  checkPriorityPairing(booking);
   return db.transaction(async (tx) => {
     await tx.execute(appointmentLockQuery(booking.specialistSfUserId));
-    if ((await appointmentConflictQuery(tx, id, booking)).length > 0) return 'taken';
+    if (booking.priority !== true && (await appointmentConflictQuery(tx, id, booking)).length > 0) return 'taken';
     return (await setAppointmentQuery(tx, id, booking)).length > 0 ? 'booked' : 'not_live';
   });
 }

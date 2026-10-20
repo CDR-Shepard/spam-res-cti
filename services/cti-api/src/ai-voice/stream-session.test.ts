@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AppConfig } from '../config.js';
 import type { BridgeHooks, BridgeOptions } from './bridge.js';
-import type { AiCallTurnStats, AppointmentSlot } from '@cti/contracts';
+import type { AiCallTurnStats, AppointmentSlot, PriorityOffer } from '@cti/contracts';
 import { AI_CALL_TOOLS, type RealtimeFunctionTool } from './prompt.js';
 import { SAY_GOODBYE_FIRST, sayGoodbyeWithNumber } from './bridge-tools.js';
 import { claimClose, clearActiveCalls, getActiveCall, registerActiveCall } from './registry.js';
@@ -457,6 +457,60 @@ describe('runStreamSession — appointment times (plan 1D)', () => {
     const res = await captured!.hooks.onTool('book_appointment', { slot_id: 'p1', address_confirmed: false, note: '' });
     expect(res.output).toMatch(/not on your list/);
     expect(store.rows.get(ID)?.appointment ?? null).toBeNull();
+  });
+});
+
+describe('runStreamSession — high priority and earlier consultations (routing step 1)', () => {
+  const ADDRESS = '1234 Oak St, Tampa, FL 33601';
+  const GRANT: PriorityOffer = {
+    specialistSfUserId: '0058X00000Fsx39QAB', specialistFirstName: 'Grant', timeZone: 'America/Los_Angeles', defaultStart: '2026-10-06T16:00:00.000Z',
+  };
+  const LAST = { start: '2026-03-12T17:00:00.000Z', kind: 'in_person', ownerName: 'Blake Kossuth' } as const;
+  const register = (prompt: Record<string, unknown>) => {
+    const base = activeEntry({ aiCallId: ID, callSid: CALL_SID });
+    registerActiveCall({ ...base, prompt: { ...base.prompt, sellerTimeZone: 'America/Los_Angeles', ...prompt } });
+  };
+  const names = () => (captured!.opts.tools as RealtimeFunctionTool[]).map((t) => t.name);
+  const outcomes = () =>
+    ((captured!.opts.tools as RealtimeFunctionTool[]).find((t) => t.name === 'end_call')!.parameters as { properties: { outcome: { enum: string[] } } })
+      .properties.outcome.enum;
+  const priorityArgs = { start: '2026-10-06T14:00', address_confirmed: true, reason: 'Auction', what_changed: 'They had a new offer.', note: '' };
+
+  it('a priority offer with no slots: book_priority_appointment and appointment_set are offered, and it books with Grant', async () => {
+    register({ address: ADDRESS, priority: GRANT, consultations: { last: LAST, next: null } });
+    expect(await begin()).toBe('started');
+    expect(names()).toContain('book_priority_appointment');
+    expect(names()).not.toContain('book_appointment');
+    expect(outcomes()).toContain('appointment_set');
+    expect(outcomes()).not.toContain('already_booked');
+    const res = await captured!.hooks.onTool('book_priority_appointment', priorityArgs);
+    expect(res.then).toBe('continue');
+    expect(store.rows.get(ID)?.appointment).toMatchObject({
+      slotId: 'h1', priority: true, specialistSfUserId: GRANT.specialistSfUserId, start: '2026-10-06T21:00:00.000Z', previousConsultation: LAST,
+    });
+  });
+
+  it('without a street the priority offer is dropped, like a walkthrough: no tool, and the hook books nothing', async () => {
+    register({ address: 'Tampa, FL', priority: GRANT });
+    await begin();
+    expect(captured!.opts.tools).toBe(AI_CALL_TOOLS);
+    const res = await captured!.hooks.onTool('book_priority_appointment', priorityArgs);
+    expect(res.output).toMatch(/isn't available on this call/);
+    expect(store.rows.get(ID)?.appointment ?? null).toBeNull();
+  });
+
+  it('an upcoming consultation offers already_booked, with no booking tool when there are no times or priority offer', async () => {
+    register({ address: ADDRESS, consultations: { last: null, next: LAST } });
+    await begin();
+    expect(outcomes()).toContain('already_booked');
+    expect(names()).not.toContain('book_appointment');
+    expect(names()).not.toContain('book_priority_appointment');
+  });
+
+  it('only an earlier consultation (no upcoming one): the tools are unchanged', async () => {
+    register({ address: ADDRESS, consultations: { last: LAST, next: null } });
+    await begin();
+    expect(captured!.opts.tools).toBe(AI_CALL_TOOLS);
   });
 });
 

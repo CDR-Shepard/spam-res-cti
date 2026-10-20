@@ -25,13 +25,32 @@
  * call (the details are filled in from the transcript afterwards) and to ignore the prompt's spoken-JSON ending. When
  * the caller's number is known, one more fixed line tells the agent what it is.
  */
-import { HISTORY_TEXT_MAX, neutraliseSellerText, type AgentPromptKind, type AppointmentSlot } from '@cti/contracts';
+import { HISTORY_TEXT_MAX, neutraliseSellerText, type AgentPromptKind, type AppointmentSlot, type Consultations, type PriorityOffer } from '@cti/contracts';
 import { phoneForms } from './prompt-context.js';
 import { PLAN_PROMPT_MAX, neutraliseFences } from './prompt-plan.js';
 import { DEFAULT_TEMPLATES, renderMaxChars, renderPrompt } from './prompt-template.js';
-import { AI_CALL_TOOLS, INBOUND_TOOLS, TOOL_NAMES, WAIT_FOR_USER, toolsFor, type RealtimeFunctionTool, type ToolName } from './prompt-tools.js';
+import {
+  AI_CALL_TOOLS,
+  INBOUND_TOOLS,
+  TOOL_NAMES,
+  WAIT_FOR_USER,
+  toolsFor,
+  type BookingTools,
+  type RealtimeFunctionTool,
+  type ToolName,
+} from './prompt-tools.js';
 
-export { AI_CALL_TOOLS, INBOUND_TOOLS, PLAN_PROMPT_MAX, TOOL_NAMES, WAIT_FOR_USER, toolsFor, type RealtimeFunctionTool, type ToolName };
+export {
+  AI_CALL_TOOLS,
+  INBOUND_TOOLS,
+  PLAN_PROMPT_MAX,
+  TOOL_NAMES,
+  WAIT_FOR_USER,
+  toolsFor,
+  type BookingTools,
+  type RealtimeFunctionTool,
+  type ToolName,
+};
 
 export interface PromptInput {
   agentName: string;
@@ -54,6 +73,10 @@ export interface PromptInput {
   slots?: readonly AppointmentSlot[];
   /** Plan 1D: the zone of the number dialed (`timezoneForNumber(to)`); slot times are said in it. */
   sellerTimeZone?: string | null;
+  /** Routing step 1: the seller's earlier and upcoming consultations; present only when one of them is known. */
+  consultations?: Consultations;
+  /** Routing step 1: the high-priority offer (Grant), which may come with no slots; the call drops it without a street. */
+  priority?: PriorityOffer;
   /** Inbound only (a test phone called the AI): the caller's E.164 number; absent/null = none. */
   callerNumber?: string | null;
   /** The org's saved templates; null (or absent) = the built-in default for that kind. */

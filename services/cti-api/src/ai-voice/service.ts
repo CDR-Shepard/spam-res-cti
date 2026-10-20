@@ -11,7 +11,7 @@
  * double click cannot ring someone twice.
  */
 import type { SessionUser } from '@cti/auth';
-import type { AppointmentSlot } from '@cti/contracts';
+import type { AppointmentSlot, Consultations, PriorityOffer } from '@cti/contracts';
 import { DAILY_CAP_WINDOW_MS, dailyDialCount, timezoneForNumber } from '@cti/firewall';
 import type { AppConfig } from '../config.js';
 import { blockedTargets } from '../dialer/consent-check.js';
@@ -20,7 +20,7 @@ import type { BridgeLog } from './bridge.js';
 import { gateAiCall, type AiGateBlock, type AiGateInput, type AiGateResult, type GateDeps } from './gate.js';
 import { localTimeFor } from './local-time.js';
 import { peekAiCallerId, pickAiDid } from './number-pool.js';
-import { voicemailText } from './prompt.js';
+import { voicemailText, type PromptInput } from './prompt.js';
 import { loadAgentPrompts, logTemplateError } from './prompt-saved.js';
 import { testPhoneNumbers } from './test-phones.js';
 import type { AiCallObject, AiCallRecord } from './record.js';
@@ -74,6 +74,10 @@ export interface StartInput {
   returning?: boolean;
   /** Task 14: what already happened with this seller (record calls only); the prompt fences it as data after the instructions. */
   history?: string;
+  /** Routing step 1: the high-priority offer (Grant), which may come with no slots; null or absent = none. */
+  priority?: PriorityOffer | null;
+  /** Routing step 1: the seller's earlier and upcoming consultations (the trigger's context); null or absent = none known. */
+  consultations?: Consultations | null;
   deps: StartDeps;
 }
 
@@ -117,18 +121,23 @@ async function companyName(i: StartInput): Promise<string> {
 /**
  * Plan 1D prompt fields, only when set, so a first call without slots has exactly the 1C prompt. Times are said in the
  * seller's zone: the number dialed, except for a practice call, which rings a test number but must sound exactly as the
- * seller would hear it, so it takes the record's phone (Fix 1, M-5), falling back to the dialed number.
+ * seller would hear it, so it takes the record's phone (Fix 1, M-5), falling back to the dialed number. Routing step 1: a
+ * priority offer brings the seller's zone too, even with no slots; consultations come only when one is known.
  */
 function bookingPrompt(
   i: StartInput,
   record: AiCallRecord | null,
   to: string,
-): { returning?: true; slots?: AppointmentSlot[]; sellerTimeZone?: string | null } {
+): Pick<PromptInput, 'returning' | 'slots' | 'sellerTimeZone' | 'priority' | 'consultations'> {
+  const slots = i.slots && i.slots.length > 0 ? i.slots : null;
+  const priority = i.priority ?? null;
+  const consultations = i.consultations && (i.consultations.last !== null || i.consultations.next !== null) ? i.consultations : null;
   return {
-    ...(i.returning ? { returning: true as const } : {}),
-    ...(i.slots && i.slots.length > 0
-      ? { slots: i.slots, sellerTimeZone: timezoneForNumber(sellerNumber(i, record, to))?.timezone ?? null }
-      : {}),
+    ...(i.returning ? { returning: true } : {}),
+    ...(slots ? { slots } : {}),
+    ...(priority ? { priority } : {}),
+    ...(slots || priority ? { sellerTimeZone: timezoneForNumber(sellerNumber(i, record, to))?.timezone ?? null } : {}),
+    ...(consultations ? { consultations } : {}),
   };
 }
 

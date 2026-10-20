@@ -378,6 +378,51 @@ describe('POST /internal/ai-calls', () => {
       expect(deps.start).not.toHaveBeenCalled();
     });
 
+    describe('routing step 1: the high-priority offer and consultation facts', () => {
+      const PRIORITY = {
+        specialistSfUserId: '0058X00000Fsx39QAB', specialistFirstName: 'Grant', timeZone: 'America/Los_Angeles', defaultStart: '2026-10-20T16:00:00.000Z',
+      };
+      const CONSULTATIONS = {
+        last: { start: '2026-03-12T17:00:00.000Z', kind: 'in_person', ownerName: 'Blake Kossuth' },
+        next: { start: '2026-10-22T18:00:00.000Z', kind: 'phone', ownerName: 'Seth Boisvert' },
+      };
+
+      it('a record target with priority and context.consultations reaches the start with both', async () => {
+        const res = await post(recordBody({}, { slots: [SLOT], priority: PRIORITY, context: { returning: true, consultations: CONSULTATIONS } }));
+        expect(res.json()).toEqual({ result: 'placed', aiCallId: CALL });
+        const input = startInput();
+        expect(input.priority).toEqual(PRIORITY);
+        expect(input.consultations).toEqual(CONSULTATIONS);
+        expect(input.slots).toEqual([SLOT]);
+        expect(input.returning).toBe(true);
+      });
+
+      it('a priority offer with no slots (the region\'s reps inactive) still reaches the start', async () => {
+        await post(recordBody({}, { priority: PRIORITY }));
+        expect(startInput().priority).toEqual(PRIORITY);
+        expect(startInput().slots).toBeUndefined();
+        expect(startInput().consultations).toBeNull();
+      });
+
+      it('without them the start gets null for both', async () => {
+        await post(recordBody({}, { context: { returning: false } }));
+        expect(startInput().priority).toBeNull();
+        expect(startInput().consultations).toBeNull();
+      });
+
+      it('a practice target carries them too', async () => {
+        await post(practiceBody({ priority: PRIORITY, context: { returning: false, consultations: CONSULTATIONS } }));
+        expect(startInput().priority).toEqual(PRIORITY);
+        expect(startInput().consultations).toEqual(CONSULTATIONS);
+      });
+
+      it('a test target carries neither (its contract has no priority)', async () => {
+        const res = await post({ ...recordBody(), target: { kind: 'test', to: '+15125550100', planText: null, priority: PRIORITY } });
+        expect(res.statusCode).toBe(400);
+        expect(deps.start).not.toHaveBeenCalled();
+      });
+    });
+
     it('a practice target starts a practice call on the real record, through the tenant integration', async () => {
       const res = await post(practiceBody({ slots: [SLOT], context: { returning: true } }));
       expect(res.json()).toEqual({ result: 'placed', aiCallId: CALL });

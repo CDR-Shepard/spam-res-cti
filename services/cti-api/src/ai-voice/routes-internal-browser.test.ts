@@ -188,6 +188,14 @@ describe('POST /internal/ai-calls — practice_browser (plan 1E Task 7)', () => 
     expect(deps.loadIntegrationRecord).toHaveBeenCalledWith(db, ORG, 'Lead', LEAD);
   });
 
+  it('routing step 1: a practice_browser trigger carries the high-priority offer and the consultation facts', async () => {
+    const priority = { specialistSfUserId: '0058X00000Fsx39QAB', specialistFirstName: 'Grant', timeZone: 'America/Los_Angeles', defaultStart: '2026-10-20T16:00:00.000Z' };
+    const consultations = { last: null, next: { start: '2026-10-22T18:00:00.000Z', kind: 'phone', ownerName: 'Seth Boisvert' } };
+    await post(INTERNAL_AI_CALLS_PATH, browserBody({ priority, context: { returning: false, consultations } }));
+    expect(startInput().priority).toEqual(priority);
+    expect(startInput().consultations).toEqual(consultations);
+  });
+
   it('13: the same key again answers the stored response and starts nothing; the same key with another identity is 409', async () => {
     await post(INTERNAL_AI_CALLS_PATH, browserBody());
     const again = await post(INTERNAL_AI_CALLS_PATH, browserBody());

@@ -3,7 +3,7 @@
  * the outcome; an appointment on a call that finished without one standing frees the time for the next call.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { AppointmentSlot } from '@cti/contracts';
+import type { AppointmentSlot, PriorityOffer } from '@cti/contracts';
 import { clearActiveCalls } from './registry.js';
 import { finalizeAiCall } from './service-finalize.js';
 import { defaultToolEffects, handleToolCall, type CallControl, type ToolCtx } from './service-tools.js';
@@ -26,8 +26,12 @@ let store: FakeStore;
 let log: { info: ReturnType<typeof vi.fn>; warn: ReturnType<typeof vi.fn>; error: ReturnType<typeof vi.fn> };
 let closed: boolean;
 
-const ctxFor = (id: string, slots: readonly AppointmentSlot[] = [P1, P2]): ToolCtx => ({
-  store, aiCallId: id, orgId: ORG, toE164: id === ID ? '+16195550100' : '+16195550111', log, now: () => NOW, slots,
+const GRANT: PriorityOffer = {
+  specialistSfUserId: OWNER, specialistFirstName: 'Grant', timeZone: 'America/Los_Angeles', defaultStart: '2026-10-07T16:00:00.000Z',
+};
+
+const ctxFor = (id: string, slots: readonly AppointmentSlot[] = [P1, P2], priority: PriorityOffer | null = null): ToolCtx => ({
+  store, aiCallId: id, orgId: ORG, toE164: id === ID ? '+16195550100' : '+16195550111', log, now: () => NOW, slots, priority, consultations: null,
 });
 const callControl = (): CallControl => ({
   callSid: CALL_SID,
@@ -91,6 +95,21 @@ describe('I-1: the outcome of a booked call', () => {
     expect(row().outcome).toBe('appointment_set');
   });
 
+  it('booked high priority on a call with no slots, then the line goes quiet (end_call hung_up): appointment_set', async () => {
+    const env = () => ({ ctx: ctxFor(ID, [], GRANT), effects: defaultToolEffects, call: callControl() });
+    const booked = await handleToolCall('book_priority_appointment', { start: '2026-10-07T10:00', address_confirmed: true, reason: 'Auction', what_changed: '', note: '' }, env());
+    expect(booked.output).toMatch(/^booked/);
+    await handleToolCall('end_call', { outcome: 'hung_up', summary: 'Line went quiet.' }, env());
+    await hangUp();
+    expect(row()).toMatchObject({ outcome: 'appointment_set', appointment: { slotId: 'h1', priority: true } });
+  });
+
+  it('hung_up on a call with no slots and no priority offer stays hung_up, whatever the row holds', async () => {
+    await store.update(ID, { appointment: { slotId: 'p1' } } as never);
+    await handleToolCall('end_call', { outcome: 'hung_up', summary: 'Line went quiet.' }, { ctx: ctxFor(ID, []), effects: defaultToolEffects, call: callControl() });
+    expect(row().outcome).toBe('hung_up');
+  });
+
   it('hung_up without a booking stays hung_up', async () => {
     await tool('end_call', { outcome: 'hung_up', summary: 'Line went quiet.' });
     expect(row().outcome).toBe('hung_up');
@@ -149,13 +168,13 @@ describe('M-3: the "Appointment booked" summary line', () => {
   it('an identical replay adds no second line', async () => {
     await bookP1();
     await bookP1();
-    expect(row().summary).toBe('Appointment booked: phone call Wed Oct 7, 11:00 AM PT');
+    expect(row().summary).toBe('Appointment booked: phone consultation with Grant Wed Oct 7, 11:00 AM PT');
   });
 
   it('a rebook replaces the earlier line and keeps every other line', async () => {
     await tool('schedule_callback', { when: 'Thursday after 5 PM', note: '' });
     await bookP1();
     await tool('book_appointment', { slot_id: 'p2', address_confirmed: false, note: '' });
-    expect(row().summary).toBe('Callback requested: Thursday after 5 PM\nAppointment booked: phone call Wed Oct 7, 2:00 PM PT');
+    expect(row().summary).toBe('Callback requested: Thursday after 5 PM\nAppointment booked: phone consultation with Grant Wed Oct 7, 2:00 PM PT');
   });
 });

@@ -23,13 +23,21 @@
  * outbound call everything else. Any other name is refused as an unknown
  * tool, whatever the model sends.
  */
-import { INBOUND_DETAIL_FIELDS, INBOUND_STATUSES, INBOUND_URGENCY_LEVELS, type AppointmentSlot, type BookedAppointment } from '@cti/contracts';
+import {
+  INBOUND_DETAIL_FIELDS,
+  INBOUND_STATUSES,
+  INBOUND_URGENCY_LEVELS,
+  type AppointmentSlot,
+  type BookedAppointment,
+  type Consultations,
+  type PriorityOffer,
+} from '@cti/contracts';
 import { END_CALL_OUTCOMES, INBOUND_TOOLS, OUTBOUND_TOOL_NAMES, QUALIFICATION_FIELDS, TRANSFER_REASONS } from './prompt-tools.js';
 import type { BridgeLog, ToolResult } from './bridge.js';
 import { UNKNOWN_TOOL } from './bridge-tools.js';
 import type { ToolName } from './prompt.js';
 import { callbackAtFromLocal, recipientTimeZone } from './local-time.js';
-import { bookAppointment, storeBooking } from './service-booking.js';
+import { bookAppointment, bookPriorityAppointment, storeBooking } from './service-booking.js';
 import type { AiCallOutcome, AiCallStore } from './store.js';
 import { reformatSummary } from './summary.js';
 import { TRANSFER_TIME_LIMIT_SECONDS, type AiVoiceTwilio } from './twilio.js';
@@ -44,6 +52,10 @@ export interface ToolCtx {
   now: () => Date;
   /** The appointment times this call may book (plan 1D); empty = book_appointment books nothing. */
   slots: readonly AppointmentSlot[];
+  /** The high-priority offer this call may book (routing step 1; prompt-context promptPriority); null = book_priority_appointment books nothing. */
+  priority: PriorityOffer | null;
+  /** The seller's earlier and upcoming consultations, from the trigger; a booking carries `last`. */
+  consultations: Consultations | null;
   /**
    * A test or practice call (plan 1D Part 6): it rings an admin's own test number, so a do-not-call ends the call and is
    * recorded but never opts that number out. Absent = a real call.
@@ -277,7 +289,7 @@ async function endCall(args: unknown, env: ToolEnv): Promise<ToolResult> {
       return;
     }
     // I-1: a booked call whose line went quiet ends booked, exactly as when the caller hangs up (finalize keeps it).
-    if (outcome === 'hung_up' && ctx.slots.length > 0 && (await hasAppointment(ctx))) {
+    if (outcome === 'hung_up' && (ctx.slots.length > 0 || ctx.priority !== null) && (await hasAppointment(ctx))) {
       await recordOutcome(ctx, 'appointment_set', summary);
       return;
     }
@@ -364,6 +376,8 @@ export async function handleToolCall(name: ToolName, args: unknown, env: ToolEnv
     }
     case 'book_appointment':
       return bookAppointment(args, env);
+    case 'book_priority_appointment':
+      return bookPriorityAppointment(args, env);
     default: {
       const never: never = name;
       return { output: `{"error":"unknown tool ${String(never)}"}` };

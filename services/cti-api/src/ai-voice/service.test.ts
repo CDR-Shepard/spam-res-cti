@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { SessionUser } from '@cti/auth';
 import type { AppConfig } from '../config.js';
-import type { AppointmentSlot } from '@cti/contracts';
+import type { AppointmentSlot, Consultations, PriorityOffer } from '@cti/contracts';
 import { gateAiCall, type AiGateResult, type GateDeps } from './gate.js';
 import type { AiCallRecord } from './record.js';
 import { buildInstructions, voicemailText } from './prompt.js';
@@ -291,7 +291,8 @@ describe('startAiCall — appointment times and practice calls (plan 1D)', () =>
   const realGate = () => {
     deps.gate = vi.fn((d, input) => gateAiCall(d, input, fakeGateDeps));
   };
-  const run = (target: Parameters<typeof startAiCall>[0]['target'], s: SessionUser, extra: { slots?: AppointmentSlot[]; returning?: boolean; history?: string } = {}) =>
+  type Extra = { slots?: AppointmentSlot[]; returning?: boolean; priority?: PriorityOffer | null; consultations?: Consultations | null; history?: string };
+  const run = (target: Parameters<typeof startAiCall>[0]['target'], s: SessionUser, extra: Extra = {}) =>
     startAiCall({ db, cfg: gateCfg, session: s, target, plan: 'Opener: hi', ...extra, deps });
 
   it('1: a practice call by an admin to a listed number is placed, even with consent false on the record', async () => {
@@ -383,6 +384,41 @@ describe('startAiCall — appointment times and practice calls (plan 1D)', () =>
       agentName: 'Alex', companyName: 'GG Homes', firstName: 'Jane', address: '12 Oak St, Austin, TX 78701',
       notes: 'Inherited the house.', isTest: false, callbackNumber: FROM, approvedPlan: 'Opener: hi',
       templates: { instructions: null, voicemail: null, inbound: null },
+    });
+  });
+
+  describe('routing step 1: the high-priority offer and consultation facts in the prompt', () => {
+    const LEAD = { objectType: 'Lead', recordId: '00Q5e00000AbCdEFGH' } as const;
+    const PRIORITY: PriorityOffer = {
+      specialistSfUserId: '0058X00000Fsx39QAB', specialistFirstName: 'Grant', timeZone: 'America/Los_Angeles', defaultStart: '2026-10-06T16:00:00.000Z',
+    };
+    const LAST = { start: '2026-03-12T17:00:00.000Z', kind: 'in_person', ownerName: 'Blake Kossuth' } as const;
+
+    it('a priority offer with no slots reaches the prompt with the seller zone', async () => {
+      const res = await run(LEAD, session, { priority: PRIORITY });
+      if (!res.ok) throw new Error('unreachable');
+      const prompt = getActiveCall(res.aiCallId)!.prompt;
+      expect(prompt).toMatchObject({ priority: PRIORITY, sellerTimeZone: 'America/Los_Angeles' });
+      expect(prompt).not.toHaveProperty('slots');
+    });
+
+    it.each([
+      ['a last one', { last: LAST, next: null }],
+      ['a next one', { last: null, next: LAST }],
+    ] as const)('consultations reach the prompt when there is %s', async (_label, consultations) => {
+      const res = await run(LEAD, session, { consultations });
+      if (!res.ok) throw new Error('unreachable');
+      expect(getActiveCall(res.aiCallId)!.prompt).toMatchObject({ consultations });
+    });
+
+    it.each([
+      ['no last or next consultation', { last: null, next: null }],
+      ['null consultations', null],
+    ] as const)('null priority and %s leave the prompt exactly as before', async (_label, consultations) => {
+      const res = await run(LEAD, session, { priority: null, consultations });
+      if (!res.ok) throw new Error('unreachable');
+      const prompt = getActiveCall(res.aiCallId)!.prompt;
+      for (const key of ['priority', 'consultations', 'sellerTimeZone', 'slots']) expect(prompt).not.toHaveProperty(key);
     });
   });
 
