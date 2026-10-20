@@ -1,12 +1,14 @@
 import { describe, expect, it } from 'vitest';
-import { AiCallBookingSettings } from '@cti/contracts';
+import { AiCallBookingSettings, BookingRouting } from '@cti/contracts';
 import {
   bookingActive,
+  bookingRouting,
   bookingSettings,
   DEFAULT_AI_CALL_BOOKING,
   DEFAULT_AI_CALL_CONCURRENCY,
   DEFAULT_AI_CALL_DAILY_CAP,
   DEFAULT_AI_CALL_MAX_ATTEMPTS,
+  DEFAULT_BOOKING_ROUTING,
   liveCallBooking,
   outreachSettings,
   practiceBooking,
@@ -25,6 +27,9 @@ const DEFAULT_BOOKING: AiCallBookingSettings = {
     walkthrough: { enabled: true, durationMinutes: 60, startHour: 9, endHour: 17, stepMinutes: 60, minLeadMinutes: 1200, horizonBusinessDays: 5, bufferMinutes: 30, maxOffered: 6 },
 };
 
+// A blob without `routing` (or no blob at all) is read with the routing defaults filled in.
+const DEFAULT_ROUTED: AiCallBookingSettings = { ...DEFAULT_BOOKING, routing: DEFAULT_BOOKING_ROUTING };
+
 const DEFAULTS: OutreachSettings = {
   aiDailyBudgetUsd: 25,
   liveChannels: ['rep_call'],
@@ -37,6 +42,10 @@ const DEFAULTS: OutreachSettings = {
 };
 const GRANT = '0058X00000Fsx39QAB';
 const OTHER = '0058X00000Abcd1QAB';
+const CHANCE = '0055f000005qXn8AAE';
+const BLAKE = '0058X00000FA8tLQAT';
+const SETH = '0055f000005qXVfAAM';
+const THOMAS = '0055f000005qYO6AAM';
 
 describe('outreachSettings', () => {
   it.each([
@@ -116,7 +125,7 @@ describe('outreachSettings', () => {
     });
 
     it('final review WEB I-2: an empty blob gives the defaults: booking, conversion and write-back all off', () => {
-      expect(bookingSettings({ settings: {} }, [])).toEqual(DEFAULT_BOOKING);
+      expect(bookingSettings({ settings: {} }, [])).toEqual(DEFAULT_ROUTED);
       expect(outreachSettings({ settings: {} }).aiCallWriteback).toBe(false);
     });
 
@@ -145,7 +154,7 @@ describe('outreachSettings', () => {
       ['a string', 'on'],
       ['null', null],
     ])('%s falls back to the default as a whole (never half-applied)', (_label, aiCallBooking) => {
-      expect(bookingSettings({ settings: { aiCallBooking } }, [])).toEqual(DEFAULT_BOOKING);
+      expect(bookingSettings({ settings: { aiCallBooking } }, [])).toEqual(DEFAULT_ROUTED);
     });
 
     it('the malformed fallback still takes the configured default list', () => {
@@ -153,7 +162,7 @@ describe('outreachSettings', () => {
     });
 
     it('the configured default list is used when the tenant never saved one', () => {
-      expect(bookingSettings({ settings: {} }, [GRANT])).toEqual({ ...DEFAULT_BOOKING, specialists: [GRANT] });
+      expect(bookingSettings({ settings: {} }, [GRANT])).toEqual({ ...DEFAULT_ROUTED, specialists: [GRANT] });
     });
 
     it('a saved list always wins over the configured default, even an empty one', () => {
@@ -172,7 +181,23 @@ describe('outreachSettings', () => {
         phone: { ...DEFAULT_BOOKING.phone, durationMinutes: 20, stepMinutes: 15, maxOffered: 4 },
         walkthrough: { ...DEFAULT_BOOKING.walkthrough, enabled: false, startHour: 8, endHour: 12 },
       };
-      expect(bookingSettings({ settings: { aiCallBooking: custom } }, [GRANT])).toEqual(custom);
+      expect(bookingSettings({ settings: { aiCallBooking: custom } }, [GRANT])).toEqual({ ...custom, routing: DEFAULT_BOOKING_ROUTING });
+    });
+
+    it('a blob saved before routing existed still parses: booking stays on and the routing defaults apply', () => {
+      const saved = { ...DEFAULT_BOOKING, enabled: true, specialists: [GRANT], convertLeads: true };
+      expect('routing' in saved).toBe(false);
+      const b = bookingSettings({ settings: { aiCallBooking: saved } }, []);
+      expect(b).toEqual({ ...saved, routing: DEFAULT_BOOKING_ROUTING });
+      expect(b.enabled).toBe(true);
+      expect(b.routing).toEqual(DEFAULT_BOOKING_ROUTING);
+      expect(bookingActive(b)).toBe(true);
+    });
+
+    it('a blob saved with its own routing keeps it', () => {
+      const own: BookingRouting = { ...DEFAULT_BOOKING_ROUTING, regions: [{ ...DEFAULT_BOOKING_ROUTING.regions[0]!, reps: [OTHER] }, DEFAULT_BOOKING_ROUTING.regions[1]!] };
+      const saved = { ...DEFAULT_BOOKING, enabled: true, specialists: [GRANT], routing: own };
+      expect(bookingSettings({ settings: { aiCallBooking: saved } }, []).routing).toEqual(own);
     });
 
     it('returns fresh objects: changing one result never changes the defaults or the next result', () => {
@@ -180,9 +205,15 @@ describe('outreachSettings', () => {
       a.specialists.push(OTHER);
       a.phone.durationMinutes = 99;
       a.days.push(6);
+      a.routing!.regions[0]!.reps.push(OTHER);
+      a.routing!.regions[1]!.counties.push('Imperial');
+      const savedWithoutRouting = bookingSettings({ settings: { aiCallBooking: DEFAULT_BOOKING } }, []);
+      savedWithoutRouting.routing!.regions.pop();
       const b = bookingSettings({ settings: {} }, [GRANT]);
-      expect(b).toEqual({ ...DEFAULT_BOOKING, specialists: [GRANT] });
+      expect(b).toEqual({ ...DEFAULT_ROUTED, specialists: [GRANT] });
       expect(DEFAULT_AI_CALL_BOOKING).toEqual(DEFAULT_BOOKING);
+      expect(DEFAULT_BOOKING_ROUTING.regions).toHaveLength(2);
+      expect(DEFAULT_BOOKING_ROUTING.regions[0]!.reps).toEqual([CHANCE, BLAKE]);
     });
 
     it.each([
@@ -205,7 +236,8 @@ describe('outreachSettings', () => {
         ['booking on, write-back absent', saved(true, [GRANT]), false],
         ['booking on, write-back the string "true"', { ...saved(true, [GRANT]), aiCallWriteback: 'true' }, false],
         ['booking off, write-back on', { ...saved(false, [GRANT]), aiCallWriteback: true }, false],
-        ['booking on, write-back on, no specialist', { ...saved(true, []), aiCallWriteback: true }, false],
+        // R2: booking is active while a region has a rep, so an empty specialists list no longer reads as booking off.
+        ['booking on, write-back on, no specialist (routing names the reps)', { ...saved(true, []), aiCallWriteback: true }, true],
       ])('liveCallBooking: %s gives active %s', (_label, settings, active) => {
         expect(bookingActive(liveCallBooking({ settings }, []))).toBe(active);
       });
@@ -219,24 +251,69 @@ describe('outreachSettings', () => {
         ['booking off, a specialist saved', saved(false, [GRANT]), [], true],
         ['booking off, write-back off, the configured default owner', {}, [GRANT], true],
         ['booking on', { ...saved(true, [GRANT]), aiCallWriteback: true }, [], true],
-        ['no specialist anywhere', saved(false, []), [], false],
-        ['a saved empty list beats the configured default', saved(false, []), [GRANT], false],
+        // R2: the routing defaults name reps, so an empty specialists list still offers times.
+        ['no specialist anywhere (routing names the reps)', saved(false, []), [], true],
+        ['a saved empty list (routing names the reps)', saved(false, []), [GRANT], true],
       ])('practiceBooking: %s gives active %s whatever the toggles', (_label, settings, defaults, active) => {
         expect(bookingActive(practiceBooking({ settings }, defaults))).toBe(active);
       });
 
+      it('a saved empty specialists list still beats the configured default', () => {
+        expect(practiceBooking({ settings: saved(false, []) }, [GRANT]).specialists).toEqual([]);
+      });
+
       it('practiceBooking never changes conversion or the hours', () => {
         const settings = { aiCallBooking: { ...DEFAULT_BOOKING, specialists: [GRANT], convertLeads: false } };
-        expect(practiceBooking({ settings }, [])).toEqual({ ...DEFAULT_BOOKING, specialists: [GRANT], enabled: true });
+        expect(practiceBooking({ settings }, [])).toEqual({ ...DEFAULT_ROUTED, specialists: [GRANT], enabled: true });
       });
     });
 
+    const noReps = { ...DEFAULT_BOOKING_ROUTING, regions: DEFAULT_BOOKING_ROUTING.regions.map((r) => ({ ...r, reps: [] })) };
+    const oneRep = { ...DEFAULT_BOOKING_ROUTING, regions: DEFAULT_BOOKING_ROUTING.regions.map((r, i) => ({ ...r, reps: i === 1 ? [SETH] : [] })) };
+
+    // R2: booking is active when it is on and some region has a rep; the specialists list no longer matters.
     it.each([
       ['on with a specialist', { enabled: true, specialists: [GRANT] }, true],
-      ['on with no specialists', { enabled: true, specialists: [] }, false],
+      ['on with no specialists, default routing', { enabled: true, specialists: [] }, true],
       ['off with a specialist', { enabled: false, specialists: [GRANT] }, false],
+      ['off, default routing', { enabled: false }, false],
+      ['on, but every region has no reps', { enabled: true, specialists: [GRANT], routing: noReps }, false],
+      ['on, and only one region has a rep', { enabled: true, specialists: [], routing: oneRep }, true],
     ])('bookingActive: %s', (_label, over, expected) => {
       expect(bookingActive({ ...DEFAULT_BOOKING, ...over })).toBe(expected);
+    });
+
+    describe('routing defaults', () => {
+      it('DEFAULT_BOOKING_ROUTING parses with the contract and is the spec\'s regions, reps, start times and office', () => {
+        expect(BookingRouting.safeParse(DEFAULT_BOOKING_ROUTING).success).toBe(true);
+        expect(DEFAULT_BOOKING_ROUTING).toEqual({
+          officeAddress: '18872 MacArthur Blvd #220, Irvine, CA 92612',
+          regions: [
+            {
+              key: 'LA',
+              counties: ['Los Angeles', 'Orange', 'Riverside', 'San Bernardino'],
+              reps: [CHANCE, BLAKE],
+              startTimes: ['09:00', '11:00', '13:00', '15:00', '17:00', '19:00'],
+            },
+            {
+              key: 'SD',
+              counties: ['San Diego'],
+              reps: [SETH, THOMAS],
+              startTimes: ['09:00', '10:00', '11:00', '12:00', '13:00', '14:00', '15:00', '16:00'],
+            },
+          ],
+        });
+      });
+
+      it('bookingRouting is the saved routing, else the defaults', () => {
+        expect(bookingRouting(DEFAULT_BOOKING)).toEqual(DEFAULT_BOOKING_ROUTING);
+        expect(bookingRouting({ ...DEFAULT_BOOKING, routing: noReps })).toEqual(noReps);
+      });
+
+      it('the shared defaults cannot be changed by a caller', () => {
+        expect(() => bookingRouting(DEFAULT_BOOKING).regions[0]!.reps.push(OTHER)).toThrow(TypeError);
+        expect(DEFAULT_BOOKING_ROUTING.regions[0]!.reps).toEqual([CHANCE, BLAKE]);
+      });
     });
   });
 });

@@ -6,7 +6,7 @@
  * `liveChannels` entry (or one that is not implemented yet) is dropped rather than
  * defaulted, so junk can only make FEWER channels live, never more.
  */
-import { AiCallBookingSettings } from '@cti/contracts';
+import { AiCallBookingSettings, type BookingRouting } from '@cti/contracts';
 
 export const LIVE_CHANNEL_VALUES = ['rep_call', 'ai_call', 'sms', 'email'] as const;
 export type LiveChannel = (typeof LIVE_CHANNEL_VALUES)[number];
@@ -60,6 +60,37 @@ export const DEFAULT_AI_CALL_BOOKING: Readonly<AiCallBookingSettings> = Object.f
   walkthrough: { enabled: true, durationMinutes: 60, startHour: 9, endHour: 17, stepMinutes: 60, minLeadMinutes: 1200, horizonBusinessDays: 5, bufferMinutes: 30, maxOffered: 6 },
 } satisfies AiCallBookingSettings);
 
+function deepFreeze<T>(value: T): T {
+  if (typeof value === 'object' && value !== null) {
+    Object.values(value).forEach(deepFreeze);
+    Object.freeze(value);
+  }
+  return value;
+}
+
+/**
+ * Rep routing defaults (the spec's): every rep starts from the office; a seller's county picks the region; each region has its
+ * reps in tie-break order and the start times offered each day (Pacific). Counties are matched by name with " County" removed.
+ * Frozen all the way down: a caller that needs to change one copies it (`bookingSettings` hands out copies).
+ */
+export const DEFAULT_BOOKING_ROUTING: Readonly<BookingRouting> = deepFreeze({
+  officeAddress: '18872 MacArthur Blvd #220, Irvine, CA 92612',
+  regions: [
+    {
+      key: 'LA',
+      counties: ['Los Angeles', 'Orange', 'Riverside', 'San Bernardino'],
+      reps: ['0055f000005qXn8AAE', '0058X00000FA8tLQAT'],
+      startTimes: ['09:00', '11:00', '13:00', '15:00', '17:00', '19:00'],
+    },
+    {
+      key: 'SD',
+      counties: ['San Diego'],
+      reps: ['0055f000005qXVfAAM', '0055f000005qYO6AAM'],
+      startTimes: ['09:00', '10:00', '11:00', '12:00', '13:00', '14:00', '15:00', '16:00'],
+    },
+  ],
+} satisfies BookingRouting);
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
@@ -82,9 +113,15 @@ function liveChannelsFrom(value: unknown): LiveChannel[] {
   return [...new Set(value.filter(isLiveChannel))];
 }
 
+/** The routing a booking blob uses: its own, or the defaults when it was saved before routing existed. Read-only (the defaults are frozen). */
+export function bookingRouting(b: AiCallBookingSettings): BookingRouting {
+  return b.routing ?? DEFAULT_BOOKING_ROUTING;
+}
+
 /**
  * Plan 1D: the tenant's appointment booking settings (one appointment owner: the first active user on `specialists`). The
- * saved blob when it parses as a whole, else the defaults as a whole (a malformed blob never half-applies). The configured
+ * saved blob when it parses as a whole, else the defaults as a whole (a malformed blob never half-applies). `routing` is always
+ * filled in: a blob saved before routing existed keeps everything it had and gets the routing defaults. The configured
  * default list (AI_CALL_DEFAULT_SPECIALISTS) applies only to the defaults: a saved list, even an empty one, always wins.
  * Fix 1 (M-4): this is the only reader of `aiCallBooking`, and the default list is required, so no reader can see an empty
  * list by forgetting it.
@@ -92,8 +129,8 @@ function liveChannelsFrom(value: unknown): LiveChannel[] {
 export function bookingSettings(org: { settings: unknown }, defaultSpecialists: readonly string[]): AiCallBookingSettings {
   const s = isRecord(org.settings) ? org.settings : {};
   const saved = AiCallBookingSettings.safeParse(s.aiCallBooking);
-  if (saved.success) return saved.data;
-  return { ...structuredClone(DEFAULT_AI_CALL_BOOKING), specialists: [...defaultSpecialists] };
+  if (saved.success) return { ...saved.data, routing: saved.data.routing ?? structuredClone(DEFAULT_BOOKING_ROUTING) };
+  return { ...structuredClone(DEFAULT_AI_CALL_BOOKING), specialists: [...defaultSpecialists], routing: structuredClone(DEFAULT_BOOKING_ROUTING) };
 }
 
 /**
@@ -115,9 +152,12 @@ export function practiceBooking(org: { settings: unknown }, defaultSpecialists: 
   return { ...bookingSettings(org, defaultSpecialists), enabled: true };
 }
 
-/** Booking is on and names someone. Whether that list resolves to an ACTIVE user is checked when slots are offered (`no_owner`). */
+/**
+ * Booking is on and some region has a rep to send. The `specialists` list no longer decides this: it only names the high-priority
+ * rep and the legacy single owner. Whether a rep resolves to an ACTIVE user is checked when slots are offered (`no_owner`).
+ */
 export function bookingActive(b: AiCallBookingSettings): boolean {
-  return b.enabled && b.specialists.length > 0;
+  return b.enabled && bookingRouting(b).regions.some((region) => region.reps.length > 0);
 }
 
 export function outreachSettings(org: { settings: unknown }): OutreachSettings {

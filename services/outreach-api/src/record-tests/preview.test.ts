@@ -122,7 +122,8 @@ describe.skipIf(!pgLane)('runPreview (real Postgres)', () => {
   it('3b: nobody on the appointment list: no times and the note, still ready', async () => {
     const t = await tenant();
     await runPreview(deps(salesforce(), fakeModel(), { defaultSpecialists: [] }), t.testId);
-    expect(await stored(t.testId)).toMatchObject({ status: 'ready', slots: [], offerNote: 'booking_off', ownerSfUserId: null });
+    // R2: booking is active while a region has a rep, so the empty list now reaches the owner lookup and says no_owner.
+    expect(await stored(t.testId)).toMatchObject({ status: 'ready', slots: [], offerNote: 'no_owner', ownerSfUserId: null });
   });
 
   it('4 (G-5): plan text the agent may not get is stored as null with its words, and the preview is still ready', async () => {

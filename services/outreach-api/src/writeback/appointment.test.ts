@@ -24,7 +24,7 @@ const ADDRESS = '12 Oak St, Fresno, CA 93701';
 
 const EXISTING_EVENT = /^SELECT Id FROM Event WHERE WhatId = /;
 const HOLD_LOOKUP = /^SELECT Id FROM Event WHERE WhatId = null /;
-const BUSY = /^SELECT StartDateTime, EndDateTime, IsAllDayEvent, ActivityDate FROM Event /;
+const BUSY = /^SELECT StartDateTime, EndDateTime, IsAllDayEvent, ActivityDate, OwnerId, Location, Subject FROM Event /;
 const TASK_LOOKUP = /^SELECT Id(?:, Description)? FROM Task /;
 
 function org(routes: WriteQueryRoute[] = []) {

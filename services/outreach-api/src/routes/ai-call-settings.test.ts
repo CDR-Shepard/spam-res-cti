@@ -7,7 +7,7 @@ import { WritebackReadiness } from '@cti/contracts';
 import { SalesforceApiError } from '@cti/salesforce';
 import { buildApp } from '../app.js';
 import { CrmNotConnectedError, type SalesforceClientFactory } from '../crm/client-factory.js';
-import { DEFAULT_AI_CALL_BOOKING } from '../settings.js';
+import { DEFAULT_AI_CALL_BOOKING, DEFAULT_BOOKING_ROUTING } from '../settings.js';
 import { fakeSalesforce, type QueryRoute } from '../test/fake-sf-client.js';
 import { fakeSfWrites, userInfoAnswer } from '../test/fake-sf-writes.js';
 import { prodDescribe } from '../test/writeback-describes.js';
@@ -29,7 +29,8 @@ const admin = { userId: 'U-ADMIN', orgId: 'O1', email: 'admin@gg.co', isAdmin: t
 const rep = { ...admin, userId: 'U-REP', isAdmin: false };
 const auth = { authorization: 'Bearer t' };
 // Final review WEB I-2: booking, conversion and write-back are off until an admin turns them on.
-const DEFAULTS = { booking: { ...DEFAULT_AI_CALL_BOOKING, specialists: [] as string[] }, writeback: false };
+// A booking blob without `routing` is read with the routing defaults filled in, so the card always has regions to show.
+const DEFAULTS = { booking: { ...DEFAULT_AI_CALL_BOOKING, specialists: [] as string[], routing: DEFAULT_BOOKING_ROUTING }, writeback: false };
 
 let app: FastifyInstance;
 async function build(opts: { settings?: unknown; queries?: QueryRoute[]; clients?: SalesforceClientFactory; defaultSpecialists?: string[] } = {}) {
@@ -81,7 +82,7 @@ describe('AI call settings routes', () => {
       await app.close();
       const saved = { ...DEFAULT_AI_CALL_BOOKING, specialists: [OTHER], convertLeads: false };
       await build({ defaultSpecialists: [GRANT], settings: { aiCallBooking: saved, aiCallWriteback: false } });
-      expect((await call('GET', '/api/settings/ai-calls')).json()).toEqual({ booking: saved, writeback: false });
+      expect((await call('GET', '/api/settings/ai-calls')).json()).toEqual({ booking: { ...saved, routing: DEFAULT_BOOKING_ROUTING }, writeback: false });
     });
   });
 
@@ -113,12 +114,12 @@ describe('AI call settings routes', () => {
 
     it('a settings blob saved that way before this rule reads as booking off (never offers times that are not written back)', async () => {
       await build({ settings: { aiCallBooking: booked, aiCallWriteback: false } });
-      expect((await call('GET', '/api/settings/ai-calls')).json()).toEqual({ booking: { ...booked, enabled: false }, writeback: false });
+      expect((await call('GET', '/api/settings/ai-calls')).json()).toEqual({ booking: { ...booked, enabled: false, routing: DEFAULT_BOOKING_ROUTING }, writeback: false });
     });
 
     it('booking on with write-back on reads as saved', async () => {
       await build({ settings: { aiCallBooking: booked, aiCallWriteback: true } });
-      expect((await call('GET', '/api/settings/ai-calls')).json()).toEqual({ booking: booked, writeback: true });
+      expect((await call('GET', '/api/settings/ai-calls')).json()).toEqual({ booking: { ...booked, routing: DEFAULT_BOOKING_ROUTING }, writeback: true });
     });
   });
 
@@ -233,13 +234,15 @@ describe.skipIf(!pgLane)('AI call settings routes (real Postgres)', () => {
   it('PUT stores the blob beside the other settings, returns it, and GET returns it', async () => {
     const orgId = await seedOrg(t.db, { aiCallConcurrency: 3, aiCallBooking: 'junk' });
     asAdminOf(orgId);
-    expect((await pgCall('GET')).json()).toEqual({ booking: { ...DEFAULT_AI_CALL_BOOKING, specialists: [GRANT] }, writeback: false });
+    expect((await pgCall('GET')).json()).toEqual({ booking: { ...DEFAULT_AI_CALL_BOOKING, specialists: [GRANT], routing: DEFAULT_BOOKING_ROUTING }, writeback: false });
 
     const next = { booking: { ...DEFAULT_AI_CALL_BOOKING, specialists: [OTHER, GRANT], convertLeads: false, days: [1, 2, 3] }, writeback: false };
     const put = await pgCall('PUT', next);
     expect(put.statusCode).toBe(200);
-    expect(put.json()).toEqual(next);
-    expect((await pgCall('GET')).json()).toEqual(next);
+    // What is stored is what was sent; reading it fills the routing defaults in.
+    const read = { ...next, booking: { ...next.booking, routing: DEFAULT_BOOKING_ROUTING } };
+    expect(put.json()).toEqual(read);
+    expect((await pgCall('GET')).json()).toEqual(read);
 
     const [org] = await t.db.select({ settings: schema.organizations.settings }).from(schema.organizations).where(eq(schema.organizations.id, orgId));
     expect(org!.settings).toEqual({ aiCallConcurrency: 3, aiCallBooking: next.booking, aiCallWriteback: false });
@@ -255,8 +258,9 @@ describe.skipIf(!pgLane)('AI call settings routes (real Postgres)', () => {
     const [before] = await t.db.select({ settings: schema.organizations.settings }).from(schema.organizations).where(eq(schema.organizations.id, orgId));
     expect(before!.settings).toEqual({ aiCallConcurrency: 3 });
     const both = { booking: booked, writeback: true };
-    expect((await pgCall('PUT', both)).json()).toEqual(both);
-    expect((await pgCall('GET')).json()).toEqual(both);
+    const read = { ...both, booking: { ...booked, routing: DEFAULT_BOOKING_ROUTING } };
+    expect((await pgCall('PUT', both)).json()).toEqual(read);
+    expect((await pgCall('GET')).json()).toEqual(read);
   });
 
   it('a saved empty list stays empty (the configured default no longer applies)', async () => {

@@ -14,7 +14,7 @@ const PASSED_SUBJECT = 'Appointment time passed before it could be saved — cal
 /** After the booking's end (Wed Oct 7, 11:15 AM PT). */
 const LATE = new Date('2026-10-07T19:00:00.000Z');
 const DAYS_LATER = new Date('2026-10-10T17:00:00.000Z');
-const BUSY_READ = /^SELECT StartDateTime, EndDateTime, IsAllDayEvent, ActivityDate FROM Event/;
+const BUSY_READ = /^SELECT StartDateTime, EndDateTime, IsAllDayEvent, ActivityDate, OwnerId, Location, Subject FROM Event/;
 
 function oppState(recordId: string): OrgState {
   const record = { Name: 'Jane Seller', OwnerId: SETTER, StageName: 'Closed Lost', Rating__c: null, Timeline__c: null, LastModifiedDate: '2026-10-01T12:00:00.000+0000' };

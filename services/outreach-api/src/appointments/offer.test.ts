@@ -18,11 +18,15 @@ const sfWith = (users: QueryRoute[1], events: QueryRoute[1] = []) => fakeSalesfo
 
 describe('offerSlots', () => {
   it('booking off gives booking_off and reads nothing', async () => {
-    for (const b of [booking({ enabled: false }), booking({ specialists: [] })]) {
-      const sf = sfWith([grantRow()]);
-      expect(await offerSlots(sf.client, { booking: b, now: NOW })).toEqual({ slots: [], ownerSfUserId: null, note: 'booking_off' });
-      expect(sf.soql).toEqual([]);
-    }
+    const sf = sfWith([grantRow()]);
+    expect(await offerSlots(sf.client, { booking: booking({ enabled: false }), now: NOW })).toEqual({ slots: [], ownerSfUserId: null, note: 'booking_off' });
+    expect(sf.soql).toEqual([]);
+  });
+
+  it('R2: booking is on while a region has a rep, so an empty specialists list now gives no_owner (the legacy single owner), still reading nothing', async () => {
+    const sf = sfWith([grantRow()]);
+    expect(await offerSlots(sf.client, { booking: booking({ specialists: [] }), now: NOW })).toEqual({ slots: [], ownerSfUserId: null, note: 'no_owner' });
+    expect(sf.soql).toEqual([]);
   });
 
   it('the owner inactive gives no_owner and no Event query', async () => {

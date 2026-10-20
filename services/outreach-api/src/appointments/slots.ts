@@ -13,6 +13,10 @@ export interface Busy {
   /** all-day: blocks the whole local `day` (y-m-d) */
   allDay: boolean;
   day?: LocalDay;
+  /** The Event's Location as Salesforce has it. Seller data: never logged. */
+  location?: string | null;
+  /** Its Subject contains "consultation" (case-insensitive). The Subject itself is not kept. */
+  consultation?: boolean;
 }
 export type KindRules = AiCallBookingSettings['phone'];
 export interface Window {

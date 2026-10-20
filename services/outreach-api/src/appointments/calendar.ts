@@ -1,10 +1,14 @@
 /**
  * Salesforce reads for appointment booking, through the tenant's integration connection: the users on the appointment owner
- * list, and the owner's busy calendar time (Events not shown as Free).
+ * list, and the busy calendar time (Events not shown as Free) of one owner or of several reps at once.
  *
  * All-day Events are stored as midnight GMT with EndDateTime = the last day's midnight (a one-day Event has start = end), so
  * they are matched by local DATE, never by instant: the busy query asks for timed Events overlapping [from, to) and for
- * all-day Events on a date the range touches in the owner's zone, and readBusy keeps exactly those rows.
+ * all-day Events on a date the range touches in the owner's zone, and the readers keep exactly those rows.
+ *
+ * Each busy item also carries the Event's Location and whether its Subject says "consultation" (rep routing drives from one
+ * Event's place to the next and balances consultations). Both are seller data: nothing here logs them, and the Subject
+ * itself is never kept.
  */
 import { IanaZone } from '@cti/contracts';
 import { soqlEscape, type SalesforceClient } from '@cti/salesforce';
@@ -82,16 +86,22 @@ function rangeDays(from: Date, to: Date, timeZone: string): { first: number; las
   return { first: dayMs(zonedParts(from, timeZone)), last: dayMs(zonedParts(new Date(Math.max(from.getTime(), to.getTime() - 1)), timeZone)) };
 }
 
+/** Salesforce compares ids on their case-sensitive 15-character core; the busy maps are keyed by it. */
+const idCore = (id: string): string => id.slice(0, 15);
+
 /**
- * Pure: the owner's Events not shown as Free that are busy within [from, to): timed Events overlapping it, and all-day Events
- * on a local date it touches in `timeZone` (start date ≤ the last date, end date ≥ the first).
+ * Pure: the owners' Events not shown as Free that are busy within [from, to): timed Events overlapping it, and all-day Events
+ * on a local date it touches in `timeZone` (start date ≤ the last date, end date ≥ the first). Also selects each Event's
+ * OwnerId, Location and Subject. One owner is asked with `=`, several with `IN`. A bad id throws.
  */
-export function busySoql(ownerId: string, from: Date, to: Date, timeZone: string): string {
-  if (!SF_ID.test(ownerId)) throw new Error('busySoql needs a valid owner id');
+export function repBusySoql(ownerIds: readonly string[], from: Date, to: Date, timeZone: string): string {
+  if (ownerIds.length === 0 || !ownerIds.every((id) => SF_ID.test(id))) throw new Error('repBusySoql needs valid owner ids');
+  const owners = [...new Set(ownerIds)];
   const days = rangeDays(from, to, timeZone);
+  const who = owners.length === 1 ? `OwnerId = '${soqlEscape(owners[0]!)}'` : `OwnerId IN (${soqlIdList(owners)})`;
   return (
-    'SELECT StartDateTime, EndDateTime, IsAllDayEvent, ActivityDate FROM Event ' +
-    `WHERE OwnerId = '${soqlEscape(ownerId)}' AND ShowAs != 'Free' AND ` +
+    'SELECT StartDateTime, EndDateTime, IsAllDayEvent, ActivityDate, OwnerId, Location, Subject FROM Event ' +
+    `WHERE ${who} AND ShowAs != 'Free' AND ` +
     `((IsAllDayEvent = false AND StartDateTime < ${soqlDateTime(to)} AND EndDateTime > ${soqlDateTime(from)}) OR ` +
     `(IsAllDayEvent = true AND StartDateTime <= ${soqlDateTime(new Date(days.last))} AND EndDateTime >= ${soqlDateTime(new Date(days.first))})) ` +
     `ORDER BY StartDateTime LIMIT ${BUSY_ROW_LIMIT}`
@@ -117,6 +127,11 @@ const localDay = (ms: number): LocalDay => {
   return { year: d.getUTCFullYear(), month: d.getUTCMonth() + 1, day: d.getUTCDate() };
 };
 
+/** What the busy items keep of an Event beyond its time: the Location, and only whether the Subject says "consultation". */
+function eventFacts(row: Row): Pick<Busy, 'location' | 'consultation'> {
+  return { location: str(row.Location), consultation: /consultation/i.test(str(row.Subject) ?? '') };
+}
+
 /** One busy item per date the all-day row covers (ActivityDate through EndDateTime's date) that the range touches. */
 function allDayBusy(row: Row, start: Date | null, end: Date | null, days: { first: number; last: number }): Busy[] {
   const first = dateMs(row.ActivityDate) ?? (start ? utcDayMs(start) : null);
@@ -124,9 +139,21 @@ function allDayBusy(row: Row, start: Date | null, end: Date | null, days: { firs
   const last = Math.max(first, end ? utcDayMs(end) : first);
   const out: Busy[] = [];
   for (let d = Math.max(first, days.first); d <= Math.min(last, days.last); d += DAY_MS) {
-    out.push({ start: start ?? new Date(first), end: end ?? new Date(first), allDay: true, day: localDay(d) });
+    out.push({ start: start ?? new Date(first), end: end ?? new Date(first), allDay: true, day: localDay(d), ...eventFacts(row) });
   }
   return out;
+}
+
+/** The busy items of `rows`: timed rows overlapping [from, to) (touching is not overlapping), and all-day rows on the local dates it touches. */
+function busyFrom(rows: readonly Row[], from: Date, to: Date, timeZone: string): Busy[] {
+  const days = rangeDays(from, to, timeZone);
+  return rows.flatMap((row): Busy[] => {
+    const start = instant(row.StartDateTime);
+    const end = instant(row.EndDateTime);
+    if (row.IsAllDayEvent === true) return allDayBusy(row, start, end, days);
+    if (!start || !end || start.getTime() >= to.getTime() || end.getTime() <= from.getTime()) return [];
+    return [{ start, end, allDay: false, ...eventFacts(row) }];
+  });
 }
 
 /**
@@ -142,14 +169,33 @@ export async function readBusy(
   /** Told when the read hit BUSY_ROW_LIMIT, so later busy time may be missing (final review: never silent). */
   onCapped?: (rows: number) => void,
 ): Promise<Busy[]> {
-  const rows = await client.query<Row>(busySoql(ownerId, from, to, timeZone));
+  const rows = await client.query<Row>(repBusySoql([ownerId], from, to, timeZone));
   if (rows.length >= BUSY_ROW_LIMIT) onCapped?.(rows.length);
-  const days = rangeDays(from, to, timeZone);
-  return rows.flatMap((row): Busy[] => {
-    const start = instant(row.StartDateTime);
-    const end = instant(row.EndDateTime);
-    if (row.IsAllDayEvent === true) return allDayBusy(row, start, end, days);
-    if (!start || !end || start.getTime() >= to.getTime() || end.getTime() <= from.getTime()) return [];
-    return [{ start, end, allDay: false }];
-  });
+  return busyFrom(rows, from, to, timeZone);
+}
+
+/**
+ * Several reps' busy time within [from, to) in one query, sorted by OwnerId into a map keyed by the 15-character id core (as
+ * Salesforce returns an 18-character id for a 15-character one asked). Every valid id asked is in the map, with [] when it has
+ * no Events. Ids that are not Salesforce ids are dropped first; none left, no query. A row for an owner not asked is ignored.
+ * `timeZone` decides which local dates all-day Events are matched on, for every rep.
+ */
+export async function readRepCalendars(
+  client: SalesforceClient,
+  ownerIds: readonly string[],
+  from: Date,
+  to: Date,
+  timeZone: string,
+  /** Told when the read hit BUSY_ROW_LIMIT, so later busy time may be missing. */
+  onCapped?: (rows: number) => void,
+): Promise<Map<string, Busy[]>> {
+  // One id per 15-character core (the first asked), so asking a rep in both forms asks once.
+  const asked = new Map<string, string>();
+  for (const id of ownerIds) if (SF_ID.test(id) && !asked.has(idCore(id))) asked.set(idCore(id), id);
+  if (asked.size === 0) return new Map();
+  const rows = await client.query<Row>(repBusySoql([...asked.values()], from, to, timeZone));
+  if (rows.length >= BUSY_ROW_LIMIT) onCapped?.(rows.length);
+  return new Map(
+    [...asked.keys()].map((owner) => [owner, busyFrom(rows.filter((row) => idCore(str(row.OwnerId) ?? '') === owner), from, to, timeZone)]),
+  );
 }

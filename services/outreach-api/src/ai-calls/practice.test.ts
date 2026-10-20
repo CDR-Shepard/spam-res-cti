@@ -25,7 +25,7 @@ function readOnlyOrg(): FakeSfWrites {
   return fakeSfWrites({
     queries: [
       [/^SELECT Id, FirstName, Name, IsActive, TimeZoneSidKey FROM User/, [{ Id: GRANT, FirstName: 'Grant', Name: 'Grant Golden', IsActive: true, TimeZoneSidKey: 'America/Los_Angeles' }]],
-      [/^SELECT StartDateTime, EndDateTime, IsAllDayEvent, ActivityDate FROM Event/, []],
+      [/^SELECT StartDateTime, EndDateTime, IsAllDayEvent, ActivityDate, OwnerId, Location, Subject FROM Event/, []],
     ],
   });
 }

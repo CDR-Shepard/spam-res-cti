@@ -133,7 +133,7 @@ export function fakeOrg(state: OrgState): FakeSfWrites {
     [/^SELECT MasterLabel, SortOrder FROM LeadStatus/, [{ MasterLabel: 'Qualified', SortOrder: 6 }]],
     [/^SELECT Id, Name, OwnerId, IsConverted, ConvertedOpportunityId/, () => (state.lead ? [{ ...state.lead }] : [])],
     [/^SELECT Id, CreatedById, CreatedBy\.Name, CreatedDate FROM Opportunity/, (q) => [{ Id: idIn(q), CreatedById: state.convertedBy.id, CreatedBy: state.convertedBy.name ? { Name: state.convertedBy.name } : null, CreatedDate: state.convertedBy.at }]],
-    [/^SELECT StartDateTime, EndDateTime, IsAllDayEvent, ActivityDate FROM Event/, () => state.busy],
+    [/^SELECT StartDateTime, EndDateTime, IsAllDayEvent, ActivityDate, OwnerId, Location, Subject FROM Event/, () => state.busy],
     [/^SELECT Id FROM Event WHERE WhatId = '/, (q) => created('Event').filter((c) => q.includes(`'${String(c.fields.WhatId)}'`)).map((_c, i) => ({ Id: `00U8X0000000${i}0AAA` }))],
     [/^SELECT Id FROM Event WHERE WhatId = null/, () => created('Event').filter((c) => !('WhatId' in c.fields)).map(() => ({ Id: '00U8X00000Hold1QAA' }))],
     [/^SELECT Id FROM Task /, (q) => created('Task').filter((c) => q.includes(String(c.fields.Subject).replace(/'/g, "\\'"))).map(() => ({ Id: '00T8X00000Task1QAA' }))],
