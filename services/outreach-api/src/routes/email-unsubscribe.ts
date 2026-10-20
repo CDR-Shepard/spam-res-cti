@@ -13,15 +13,17 @@
  *  - The token is checked for its exact shape before anything reads the database, so a malformed one costs
  *    nothing and an unknown one looks the same as a malformed one: a 404 page.
  *  - The pages show nothing about the seller (no name, no address, not even the token), carry no script, are
- *    never cached or indexed, and send no Referer (the token is in the URL). The company name is the tenant's,
- *    and is escaped like any text.
+ *    never cached, indexed or framed, and send no Referer (the token is in the URL). The company name is
+ *    the tenant's, and is escaped like any text.
  *
  * Logs carry the conversation id only: never the token (the request log's URL is redacted, see
- * http/log-serializers.ts), an address, a name, or the text of a failure (a database error can quote a value).
+ * http/log-serializers.ts), an address, a name, or the text of a failure (a database error can quote a
+ * value). A failed stop logs the error's class name and code, nothing else.
  */
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import type { Db } from '@cti/db';
 import { findConversationByToken, stopSeller } from '../conversations/store.js';
+import { describeError } from '../email/errors.js';
 import { escapeHtml, possessive } from '../email/render.js';
 
 /** Mail clients post a few bytes; this bounds what an unauthenticated caller can make us read. */
@@ -42,7 +44,7 @@ const PAGE_HEADERS: Readonly<Record<string, string>> = {
   'Cache-Control': 'no-store',
   'X-Robots-Tag': 'noindex',
   'Referrer-Policy': 'no-referrer',
-  'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'",
+  'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'",
 };
 
 const STYLE = `
@@ -108,12 +110,6 @@ const failedPage = (): string =>
 </form>`,
   );
 
-/** A database error's `code` (a five-character SQLSTATE) is safe to log; its message and detail can quote a value. */
-function failureCode(err: unknown): string | null {
-  const code = typeof err === 'object' && err !== null ? (err as { code?: unknown }).code : undefined;
-  return typeof code === 'string' && /^[0-9A-Z]{5}$/.test(code) ? code : null;
-}
-
 export async function registerEmailUnsubscribeRoutes(app: FastifyInstance, deps: EmailUnsubscribeDeps): Promise<void> {
   // Any content type, any body, read as a string (so the limit applies) and ignored. This replaces Fastify's
   // JSON parser too: a one-click sender's malformed JSON must not turn into a 400 that leaves the seller subscribed.
@@ -137,7 +133,7 @@ export async function registerEmailUnsubscribeRoutes(app: FastifyInstance, deps:
     try {
       await stopSeller(deps.db, { conversationId: conversation.id, reason: 'opted_out', now: deps.now?.() ?? new Date() });
     } catch (err) {
-      req.log.error({ conversationId: conversation.id, requestId: req.id, code: failureCode(err) }, 'unsubscribe failed');
+      req.log.error({ conversationId: conversation.id, requestId: req.id, ...describeError(err) }, 'unsubscribe failed');
       return sendPage(reply, 500, failedPage());
     }
     req.log.info({ conversationId: conversation.id, requestId: req.id }, 'seller unsubscribed');

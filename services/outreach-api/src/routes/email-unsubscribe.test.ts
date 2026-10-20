@@ -65,7 +65,7 @@ const SECURITY_HEADERS = {
   'cache-control': 'no-store',
   'x-robots-tag': 'noindex',
   'referrer-policy': 'no-referrer',
-  'content-security-policy': "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'",
+  'content-security-policy': "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'",
 };
 
 const post = (url: string, headers: Record<string, string>, payload?: string | Buffer) =>
@@ -226,18 +226,58 @@ describe('an unknown or malformed token', () => {
   });
 });
 
+describe('the parser stays inside this plugin', () => {
+  /** A sibling plugin registered after ours: what it parses must be what Fastify parses by default. */
+  async function buildWithSibling() {
+    logLines = [];
+    app = await buildApp({
+      cfg: testConfig(),
+      readiness: async () => ({ dbOk: true, jobsOk: true }),
+      apiRoutes: [
+        (scope) => registerEmailUnsubscribeRoutes(scope, { db: FAKE_DB, companyName: 'GG Homes', now: () => NOW }),
+        async (scope) => {
+          scope.post('/echo', async (req) => ({ isString: typeof req.body === 'string', body: req.body }));
+        },
+      ],
+    });
+  }
+
+  it('another route keeps Fastify\'s JSON parsing (an object, not an ignored body)', async () => {
+    await buildWithSibling();
+    const res = await app.inject({ method: 'POST', url: '/api/echo', headers: { 'content-type': 'application/json' }, payload: '{"a":1}' });
+    expect(res.json()).toEqual({ isString: false, body: { a: 1 } });
+  });
+
+  it('another route still refuses malformed JSON and an unknown content type: our catch-all did not leak', async () => {
+    await buildWithSibling();
+    const malformed = await app.inject({ method: 'POST', url: '/api/echo', headers: { 'content-type': 'application/json' }, payload: '{ not json' });
+    const unknown = await app.inject({ method: 'POST', url: '/api/echo', headers: { 'content-type': 'application/x-something-else' }, payload: 'abc' });
+    expect([malformed.statusCode, unknown.statusCode]).toEqual([400, 415]);
+  });
+});
+
 describe('logs', () => {
   it('never carry the token, an address or a name, but carry the conversation id when a seller unsubscribes', async () => {
     await build();
     await app.inject({ method: 'GET', url: URL_PATH });
     await post(URL_PATH, { 'content-type': 'application/x-www-form-urlencoded' }, 'List-Unsubscribe=One-Click');
-    store.stopSeller.mockRejectedValue(Object.assign(new Error('boom: seller@example.com'), { code: '23505', detail: 'Key (address)=(seller@example.com)' }));
+    class DatabaseError extends Error {
+      override name = 'DatabaseError';
+      code = '23505';
+      detail = 'Key (address)=(seller@example.com)';
+    }
+    store.stopSeller.mockRejectedValue(new DatabaseError('boom: seller@example.com'));
     await post(URL_PATH, { 'content-type': 'application/x-www-form-urlencoded' }, 'List-Unsubscribe=One-Click');
     await app.inject({ method: 'GET', url: '/api/email/unsubscribe/ABC' });
     await app.close();
     const log = logLines.join('');
     expect(log).toContain('/api/email/unsubscribe/');
     expect(log).toContain(CONVERSATION_ID);
+    // A failed stop says what kind of failure it was (the class and the SQLSTATE), never its message or detail.
+    const failure = logLines.map((l) => JSON.parse(l) as Record<string, unknown>).find((l) => l.msg === 'unsubscribe failed');
+    expect(failure).toMatchObject({ conversationId: CONVERSATION_ID, errorName: 'DatabaseError', errorCode: '23505' });
+    expect(JSON.stringify(failure)).not.toMatch(/boom|Key \(address\)|seller@/);
+    expect(failure).not.toHaveProperty('err');
     expect(log).not.toContain(TOKEN);
     expect(log).not.toContain('seller@example.com');
     expect(log).not.toContain('GG Homes');

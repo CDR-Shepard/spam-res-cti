@@ -208,11 +208,12 @@ interface StoppedSeller {
   exitOwnEnrollments: boolean;
 }
 
-/** The other records of the tenant that carry this address (trimmed, any case), oldest id first so locks are taken in one order. */
-async function recordsWithAddress(db: Db, orgId: string, exceptRecordId: string, address: string): Promise<string[]> {
+/** The other records of the tenant that carry any of these addresses (trimmed, any case), oldest id first so locks are taken in one order. */
+async function recordsWithAddresses(db: Db, orgId: string, exceptRecordId: string, addresses: readonly string[]): Promise<string[]> {
+  if (addresses.length === 0) return [];
   const result = await db.execute(sql`
     select id from crm_records
-    where org_id = ${orgId}::uuid and id <> ${exceptRecordId}::uuid and lower(btrim(email)) = ${address}
+    where org_id = ${orgId}::uuid and id <> ${exceptRecordId}::uuid and lower(btrim(email)) in (${sqlList(addresses, '')})
     order by id`);
   return rows<{ id: string }>(result).map((r) => r.id);
 }
@@ -251,10 +252,13 @@ async function stopSiblingConversation(db: Db, s: StoppedSeller, siblingRecordId
  * stopped (every step is idempotent, so a later opt-out, complaint or new duplicate record still lands):
  *  - the record's address, and every address Sam emailed in this conversation, go on the suppression list
  *    (for the reasons in SUPPRESSING_REASONS). The record's email can change in Salesforce after Sam wrote,
- *    and the person who opted out must stay suppressed at the address that actually received the email;
- *  - every other record of the tenant with the same address (any case) gets a real conversation that is
- *    `stopped`, whether or not it had one, and every active ai_call enrollment of those records is exited
- *    (keys freed, planned touches skipped, call stage closed);
+ *    and the person who opted out must stay suppressed at the address that actually received the email.
+ *    They are inserted in sorted order: two concurrent sweeps over the same addresses then take their index
+ *    locks in the same order and cannot deadlock (40P01);
+ *  - every other record of the tenant with one of those addresses (any case; the record's current one always,
+ *    the emailed ones only for a suppressing reason) gets a real conversation that is `stopped`, whether or
+ *    not it had one, and every active ai_call enrollment of those records is exited (keys freed, planned
+ *    touches skipped, call stage closed);
  *  - the record's own active ai_call enrollments are exited too, unless the caller does that itself.
  * A seller who opts out of one of their records is opting out of all of them.
  */
@@ -265,15 +269,16 @@ async function sweepSeller(db: Db, s: StoppedSeller): Promise<void> {
   const email = record?.email || null;
   const recordIds = s.exitOwnEnrollments ? [s.crmRecordId] : [];
   const suppression = suppressionReasonFor(s.reason);
+  // What this stop suppresses: the record's current address and every emailed one, but only for a suppressing reason.
+  const suppressed = suppression ? [...new Set([...(email ? [email] : []), ...(await emailedAddresses(db, s.conversationId))])].sort() : [];
   if (suppression) {
-    const addresses = new Set([...(email ? [email] : []), ...(await emailedAddresses(db, s.conversationId))]);
-    for (const address of addresses) await suppressAddress(db, { orgId: s.orgId, address, reason: suppression, conversationId: s.conversationId });
+    for (const address of suppressed) await suppressAddress(db, { orgId: s.orgId, address, reason: suppression, conversationId: s.conversationId });
   }
-  if (email) {
-    for (const siblingRecordId of await recordsWithAddress(db, s.orgId, s.crmRecordId, email)) {
-      await stopSiblingConversation(db, s, siblingRecordId);
-      recordIds.push(siblingRecordId);
-    }
+  // A stop of any reason reaches the other records with the record's current address; a suppressing one also those with an emailed address.
+  const swept = [...new Set([...(email ? [email] : []), ...suppressed])].sort();
+  for (const siblingRecordId of await recordsWithAddresses(db, s.orgId, s.crmRecordId, swept)) {
+    await stopSiblingConversation(db, s, siblingRecordId);
+    recordIds.push(siblingRecordId);
   }
   if (recordIds.length === 0) return;
   const enrollments = await db.execute(sql`

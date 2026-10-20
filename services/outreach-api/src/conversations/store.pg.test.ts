@@ -485,6 +485,78 @@ describe.skipIf(!pgLane)('conversation store (real Postgres)', () => {
         expect((await suppressionRows(orgId)).map((r) => r.address).sort()).toEqual(['new@example.com', 'old@example.com']);
       });
 
+      it('inserts the suppressions in one canonical (sorted) order, whatever order the addresses came in', async () => {
+        // Two sweeps over the same addresses must lock them in the same order or they can deadlock (40P01).
+        const { orgId, conv } = await seedEnrolledSeller('z-current@example.com');
+        await queueEmail(orgId, conv.id, 'm@example.com');
+        await queueEmail(orgId, conv.id, 'a@example.com');
+        await stopSeller(t.db, { conversationId: conv.id, reason: 'opted_out', now: NOW });
+        // One transaction, so heap order is insertion order.
+        const inserted = await t.pool.query('select address from email_suppressions where org_id = $1 order by ctid', [orgId]);
+        expect(inserted.rows.map((r: { address: string }) => r.address)).toEqual(['a@example.com', 'm@example.com', 'z-current@example.com']);
+      });
+
+      describe('another record that carries an address Sam emailed', () => {
+        /** The seller's record changed email after Sam wrote; `holder` is another record that now has the old address. */
+        async function seedMovedSeller() {
+          const { orgId, campaignId, lead, conv } = await seedEnrolledSeller('old@example.com');
+          await queueEmail(orgId, conv.id, 'old@example.com');
+          await changeRecordEmail(lead.crmRecordId, 'new@example.com');
+          const holder = await seedReleasedLead(t.db, { orgId, campaignId }, { recordOver: { email: 'OLD@Example.com' } });
+          return { orgId, campaignId, lead, conv, holder };
+        }
+
+        it.each(['opted_out', 'asked_to_stop', 'complained'] as const)(
+          'is stopped and its enrollment exited after the seller %s, though the seller\'s current email is different',
+          async (reason) => {
+            const { orgId, lead, conv, holder } = await seedMovedSeller();
+            expect(await stopSeller(t.db, { conversationId: conv.id, reason, now: NOW })).toBe(true);
+            expect(await conversationsOfRecord(orgId, holder.crmRecordId)).toMatchObject([{ status: 'stopped', stopReason: reason }]);
+            expect(await enrollmentById(t.db, holder.enrollmentId)).toMatchObject({ status: 'exited', exitReason: reason });
+            expect(await enrollmentById(t.db, lead.enrollmentId)).toMatchObject({ status: 'exited', exitReason: reason });
+            expect(await eventsOf((await conversationsOfRecord(orgId, holder.crmRecordId))[0]!.id)).toMatchObject([{ kind: 'status', detail: reason, sfLogStatus: 'pending' }]);
+          },
+        );
+
+        it('stops the holders of every emailed address, once each, and leaves a record with another address alone', async () => {
+          const { orgId, campaignId, conv, holder } = await seedMovedSeller();
+          await queueEmail(orgId, conv.id, 'older@example.com');
+          const olderHolder = await seedReleasedLead(t.db, { orgId, campaignId }, { recordOver: { email: ' Older@Example.com ' } });
+          const bystander = await seedReleasedLead(t.db, { orgId, campaignId }, { recordOver: { email: 'bystander@example.com' } });
+          await stopSeller(t.db, { conversationId: conv.id, reason: 'opted_out', now: NOW });
+          for (const stopped of [holder, olderHolder]) {
+            expect(await conversationsOfRecord(orgId, stopped.crmRecordId)).toMatchObject([{ status: 'stopped', stopReason: 'opted_out' }]);
+            expect(await enrollmentById(t.db, stopped.enrollmentId)).toMatchObject({ status: 'exited', exitReason: 'opted_out' });
+          }
+          expect(await conversationsOfRecord(orgId, bystander.crmRecordId)).toEqual([]);
+          expect(await enrollmentById(t.db, bystander.enrollmentId)).toMatchObject({ status: 'active', exitReason: null });
+        });
+
+        it('not_interested does not suppress, so it does not reach the old address\'s holder either', async () => {
+          const { orgId, conv, holder } = await seedMovedSeller();
+          expect(await stopSeller(t.db, { conversationId: conv.id, reason: 'not_interested', now: NOW })).toBe(true);
+          expect(await conversationsOfRecord(orgId, holder.crmRecordId)).toEqual([]);
+          expect(await enrollmentById(t.db, holder.enrollmentId)).toMatchObject({ status: 'active', exitReason: null });
+        });
+
+        it('a practice conversation never reaches it', async () => {
+          const { orgId, lead, holder } = await seedMovedSeller();
+          const admin = await seedUser(t.db, orgId);
+          const practice = await ensureConversation(t.db, { orgId, crmRecordId: lead.crmRecordId, practiceUserId: admin });
+          await queueEmail(orgId, practice.id, 'old@example.com');
+          expect(await stopSeller(t.db, { conversationId: practice.id, reason: 'opted_out', now: NOW })).toBe(true);
+          expect(await conversationsOfRecord(orgId, holder.crmRecordId)).toEqual([]);
+          expect(await enrollmentById(t.db, holder.enrollmentId)).toMatchObject({ status: 'active', exitReason: null });
+        });
+
+        it('is swept even when the seller\'s record has no email left', async () => {
+          const { orgId, lead, conv, holder } = await seedMovedSeller();
+          await changeRecordEmail(lead.crmRecordId, null);
+          await stopSeller(t.db, { conversationId: conv.id, reason: 'opted_out', now: NOW });
+          expect(await conversationsOfRecord(orgId, holder.crmRecordId)).toMatchObject([{ status: 'stopped', stopReason: 'opted_out' }]);
+        });
+      });
+
       it("never reaches another conversation's addresses or a practice conversation's", async () => {
         const { orgId, lead, conv } = await seedEnrolledSeller('seller@example.com');
         const otherRecord = await seedRecord(t.db, orgId, snapshot({ sfRecordId: leadId(900_000 + (seq += 1)), email: 'someone-else@example.com' }));
