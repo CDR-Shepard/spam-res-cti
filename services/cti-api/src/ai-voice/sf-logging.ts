@@ -11,7 +11,8 @@
  *                    and calls.salesforce_task_id.
  *   logCallbackTask  a promised call back (outcome qualified_callback or
  *                    transfer_failed, or already_booked with a callback
- *                    scheduled to move it): an OPEN Task for the hand-off user
+ *                    scheduled to move it, due the next business day when no
+ *                    day was agreed): an OPEN Task for the hand-off user
  *                    (the record owner), created with their own Salesforce
  *                    connection so it is theirs; if that connection is gone,
  *                    created by the starter with OwnerId (customFields) set
@@ -21,7 +22,9 @@
  * reps' talk-time reports sum that field.
  */
 import { eq } from 'drizzle-orm';
+import { ROUTING_ZONE } from '@cti/contracts';
 import { getDb, schema } from '@cti/db';
+import { nextBusinessDay } from '../dialer/next-business-day.js';
 import { orgTodayIso } from '../dialer/org-day.js';
 import { createCallTask, type CallTaskInput } from '../salesforce/client.js';
 import { buildConnectTaskInput, taskLinks, type TaskLinks } from '../salesforce/dialer-connect-task.js';
@@ -40,16 +43,26 @@ export const SF_CREATE_TIMEOUT_MS = 60_000;
 const SUBJECT_MAX = 255;
 const CALLBACK_OUTCOMES = new Set(['qualified_callback', 'transfer_failed']);
 
+/** Every callback line the tool wrote; the last one is the callback (callbackAt is the last call's too). */
+const WHEN_LINES = /^Callback requested: (.+?)(?: — .*)?$/gm;
+/** schedule_callback was called: its line is in the tool summary (non-global, so `.test` keeps no lastIndex). */
+const CALLBACK_LINE = /^Callback requested: /m;
+/** The days a no-day already_booked callback may fall on: Monday to Friday (getUTCDay), no holiday calendar. */
+const BUSINESS_WEEKDAYS: ReadonlySet<number> = new Set([1, 2, 3, 4, 5]);
+const NO_HOLIDAYS: ReadonlySet<string> = new Set();
+
+/** schedule_callback was called on this call: with an agreed time (callbackAt), or in words only ("call me anytime"). */
+const callbackScheduled = (row: AiCallRow): boolean => row.callbackAt !== null || CALLBACK_LINE.test(row.summary ?? '');
+
 /**
  * Does this call get the open callback Task? A callback outcome; or a seller whose consultation was already booked and who
- * asked the team to call to move it (already_booked with a scheduled callback, final review I1). The touch still completes.
+ * asked the team to call to move it (already_booked with schedule_callback called, final review I1), with or without an
+ * agreed day. The touch still completes.
  */
 function promisedCallback(row: AiCallRow): boolean {
   if (!row.outcome) return false;
-  return CALLBACK_OUTCOMES.has(row.outcome) || (row.outcome === 'already_booked' && row.callbackAt !== null);
+  return CALLBACK_OUTCOMES.has(row.outcome) || (row.outcome === 'already_booked' && callbackScheduled(row));
 }
-/** Every callback line the tool wrote; the last one is the callback (callbackAt is the last call's too). */
-const WHEN_LINES = /^Callback requested: (.+?)(?: — .*)?$/gm;
 const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
 const PROMISED = 'The caller was promised a call back.';
 
@@ -98,10 +111,16 @@ export function aiCallTaskInput(row: AiCallRow, links: TaskLinks, summary: strin
   };
 }
 
-/** The callback's calendar day: a date-only request as given, else the time in the prospect's zone (the zone the agent's local time used). */
+/**
+ * The callback's calendar day: a date-only request as given, else the time in the prospect's zone (the zone the agent's local
+ * time used). With no day agreed: today; but an already_booked seller's "call me anytime" is the next business day in
+ * ROUTING_ZONE (the consultation stands meanwhile).
+ */
 function callbackDay(row: AiCallRow, when: string | null, now: Date): string {
   if (when && DATE_ONLY.test(when)) return when;
-  return row.callbackAt ? orgTodayIso(row.callbackAt, recipientTimeZone(row.toE164)) : orgTodayIso(now);
+  if (row.callbackAt) return orgTodayIso(row.callbackAt, recipientTimeZone(row.toE164));
+  if (row.outcome === 'already_booked') return nextBusinessDay(orgTodayIso(now, ROUTING_ZONE), BUSINESS_WEEKDAYS, NO_HOLIDAYS);
+  return orgTodayIso(now);
 }
 
 /** An exact time (the agreed one, or an ISO `when`) as "Wed, Oct 7, 5:00 PM" in the prospect's zone; else the agent's words. */

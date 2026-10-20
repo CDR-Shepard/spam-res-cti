@@ -222,7 +222,44 @@ describe('logCallbackTask', () => {
 
   it('already_booked with no callback scheduled: no callback Task', async () => {
     expect(await logCallbackTask(row({ outcome: 'already_booked', callbackAt: null }), SUMMARY, deps)).toBeNull();
+    // Words that only mention a callback mid-line are not the tool's line.
+    const mentioned = row({ outcome: 'already_booked', callbackAt: null, summary: 'Seller confirmed the booked time. Notes: Callback requested: no' });
+    expect(await logCallbackTask(mentioned, SUMMARY, deps)).toBeNull();
     expect(created).toHaveLength(0);
+  });
+
+  describe('already_booked with a callback asked for but no day agreed ("call me anytime")', () => {
+    const anytime = (over: Partial<AiCallRow> = {}) =>
+      row({ outcome: 'already_booked', callbackAt: null, summary: 'x\nCallback requested: anytime — to move the consultation', ...over });
+    const at = (iso: string): SfLogDeps => ({ ...deps, now: () => new Date(iso) });
+
+    it.each<[string, string, string]>([
+      ['a Friday call: the following Monday', '2026-10-23T20:00:00Z', '2026-10-26'],
+      ['a Monday call: Tuesday', '2026-10-26T17:00:00Z', '2026-10-27'],
+      ['a Saturday call: Monday', '2026-10-24T18:00:00Z', '2026-10-26'],
+      // 8 PM Sunday Pacific is already Monday in UTC: the day is Pacific's.
+      ['a Sunday evening call (Pacific): Monday', '2026-10-26T03:00:00Z', '2026-10-26'],
+    ])('the same open callback Task, due the next business day: %s', async (_name, now, due) => {
+      owners.set(LEAD, { type: 'Lead', ownerId: SF_OWNER });
+      expect(await logCallbackTask(anytime(), SUMMARY, at(now))).toBe('00T1');
+      expect(created).toHaveLength(1);
+      expect(created[0]!.userId).toBe(OWNER);
+      expect(created[0]!.input).toMatchObject({ subject: 'AI call: callback anytime', activityDate: due, customFields: { Status: CALLBACK_TASK_STATUS } });
+    });
+
+    it('the call row is untouched: the outcome stays already_booked', async () => {
+      const r = anytime();
+      await store.insert(r);
+      await logCallbackTask(r, SUMMARY, at('2026-10-23T20:00:00Z'));
+      expect(store.rows.get(ID)).toEqual(r);
+    });
+
+    it('qualified_callback with no day keeps today\'s date', async () => {
+      owners.set(LEAD, { type: 'Lead', ownerId: SF_OWNER });
+      const r = row({ outcome: 'qualified_callback', callbackAt: null, summary: 'Callback requested: anytime' });
+      expect(await logCallbackTask(r, SUMMARY, at('2026-10-23T20:00:00Z'))).toBe('00T1');
+      expect(created[0]!.input).toMatchObject({ subject: 'AI call: callback anytime', activityDate: '2026-10-23' });
+    });
   });
 
   it('if the org refuses the open status, the callback Task is still made (completed)', async () => {
