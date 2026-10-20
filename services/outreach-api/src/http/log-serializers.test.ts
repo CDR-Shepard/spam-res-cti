@@ -9,6 +9,13 @@ describe('loggableUrl', () => {
     expect(loggableUrl('/api/auth/workos/callback?code=abc&state=xyz')).toBe('/api/auth/workos/callback');
   });
 
+  it('replaces the token of an unsubscribe link, keeping the rest of the URL', () => {
+    expect(loggableUrl('/api/email/unsubscribe/abcdefghijklmnopqrstuvwxyz')).toBe('/api/email/unsubscribe/:token');
+    expect(loggableUrl('/api/email/unsubscribe/abcdefghijklmnopqrstuvwxyz?x=1')).toBe('/api/email/unsubscribe/:token?x=1');
+    expect(loggableUrl('/api/email/unsubscribe/ABC')).toBe('/api/email/unsubscribe/:token');
+    expect(loggableUrl('/api/email/unsubscribe/')).toBe('/api/email/unsubscribe/:token');
+  });
+
   it('leaves every other URL, and callbacks without a query, as they are', () => {
     expect(loggableUrl('/api/campaigns?status=active&limit=5')).toBe('/api/campaigns?status=active&limit=5');
     expect(loggableUrl('/api/connections/salesforce/callback')).toBe('/api/connections/salesforce/callback');

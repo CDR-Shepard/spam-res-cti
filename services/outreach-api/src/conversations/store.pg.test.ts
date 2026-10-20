@@ -406,6 +406,101 @@ describe.skipIf(!pgLane)('conversation store (real Postgres)', () => {
       expect(await suppressionRows(orgId)).toEqual([]);
     });
 
+    describe('the address that was emailed', () => {
+      /** An outbound email row of the conversation to `toAddress` (the event it hangs off is created too). */
+      async function queueEmail(orgId: string, conversationId: string, toAddress: string, direction: 'out' | 'in' = 'out') {
+        const eventId = await appendEvent(t.db, {
+          orgId,
+          conversationId,
+          kind: 'email',
+          direction,
+          actor: direction === 'out' ? 'sam' : 'seller',
+          occurredAt: NOW,
+          subject: 'Your house',
+          body: 'Hello there.',
+          sfLog: false,
+        });
+        await t.db.insert(schema.emailMessages).values({
+          orgId,
+          conversationId,
+          eventId,
+          direction,
+          status: direction === 'out' ? 'sent' : 'received',
+          purpose: direction === 'out' ? 'first' : 'inbound',
+          toAddress,
+          fromAddress: 'sam@example.com',
+        });
+      }
+      const changeRecordEmail = (crmRecordId: string, email: string | null) =>
+        t.db.update(schema.crmRecords).set({ email }).where(eq(schema.crmRecords.id, crmRecordId));
+
+      it.each(['opted_out', 'asked_to_stop', 'complained'] as const)(
+        '%s suppresses the address Sam wrote to even after the record email changed in Salesforce, and the new one too',
+        async (reason) => {
+          const { orgId, lead, conv } = await seedEnrolledSeller('old@example.com');
+          await queueEmail(orgId, conv.id, 'Old@Example.com');
+          await changeRecordEmail(lead.crmRecordId, 'new@example.com');
+          expect(await stopSeller(t.db, { conversationId: conv.id, reason, now: NOW })).toBe(true);
+          const expected = reason === 'complained' ? 'complained' : 'opted_out';
+          const rows = (await suppressionRows(orgId)).map((r) => [r.address, r.reason, r.conversationId]).sort();
+          expect(rows).toEqual([
+            ['new@example.com', expected, conv.id],
+            ['old@example.com', expected, conv.id],
+          ]);
+        },
+      );
+
+      it('suppresses every distinct address it wrote to, once each, and never an inbound sender', async () => {
+        const { orgId, conv } = await seedEnrolledSeller('seller@example.com');
+        await queueEmail(orgId, conv.id, 'a@example.com');
+        await queueEmail(orgId, conv.id, ' A@EXAMPLE.COM ');
+        await queueEmail(orgId, conv.id, 'b@example.com');
+        await queueEmail(orgId, conv.id, 'sam@reply.example.com', 'in');
+        await stopSeller(t.db, { conversationId: conv.id, reason: 'opted_out', now: NOW });
+        expect((await suppressionRows(orgId)).map((r) => r.address).sort()).toEqual(['a@example.com', 'b@example.com', 'seller@example.com']);
+      });
+
+      it('suppresses the emailed address even when the record has no email any more', async () => {
+        const { orgId, lead, conv } = await seedEnrolledSeller('old@example.com');
+        await queueEmail(orgId, conv.id, 'old@example.com');
+        await changeRecordEmail(lead.crmRecordId, null);
+        await stopSeller(t.db, { conversationId: conv.id, reason: 'opted_out', now: NOW });
+        expect(await suppressionRows(orgId)).toMatchObject([{ address: 'old@example.com', reason: 'opted_out' }]);
+      });
+
+      it('not_interested suppresses neither the emailed address nor the current one', async () => {
+        const { orgId, lead, conv } = await seedEnrolledSeller('old@example.com');
+        await queueEmail(orgId, conv.id, 'old@example.com');
+        await changeRecordEmail(lead.crmRecordId, 'new@example.com');
+        expect(await stopSeller(t.db, { conversationId: conv.id, reason: 'not_interested', now: NOW })).toBe(true);
+        expect(await suppressionRows(orgId)).toEqual([]);
+      });
+
+      it('an already stopped conversation still suppresses the emailed address on a later opt-out', async () => {
+        const { orgId, lead, conv } = await seedEnrolledSeller('old@example.com');
+        await queueEmail(orgId, conv.id, 'old@example.com');
+        await changeRecordEmail(lead.crmRecordId, 'new@example.com');
+        await stopSeller(t.db, { conversationId: conv.id, reason: 'not_interested', now: NOW });
+        await stopSeller(t.db, { conversationId: conv.id, reason: 'opted_out', now: NOW });
+        expect((await suppressionRows(orgId)).map((r) => r.address).sort()).toEqual(['new@example.com', 'old@example.com']);
+      });
+
+      it("never reaches another conversation's addresses or a practice conversation's", async () => {
+        const { orgId, lead, conv } = await seedEnrolledSeller('seller@example.com');
+        const otherRecord = await seedRecord(t.db, orgId, snapshot({ sfRecordId: leadId(900_000 + (seq += 1)), email: 'someone-else@example.com' }));
+        const other = await ensureConversation(t.db, { orgId, crmRecordId: otherRecord });
+        await queueEmail(orgId, other.id, 'someone-else@example.com');
+        const admin = await seedUser(t.db, orgId);
+        const practice = await ensureConversation(t.db, { orgId, crmRecordId: lead.crmRecordId, practiceUserId: admin });
+        await queueEmail(orgId, practice.id, 'practice-copy@example.com');
+        await stopSeller(t.db, { conversationId: conv.id, reason: 'opted_out', now: NOW });
+        expect((await suppressionRows(orgId)).map((r) => r.address)).toEqual(['seller@example.com']);
+        // And stopping the practice conversation itself still touches nothing outside its row.
+        await stopSeller(t.db, { conversationId: practice.id, reason: 'opted_out', now: NOW });
+        expect((await suppressionRows(orgId)).map((r) => r.address)).toEqual(['seller@example.com']);
+      });
+    });
+
     it('a practice conversation that is already stopped is false and reaches nothing', async () => {
       const { orgId, campaignId, lead } = await seedEnrolledSeller('seller@example.com');
       const duplicate = await seedDuplicate(orgId, campaignId);

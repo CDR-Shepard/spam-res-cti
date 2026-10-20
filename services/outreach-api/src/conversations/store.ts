@@ -217,6 +217,15 @@ async function recordsWithAddress(db: Db, orgId: string, exceptRecordId: string,
   return rows<{ id: string }>(result).map((r) => r.id);
 }
 
+/** Every distinct address (trimmed, lowercased) Sam emailed in this conversation, whatever became of the email. */
+async function emailedAddresses(db: Db, conversationId: string): Promise<string[]> {
+  const result = await db.execute(sql`
+    select distinct lower(btrim(to_address)) as address from email_messages
+    where conversation_id = ${conversationId}::uuid and direction = 'out'
+    order by address`);
+  return rows<{ address: string }>(result).map((r) => r.address);
+}
+
 /** A sibling record's real conversation, created when missing, ends `stopped` with this reason (an already stopped one keeps its own); a `status` event for a newly stopped one. */
 async function stopSiblingConversation(db: Db, s: StoppedSeller, siblingRecordId: string): Promise<void> {
   const conversation = await ensureConversation(db, { orgId: s.orgId, crmRecordId: siblingRecordId });
@@ -240,7 +249,9 @@ async function stopSiblingConversation(db: Db, s: StoppedSeller, siblingRecordId
 /**
  * Everything a stop of a REAL conversation reaches beyond its own row, whether or not the row was already
  * stopped (every step is idempotent, so a later opt-out, complaint or new duplicate record still lands):
- *  - the record's address goes on the suppression list (for the reasons in SUPPRESSING_REASONS);
+ *  - the record's address, and every address Sam emailed in this conversation, go on the suppression list
+ *    (for the reasons in SUPPRESSING_REASONS). The record's email can change in Salesforce after Sam wrote,
+ *    and the person who opted out must stay suppressed at the address that actually received the email;
  *  - every other record of the tenant with the same address (any case) gets a real conversation that is
  *    `stopped`, whether or not it had one, and every active ai_call enrollment of those records is exited
  *    (keys freed, planned touches skipped, call stage closed);
@@ -253,9 +264,12 @@ async function sweepSeller(db: Db, s: StoppedSeller): Promise<void> {
   );
   const email = record?.email || null;
   const recordIds = s.exitOwnEnrollments ? [s.crmRecordId] : [];
+  const suppression = suppressionReasonFor(s.reason);
+  if (suppression) {
+    const addresses = new Set([...(email ? [email] : []), ...(await emailedAddresses(db, s.conversationId))]);
+    for (const address of addresses) await suppressAddress(db, { orgId: s.orgId, address, reason: suppression, conversationId: s.conversationId });
+  }
   if (email) {
-    const suppression = suppressionReasonFor(s.reason);
-    if (suppression) await suppressAddress(db, { orgId: s.orgId, address: email, reason: suppression, conversationId: s.conversationId });
     for (const siblingRecordId of await recordsWithAddress(db, s.orgId, s.crmRecordId, email)) {
       await stopSiblingConversation(db, s, siblingRecordId);
       recordIds.push(siblingRecordId);
