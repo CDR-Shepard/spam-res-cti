@@ -126,7 +126,7 @@ describe('routedOffer', () => {
   });
 
   it('Routes down → in-person times from straight lines', async () => {
-    // Chance's 7:00 consultation in Anaheim needs a drive in for Tuesday 9:00, so a route matrix is asked (and fails).
+    // Every in-person time asks a route matrix (from the office, and from Chance's 7:00 consultation in Anaheim), and it fails.
     const events = [eventRow(CHANCE, '2026-10-20T14:00:00.000Z', '2026-10-20T15:00:00.000Z', { Location: ANAHEIM, Subject: 'Property Consultation' })];
     const { maps } = fakeMaps(PLACES, { routes: new MapsUnavailableError('timeout') });
     const { offer, log } = await offerFor(OC_PROPERTY, { events, maps });
@@ -139,7 +139,7 @@ describe('routedOffer', () => {
   });
 
   it('a drive lookup that Routes answers is counted on the info line', async () => {
-    // Chance's 7:00 consultation in Anaheim needs a drive in for Tuesday 9:00: Routes is asked, and answers.
+    // Every in-person time asks Routes for its drives in (from the office, and from Chance's 7:00 in Anaheim), and Routes answers.
     const events = [eventRow(CHANCE, '2026-10-20T14:00:00.000Z', '2026-10-20T15:00:00.000Z', { Location: ANAHEIM, Subject: 'Property Consultation' })];
     const { offer, log } = await offerFor(OC_PROPERTY, { events });
     expect(inPerson(offer.slots)[0]!.start).toBe(TUE_9);

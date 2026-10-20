@@ -132,6 +132,14 @@ describe('inPersonSlots', () => {
       expect(repAt(slots, TUE_9)).toBe(CHANCE.sfUserId);
     });
 
+    it('an Event that ends before 8:00 still sets the drive-in start: no wait until 8:00', async () => {
+      const { drive } = fakeDrive({ [`${ANAHEIM}>property`]: 90 });
+      // Anaheim until 07:00: 07:00 + 90 = 08:30 makes 09:00. Waiting until 08:00 would arrive at 09:30.
+      const chance = cal(CHANCE, [item(pt(20, 6, 30), pt(20, 7), { location: ANAHEIM })]);
+      const slots = await inPerson([chance], drive);
+      expect(slots[0]).toMatchObject({ start: TUE_9, specialistSfUserId: CHANCE.sfUserId });
+    });
+
     it('a time before 8:00 cannot be reached from the office', async () => {
       const early: BookingRegion = { ...LA, startTimes: ['07:30', '09:00'] };
       const slots = await inPerson([cal(CHANCE)], fakeDrive({ [`${OFFICE_ADDRESS}>property`]: 1 }).drive, { region: early });
@@ -355,6 +363,12 @@ describe('repCanReach', () => {
     const r = reach([earlier], { [`${ANAHEIM}>property`]: 20, [`${OFFICE_ADDRESS}>property`]: 500 });
     expect(await r.ok).toBe(true);
     expect(r.calls.map((c) => c.origins)).toEqual([[{ address: ANAHEIM }]]);
+  });
+
+  it('an Event that ends before 8:00 still sets the drive-in start (with the slack)', async () => {
+    // 07:00 + 90 = 08:30, inside 09:00 + 15; from 08:00 it would be 09:30, past it.
+    const early = item(pt(20, 6, 30), pt(20, 7), { location: ANAHEIM });
+    expect(await reach([early], { [`${ANAHEIM}>property`]: 90 }).ok).toBe(true);
   });
 
   it('no route from the office: false', async () => {
