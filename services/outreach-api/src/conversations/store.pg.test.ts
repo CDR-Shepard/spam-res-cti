@@ -132,7 +132,7 @@ describe.skipIf(!pgLane)('conversation store (real Postgres)', () => {
       const a = await seedSeller();
       const b = await seedSeller();
       const conv = await ensureConversation(t.db, a);
-      await expect(appendEvent(t.db, { orgId: b.orgId, conversationId: conv.id, kind: 'note', direction: 'none', actor: 'system', sfLog: false })).rejects.toThrow(/conversation/);
+      await expect(appendEvent(t.db, { orgId: b.orgId, conversationId: conv.id, kind: 'note', direction: 'none', actor: 'system', sfLog: false })).rejects.toThrow(`conversation ${conv.id} not found for event`);
       expect(await eventsOf(conv.id)).toHaveLength(0);
     });
   });
@@ -220,13 +220,18 @@ describe.skipIf(!pgLane)('conversation store (real Postgres)', () => {
       expect(events[0]).toMatchObject({ kind: 'status', direction: 'none', detail: 'opted_out', sfLogStatus: 'pending' });
     });
 
-    it('is false the second time and writes nothing', async () => {
+    it('is false the second time with the same reason and writes no second event', async () => {
       const { orgId, conv } = await seedEnrolledSeller('seller@example.com');
       expect(await stopSeller(t.db, { conversationId: conv.id, reason: 'opted_out', now: NOW })).toBe(true);
-      expect(await stopSeller(t.db, { conversationId: conv.id, reason: 'complained', now: NOW })).toBe(false);
+      expect(await stopSeller(t.db, { conversationId: conv.id, reason: 'opted_out', now: NOW })).toBe(false);
+      expect(await stopSeller(t.db, { conversationId: conv.id, reason: 'asked_to_stop', now: NOW })).toBe(false);
       expect(await conversationRow(conv.id)).toMatchObject({ status: 'stopped', stopReason: 'opted_out' });
       expect(await eventsOf(conv.id)).toHaveLength(1);
       expect(await suppressionRows(orgId)).toMatchObject([{ reason: 'opted_out' }]);
+    });
+
+    it('is false for an unknown conversation', async () => {
+      expect(await stopSeller(t.db, { conversationId: '00000000-0000-4000-8000-000000000000', reason: 'opted_out', now: NOW })).toBe(false);
     });
 
     it('stops a booked conversation too', async () => {
@@ -272,6 +277,9 @@ describe.skipIf(!pgLane)('conversation store (real Postgres)', () => {
       expect(await enrollmentById(t.db, twin.enrollmentId)).toMatchObject({ status: 'exited', exitReason: 'opted_out' });
       expect(await suppressionRows(orgId)).toHaveLength(1);
       expect(await suppressionRows(foreign.orgId)).toEqual([]);
+      // A conversation the sweep newly stops says so on its own timeline, and owes Salesforce a Task.
+      expect(await eventsOf(twinConv.id)).toMatchObject([{ kind: 'status', detail: 'opted_out', sfLogStatus: 'pending' }]);
+      expect(await eventsOf(otherConv.id)).toEqual([]);
     });
 
     it('leaves enrollments in sequence campaigns alone', async () => {
@@ -294,6 +302,123 @@ describe.skipIf(!pgLane)('conversation store (real Postgres)', () => {
       const events = await eventsOf(practice.id);
       expect(events).toHaveLength(1);
       expect(events[0]).toMatchObject({ kind: 'status', detail: 'opted_out', sfLogStatus: 'skipped' });
+    });
+
+    /** A duplicate lead of the seller: another record with the same address and an active ai_call enrollment, and no conversation. */
+    const seedDuplicate = (orgId: string, campaignId: string, email = 'Seller@Example.COM') =>
+      seedReleasedLead(t.db, { orgId, campaignId }, { recordOver: { email } });
+
+    const conversationsOfRecord = (orgId: string, crmRecordId: string) =>
+      t.db
+        .select()
+        .from(schema.sellerConversations)
+        .where(and(eq(schema.sellerConversations.orgId, orgId), eq(schema.sellerConversations.crmRecordId, crmRecordId)));
+
+    it('gives a same-address record with no conversation a stopped one and exits its enrollment', async () => {
+      const { orgId, campaignId, conv } = await seedEnrolledSeller('seller@example.com');
+      const duplicate = await seedDuplicate(orgId, campaignId);
+      expect(await conversationsOfRecord(orgId, duplicate.crmRecordId)).toEqual([]);
+      await stopSeller(t.db, { conversationId: conv.id, reason: 'opted_out', now: NOW });
+      const [created, ...more] = await conversationsOfRecord(orgId, duplicate.crmRecordId);
+      expect(more).toEqual([]);
+      expect(created).toMatchObject({ status: 'stopped', stopReason: 'opted_out', practiceUserId: null });
+      expect(created!.token).toMatch(/^[a-z2-7]{26}$/);
+      expect(await eventsOf(created!.id)).toMatchObject([{ kind: 'status', detail: 'opted_out', sfLogStatus: 'pending' }]);
+      expect(await enrollmentById(t.db, duplicate.enrollmentId)).toMatchObject({ status: 'exited', exitReason: 'opted_out' });
+      expect(await touchById(t.db, duplicate.touchId)).toMatchObject({ status: 'skipped', skipReason: 'opted_out' });
+    });
+
+    it('lets a sibling already stopped for another reason keep it (no new event), but still exits its enrollment', async () => {
+      const { orgId, campaignId, conv } = await seedEnrolledSeller('seller@example.com');
+      const duplicate = await seedDuplicate(orgId, campaignId);
+      const duplicateConv = await ensureConversation(t.db, { orgId, crmRecordId: duplicate.crmRecordId });
+      await t.db.update(schema.sellerConversations).set({ status: 'stopped', stopReason: 'not_interested' }).where(eq(schema.sellerConversations.id, duplicateConv.id));
+      await stopSeller(t.db, { conversationId: conv.id, reason: 'opted_out', now: NOW });
+      expect(await conversationRow(duplicateConv.id)).toMatchObject({ status: 'stopped', stopReason: 'not_interested' });
+      expect(await eventsOf(duplicateConv.id)).toEqual([]);
+      expect(await enrollmentById(t.db, duplicate.enrollmentId)).toMatchObject({ status: 'exited', exitReason: 'opted_out' });
+    });
+
+    it('stops a booked sibling', async () => {
+      const { orgId, campaignId, conv } = await seedEnrolledSeller('seller@example.com');
+      const duplicate = await seedDuplicate(orgId, campaignId);
+      const duplicateConv = await ensureConversation(t.db, { orgId, crmRecordId: duplicate.crmRecordId });
+      await t.db.update(schema.sellerConversations).set({ status: 'booked' }).where(eq(schema.sellerConversations.id, duplicateConv.id));
+      await stopSeller(t.db, { conversationId: conv.id, reason: 'complained', now: NOW });
+      expect(await conversationRow(duplicateConv.id)).toMatchObject({ status: 'stopped', stopReason: 'complained' });
+      expect(await eventsOf(duplicateConv.id)).toMatchObject([{ kind: 'status', detail: 'complained', sfLogStatus: 'pending' }]);
+    });
+
+    it('after a call said not_interested, an opt-out suppresses the address, upgrades the reason and adds one event', async () => {
+      const { orgId, lead, conv } = await seedEnrolledSeller('seller@example.com');
+      await setStatusFromCall(t.db, { orgId, crmRecordId: lead.crmRecordId, outcome: 'not_interested', now: NOW });
+      expect(await conversationRow(conv.id)).toMatchObject({ status: 'stopped', stopReason: 'not_interested' });
+      expect(await suppressionRows(orgId)).toEqual([]);
+      expect(await eventsOf(conv.id)).toHaveLength(1);
+
+      expect(await stopSeller(t.db, { conversationId: conv.id, reason: 'opted_out', now: NOW })).toBe(true);
+
+      expect(await conversationRow(conv.id)).toMatchObject({ status: 'stopped', stopReason: 'opted_out' });
+      expect(await suppressionRows(orgId)).toMatchObject([{ address: 'seller@example.com', reason: 'opted_out', conversationId: conv.id }]);
+      expect(await enrollmentById(t.db, lead.enrollmentId)).toMatchObject({ status: 'exited', exitReason: 'opted_out' });
+      const events = await eventsOf(conv.id);
+      expect(events).toHaveLength(2);
+      expect(events.map((e) => [e.detail, e.sfLogStatus])).toEqual([['not_interested', 'skipped'], ['opted_out', 'pending']]);
+    });
+
+    it('after a call said not_interested, a complaint is recorded as complained', async () => {
+      const { orgId, lead, conv } = await seedEnrolledSeller('seller@example.com');
+      await setStatusFromCall(t.db, { orgId, crmRecordId: lead.crmRecordId, outcome: 'not_interested', now: NOW });
+      expect(await stopSeller(t.db, { conversationId: conv.id, reason: 'complained', now: NOW })).toBe(true);
+      expect(await conversationRow(conv.id)).toMatchObject({ stopReason: 'complained' });
+      expect(await suppressionRows(orgId)).toMatchObject([{ reason: 'complained' }]);
+    });
+
+    it('an already stopped conversation still sweeps a duplicate record that appeared later', async () => {
+      const { orgId, campaignId, conv } = await seedEnrolledSeller('seller@example.com');
+      expect(await stopSeller(t.db, { conversationId: conv.id, reason: 'opted_out', now: NOW })).toBe(true);
+      const later = await seedDuplicate(orgId, campaignId);
+      expect(await stopSeller(t.db, { conversationId: conv.id, reason: 'opted_out', now: NOW })).toBe(false);
+      expect(await conversationsOfRecord(orgId, later.crmRecordId)).toMatchObject([{ status: 'stopped', stopReason: 'opted_out' }]);
+      expect(await enrollmentById(t.db, later.enrollmentId)).toMatchObject({ status: 'exited', exitReason: 'opted_out' });
+      expect(await eventsOf(conv.id)).toHaveLength(1);
+    });
+
+    it('asked_to_stop on a conversation stopped as not_interested suppresses the address but keeps the reason and adds no event', async () => {
+      const { orgId, lead, conv } = await seedEnrolledSeller('seller@example.com');
+      await setStatusFromCall(t.db, { orgId, crmRecordId: lead.crmRecordId, outcome: 'not_interested', now: NOW });
+      expect(await stopSeller(t.db, { conversationId: conv.id, reason: 'asked_to_stop', now: NOW })).toBe(false);
+      expect(await conversationRow(conv.id)).toMatchObject({ stopReason: 'not_interested' });
+      expect(await eventsOf(conv.id)).toHaveLength(1);
+      expect(await suppressionRows(orgId)).toMatchObject([{ reason: 'opted_out' }]);
+    });
+
+    it('not_interested never suppresses the address, but still stops the seller across records', async () => {
+      const { orgId, campaignId, lead, conv } = await seedEnrolledSeller('seller@example.com');
+      const duplicate = await seedDuplicate(orgId, campaignId);
+      expect(await stopSeller(t.db, { conversationId: conv.id, reason: 'not_interested', now: NOW })).toBe(true);
+      expect(await suppressionRows(orgId)).toEqual([]);
+      expect(await enrollmentById(t.db, lead.enrollmentId)).toMatchObject({ status: 'exited', exitReason: 'not_interested' });
+      expect(await conversationsOfRecord(orgId, duplicate.crmRecordId)).toMatchObject([{ status: 'stopped', stopReason: 'not_interested' }]);
+      expect(await enrollmentById(t.db, duplicate.enrollmentId)).toMatchObject({ status: 'exited', exitReason: 'not_interested' });
+      // Already stopped as not_interested: a second one is no news, and still no suppression.
+      expect(await stopSeller(t.db, { conversationId: conv.id, reason: 'not_interested', now: NOW })).toBe(false);
+      expect(await suppressionRows(orgId)).toEqual([]);
+    });
+
+    it('a practice conversation that is already stopped is false and reaches nothing', async () => {
+      const { orgId, campaignId, lead } = await seedEnrolledSeller('seller@example.com');
+      const duplicate = await seedDuplicate(orgId, campaignId);
+      const admin = await seedUser(t.db, orgId);
+      const practice = await ensureConversation(t.db, { orgId, crmRecordId: lead.crmRecordId, practiceUserId: admin });
+      expect(await stopSeller(t.db, { conversationId: practice.id, reason: 'not_interested', now: NOW })).toBe(true);
+      expect(await stopSeller(t.db, { conversationId: practice.id, reason: 'opted_out', now: NOW })).toBe(false);
+      expect(await conversationRow(practice.id)).toMatchObject({ stopReason: 'not_interested' });
+      expect(await suppressionRows(orgId)).toEqual([]);
+      expect(await enrollmentById(t.db, lead.enrollmentId)).toMatchObject({ status: 'active' });
+      expect(await enrollmentById(t.db, duplicate.enrollmentId)).toMatchObject({ status: 'active' });
+      expect(await conversationsOfRecord(orgId, duplicate.crmRecordId)).toEqual([]);
+      expect(await eventsOf(practice.id)).toHaveLength(1);
     });
 
     it('is all or nothing: an outer transaction that rolls back undoes the stop', async () => {
@@ -376,12 +501,61 @@ describe.skipIf(!pgLane)('conversation store (real Postgres)', () => {
       expect(await conversationRow(conv.id)).toMatchObject({ status: 'stopped', stopReason: 'asked_to_stop' });
     });
 
-    it('leaves the enrollment and the suppression list to the results tick', async () => {
+    /** A seller (an AI-call lead with an active enrollment) and a duplicate record with the same address and no conversation. */
+    async function seedCalledSeller() {
       const { orgId, campaignId } = await seedAiCallCampaign(t.db);
       const lead = await seedReleasedLead(t.db, { orgId, campaignId }, { recordOver: { email: 'seller@example.com' } });
+      const duplicate = await seedReleasedLead(t.db, { orgId, campaignId }, { recordOver: { email: 'SELLER@example.com' } });
+      return { orgId, campaignId, lead, duplicate };
+    }
+    const conversationsOfRecord = (orgId: string, crmRecordId: string) =>
+      t.db
+        .select()
+        .from(schema.sellerConversations)
+        .where(and(eq(schema.sellerConversations.orgId, orgId), eq(schema.sellerConversations.crmRecordId, crmRecordId)));
+
+    it('do_not_call suppresses the address and sweeps the duplicate record, but leaves its own enrollment to the results tick', async () => {
+      const { orgId, lead, duplicate } = await seedCalledSeller();
       await call(orgId, lead.crmRecordId, 'do_not_call');
+      expect(await enrollmentById(t.db, lead.enrollmentId)).toMatchObject({ status: 'active', exitReason: null });
+      expect(await suppressionRows(orgId)).toMatchObject([{ address: 'seller@example.com', reason: 'opted_out' }]);
+      expect(await conversationsOfRecord(orgId, duplicate.crmRecordId)).toMatchObject([{ status: 'stopped', stopReason: 'asked_to_stop' }]);
+      expect(await enrollmentById(t.db, duplicate.enrollmentId)).toMatchObject({ status: 'exited', exitReason: 'asked_to_stop' });
+      const [own] = await conversationsOfRecord(orgId, lead.crmRecordId);
+      expect(await eventsOf(own!.id)).toMatchObject([{ detail: 'asked_to_stop', sfLogStatus: 'skipped' }]);
+      const [sibling] = await conversationsOfRecord(orgId, duplicate.crmRecordId);
+      expect(await eventsOf(sibling!.id)).toMatchObject([{ detail: 'asked_to_stop', sfLogStatus: 'pending' }]);
+    });
+
+    it('not_interested sweeps the duplicate record but suppresses nothing and leaves its own enrollment', async () => {
+      const { orgId, lead, duplicate } = await seedCalledSeller();
+      await call(orgId, lead.crmRecordId, 'not_interested');
       expect(await enrollmentById(t.db, lead.enrollmentId)).toMatchObject({ status: 'active' });
       expect(await suppressionRows(orgId)).toEqual([]);
+      expect(await conversationsOfRecord(orgId, duplicate.crmRecordId)).toMatchObject([{ status: 'stopped', stopReason: 'not_interested' }]);
+      expect(await enrollmentById(t.db, duplicate.enrollmentId)).toMatchObject({ status: 'exited', exitReason: 'not_interested' });
+    });
+
+    it('an appointment does not sweep: the duplicate record and its enrollment are left alone', async () => {
+      const { orgId, lead, duplicate } = await seedCalledSeller();
+      await call(orgId, lead.crmRecordId, 'appointment_set');
+      expect(await conversationsOfRecord(orgId, duplicate.crmRecordId)).toEqual([]);
+      expect(await enrollmentById(t.db, duplicate.enrollmentId)).toMatchObject({ status: 'active' });
+      expect(await suppressionRows(orgId)).toEqual([]);
+    });
+
+    it('do_not_call on an already stopped conversation still suppresses and sweeps, with no second event', async () => {
+      const { orgId, campaignId, lead } = await seedCalledSeller();
+      await call(orgId, lead.crmRecordId, 'not_interested');
+      const [own] = await conversationsOfRecord(orgId, lead.crmRecordId);
+      // A third record with the same address shows up, then the seller says do-not-call.
+      const later = await seedReleasedLead(t.db, { orgId, campaignId }, { recordOver: { email: 'seller@EXAMPLE.com' } });
+      await call(orgId, lead.crmRecordId, 'do_not_call');
+      expect(await conversationRow(own!.id)).toMatchObject({ status: 'stopped', stopReason: 'not_interested' });
+      expect(await eventsOf(own!.id)).toHaveLength(1);
+      expect(await suppressionRows(orgId)).toMatchObject([{ reason: 'opted_out' }]);
+      expect(await conversationsOfRecord(orgId, later.crmRecordId)).toMatchObject([{ status: 'stopped', stopReason: 'asked_to_stop' }]);
+      expect(await enrollmentById(t.db, later.enrollmentId)).toMatchObject({ status: 'exited', exitReason: 'asked_to_stop' });
     });
   });
 

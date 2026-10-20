@@ -188,6 +188,89 @@ export async function flagConversation(db: Db, i: { conversationId: string; reas
   });
 }
 
+/** Stop reasons that put the seller's address on the suppression list; 'not_interested' alone does not. */
+const SUPPRESSING_REASONS: ReadonlySet<StopReason> = new Set<StopReason>(['opted_out', 'complained', 'asked_to_stop']);
+/** An explicit opt-out outranks the reason a conversation was already stopped for (a call's not_interested). */
+const EXPLICIT_OPT_OUTS: ReadonlySet<StopReason> = new Set<StopReason>(['opted_out', 'complained']);
+
+function suppressionReasonFor(reason: StopReason): SuppressionReason | null {
+  if (reason === 'complained') return 'complained';
+  return SUPPRESSING_REASONS.has(reason) ? 'opted_out' : null;
+}
+
+interface StoppedSeller {
+  orgId: string;
+  conversationId: string;
+  crmRecordId: string;
+  reason: StopReason;
+  now: Date;
+  /** The caller exits the record's own enrollments itself (the results tick does, in its own flow). */
+  exitOwnEnrollments: boolean;
+}
+
+/** The other records of the tenant that carry this address (trimmed, any case), oldest id first so locks are taken in one order. */
+async function recordsWithAddress(db: Db, orgId: string, exceptRecordId: string, address: string): Promise<string[]> {
+  const result = await db.execute(sql`
+    select id from crm_records
+    where org_id = ${orgId}::uuid and id <> ${exceptRecordId}::uuid and lower(btrim(email)) = ${address}
+    order by id`);
+  return rows<{ id: string }>(result).map((r) => r.id);
+}
+
+/** A sibling record's real conversation, created when missing, ends `stopped` with this reason (an already stopped one keeps its own); a `status` event for a newly stopped one. */
+async function stopSiblingConversation(db: Db, s: StoppedSeller, siblingRecordId: string): Promise<void> {
+  const conversation = await ensureConversation(db, { orgId: s.orgId, crmRecordId: siblingRecordId });
+  const result = await db.execute(sql`
+    update seller_conversations set status = 'stopped', stop_reason = ${s.reason}, updated_at = ${iso(s.now)}
+    where id = ${conversation.id}::uuid and status in ('open', 'booked')
+    returning id`);
+  if (rows<{ id: string }>(result).length === 0) return;
+  await appendEvent(db, {
+    orgId: s.orgId,
+    conversationId: conversation.id,
+    kind: 'status',
+    direction: 'none',
+    actor: 'system',
+    occurredAt: s.now,
+    detail: s.reason,
+    sfLog: true,
+  });
+}
+
+/**
+ * Everything a stop of a REAL conversation reaches beyond its own row, whether or not the row was already
+ * stopped (every step is idempotent, so a later opt-out, complaint or new duplicate record still lands):
+ *  - the record's address goes on the suppression list (for the reasons in SUPPRESSING_REASONS);
+ *  - every other record of the tenant with the same address (any case) gets a real conversation that is
+ *    `stopped`, whether or not it had one, and every active ai_call enrollment of those records is exited
+ *    (keys freed, planned touches skipped, call stage closed);
+ *  - the record's own active ai_call enrollments are exited too, unless the caller does that itself.
+ * A seller who opts out of one of their records is opting out of all of them.
+ */
+async function sweepSeller(db: Db, s: StoppedSeller): Promise<void> {
+  const [record] = rows<{ email: string | null }>(
+    await db.execute(sql`select lower(btrim(email)) as email from crm_records where id = ${s.crmRecordId}::uuid and org_id = ${s.orgId}::uuid`),
+  );
+  const email = record?.email || null;
+  const recordIds = s.exitOwnEnrollments ? [s.crmRecordId] : [];
+  if (email) {
+    const suppression = suppressionReasonFor(s.reason);
+    if (suppression) await suppressAddress(db, { orgId: s.orgId, address: email, reason: suppression, conversationId: s.conversationId });
+    for (const siblingRecordId of await recordsWithAddress(db, s.orgId, s.crmRecordId, email)) {
+      await stopSiblingConversation(db, s, siblingRecordId);
+      recordIds.push(siblingRecordId);
+    }
+  }
+  if (recordIds.length === 0) return;
+  const enrollments = await db.execute(sql`
+    select e.id from campaign_enrollments e
+    join campaigns c on c.id = e.campaign_id and c.org_id = e.org_id
+    where e.org_id = ${s.orgId}::uuid and e.crm_record_id in (${sqlList(recordIds, '::uuid')})
+      and e.status = 'active' and c.mode = 'ai_call'
+    order by e.id`);
+  for (const { id } of rows<{ id: string }>(enrollments)) await finishAiEnrollment(db, id, s.reason, 'exited');
+}
+
 interface StoppedConversation {
   id: string;
   orgId: string;
@@ -196,43 +279,40 @@ interface StoppedConversation {
 }
 
 /**
- * Everything a stop of a REAL conversation reaches beyond its own row: the record's address goes on the
- * suppression list, every other real conversation of the tenant whose record has the same address (any case)
- * stops too, and every active ai_call enrollment of all the stopped records is exited (keys freed, planned
- * touches skipped, call stage closed). A seller who opts out of one of their records is opting out of all.
+ * A stop that finds the REAL conversation already stopped (a call said not_interested, a duplicate record
+ * was synced after the first stop): the sweep still runs, so the address is suppressed and every record of
+ * the seller is stopped. When the new reason is an explicit opt-out that differs from the stored one, the
+ * stop reason is upgraded and a `status` event (logged to Salesforce) records it. Returns whether the row
+ * changed. A practice conversation, or none, is false and nothing is touched.
  */
-async function stopReachOfRealConversation(db: Db, stopped: StoppedConversation, reason: StopReason, now: Date): Promise<void> {
-  const [record] = rows<{ email: string | null }>(
-    await db.execute(sql`select lower(btrim(email)) as email from crm_records where id = ${stopped.crmRecordId}::uuid and org_id = ${stopped.orgId}::uuid`),
+async function stopAlreadyStopped(db: Db, i: { conversationId: string; reason: StopReason; now: Date }): Promise<boolean> {
+  const [current] = rows<StoppedConversation & { status: string }>(
+    await db.execute(sql`
+      select id, org_id as "orgId", crm_record_id as "crmRecordId", practice_user_id as "practiceUserId", status
+      from seller_conversations where id = ${i.conversationId}::uuid`),
   );
-  const email = record?.email || null;
-  const recordIds = [stopped.crmRecordId];
-  if (email) {
-    await suppressAddress(db, { orgId: stopped.orgId, address: email, reason: reason === 'complained' ? 'complained' : 'opted_out', conversationId: stopped.id });
-    const twins = await db.execute(sql`
-      update seller_conversations c set status = 'stopped', stop_reason = ${reason}, updated_at = ${iso(now)}
-      from crm_records r
-      where r.id = c.crm_record_id and r.org_id = c.org_id
-        and c.org_id = ${stopped.orgId}::uuid and c.practice_user_id is null and c.id <> ${stopped.id}::uuid
-        and c.status in ('open', 'booked') and lower(btrim(r.email)) = ${email}
-      returning c.crm_record_id as "crmRecordId"`);
-    recordIds.push(...rows<{ crmRecordId: string }>(twins).map((r) => r.crmRecordId));
+  if (!current || current.status !== 'stopped' || current.practiceUserId !== null) return false;
+  let upgraded = false;
+  if (EXPLICIT_OPT_OUTS.has(i.reason)) {
+    const result = await db.execute(sql`
+      update seller_conversations set stop_reason = ${i.reason}, updated_at = ${iso(i.now)}
+      where id = ${current.id}::uuid and status = 'stopped' and stop_reason is distinct from ${i.reason}::text
+      returning id`);
+    upgraded = rows<{ id: string }>(result).length > 0;
   }
-  const enrollments = await db.execute(sql`
-    select e.id from campaign_enrollments e
-    join campaigns c on c.id = e.campaign_id and c.org_id = e.org_id
-    where e.org_id = ${stopped.orgId}::uuid and e.crm_record_id in (${sqlList(recordIds, '::uuid')})
-      and e.status = 'active' and c.mode = 'ai_call'
-    order by e.id`);
-  for (const { id } of rows<{ id: string }>(enrollments)) await finishAiEnrollment(db, id, reason, 'exited');
+  await sweepSeller(db, { orgId: current.orgId, conversationId: current.id, crmRecordId: current.crmRecordId, reason: i.reason, now: i.now, exitOwnEnrollments: true });
+  if (upgraded) {
+    await appendEvent(db, { orgId: current.orgId, conversationId: current.id, kind: 'status', direction: 'none', actor: 'system', occurredAt: i.now, detail: i.reason, sfLog: true });
+  }
+  return upgraded;
 }
 
 /**
  * Sam must not reach this seller again. ONE transaction: the conversation goes `stopped` (from open or
- * booked; already stopped → false and nothing is written), a real conversation also suppresses the address,
- * stops the seller's other records and exits their ai_call enrollments (see stopReachOfRealConversation),
- * and a `status` event records the reason, logged to Salesforce unless it is a practice conversation (which
- * touches nothing but its own row).
+ * booked) and a `status` event records the reason, logged to Salesforce unless it is a practice conversation
+ * (which touches nothing but its own row). A real conversation also runs the sweep (suppression, the
+ * seller's other records, enrollments). Already stopped: see stopAlreadyStopped. Returns whether this
+ * conversation's row changed (status or stop reason).
  */
 export async function stopSeller(db: Db, i: { conversationId: string; reason: StopReason; now: Date }): Promise<boolean> {
   return db.transaction(async (tx) => {
@@ -242,9 +322,11 @@ export async function stopSeller(db: Db, i: { conversationId: string; reason: St
       where id = ${i.conversationId}::uuid and status in ('open', 'booked')
       returning id, org_id as "orgId", crm_record_id as "crmRecordId", practice_user_id as "practiceUserId"`);
     const stopped = rows<StoppedConversation>(result)[0];
-    if (!stopped) return false;
+    if (!stopped) return stopAlreadyStopped(t, i);
     const practice = stopped.practiceUserId !== null;
-    if (!practice) await stopReachOfRealConversation(t, stopped, i.reason, i.now);
+    if (!practice) {
+      await sweepSeller(t, { orgId: stopped.orgId, conversationId: stopped.id, crmRecordId: stopped.crmRecordId, reason: i.reason, now: i.now, exitOwnEnrollments: true });
+    }
     await appendEvent(t, {
       orgId: stopped.orgId,
       conversationId: stopped.id,
@@ -274,9 +356,11 @@ const CALL_STATUS_CHANGES: Partial<Record<AiCallOutcome, CallStatusChange>> = {
 
 /**
  * What a finished AI call says about the seller's conversation: an appointment books it (only while open), a
- * do-not-call or not-interested stops it. The conversation is created when missing. The `status` event is
- * not logged to Salesforce (the call already has its Task), and enrollments are not exited here: the results
- * tick that calls this already does that.
+ * do-not-call or not-interested stops it. The conversation is created when missing. Its own `status` event
+ * is not logged to Salesforce (the call already has its Task). A stop also runs the sweep, so the seller's
+ * other records are stopped and their enrollments exited (a do-not-call also suppresses the address, a
+ * not-interested does not) even when this conversation was already stopped. The call's OWN record's
+ * enrollments are left to the results tick that calls this: it exits them in its own flow.
  */
 export async function setStatusFromCall(
   db: Db,
@@ -291,17 +375,21 @@ export async function setStatusFromCall(
       update seller_conversations set status = ${change.to}, stop_reason = ${change.stopReason}::text, updated_at = ${iso(i.now)}
       where id = ${conversation.id}::uuid and status in (${sqlList(change.from, '')})
       returning id`);
-    if (rows<{ id: string }>(result).length === 0) return;
-    await appendEvent(t, {
-      orgId: i.orgId,
-      conversationId: conversation.id,
-      kind: 'status',
-      direction: 'none',
-      actor: 'system',
-      occurredAt: i.now,
-      detail: change.stopReason ?? change.to,
-      sfLog: false,
-    });
+    if (rows<{ id: string }>(result).length > 0) {
+      await appendEvent(t, {
+        orgId: i.orgId,
+        conversationId: conversation.id,
+        kind: 'status',
+        direction: 'none',
+        actor: 'system',
+        occurredAt: i.now,
+        detail: change.stopReason ?? change.to,
+        sfLog: false,
+      });
+    }
+    if (change.stopReason) {
+      await sweepSeller(t, { orgId: i.orgId, conversationId: conversation.id, crmRecordId: i.crmRecordId, reason: change.stopReason, now: i.now, exitOwnEnrollments: false });
+    }
   });
 }
 
