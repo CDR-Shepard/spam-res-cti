@@ -166,6 +166,7 @@ const INDEXES = [
   'CREATE UNIQUE INDEX IF NOT EXISTS "seller_conversations_practice_unique" ON "seller_conversations" ("org_id", "crm_record_id", "practice_user_id") WHERE "practice_user_id" IS NOT NULL',
   'CREATE INDEX IF NOT EXISTS "conversation_events_conversation_idx" ON "conversation_events" ("conversation_id", "occurred_at")',
   `CREATE INDEX IF NOT EXISTS "conversation_events_sf_log_due_idx" ON "conversation_events" ("sf_log_next_at") WHERE "sf_log_status" = 'pending'`,
+  'CREATE UNIQUE INDEX IF NOT EXISTS "conversation_events_sf_task_unique" ON "conversation_events" ("org_id", "sf_task_id") WHERE "sf_task_id" IS NOT NULL',
   'CREATE UNIQUE INDEX IF NOT EXISTS "email_messages_event_unique" ON "email_messages" ("event_id")',
   'CREATE UNIQUE INDEX IF NOT EXISTS "email_messages_resend_unique" ON "email_messages" ("direction", "resend_id") WHERE "resend_id" IS NOT NULL',
   'CREATE INDEX IF NOT EXISTS "email_messages_message_id_idx" ON "email_messages" ("message_id") WHERE "message_id" IS NOT NULL',
@@ -227,8 +228,12 @@ describe('migration 0062_seller_conversations', () => {
   });
 
   it('one email row per timeline event (UNIQUE on event_id), and first_attempt_at is nullable: NULL means Resend never saw it', () => {
-    expect(statements).toContain(INDEXES[4]);
+    expect(statements).toContain(INDEXES[5]);
     expect(linesOf(createOf('email_messages'))).toContain('"first_attempt_at" timestamptz');
+  });
+
+  it('one Salesforce Task belongs to one timeline event: a partial UNIQUE on (org_id, sf_task_id) where it is set', () => {
+    expect(statements).toContain(INDEXES[4]);
   });
 
   it('indexes the timeline, the Salesforce-log scan, the Resend id dedupe, the Message-ID lookup, the send scan and the webhook scan', () => {
@@ -244,15 +249,16 @@ describe('migration 0062_seller_conversations', () => {
       expect.stringMatching(/^CREATE TABLE IF NOT EXISTS "conversation_events"/),
       INDEXES[2],
       INDEXES[3],
-      expect.stringMatching(/^CREATE TABLE IF NOT EXISTS "email_messages"/),
       INDEXES[4],
+      expect.stringMatching(/^CREATE TABLE IF NOT EXISTS "email_messages"/),
       INDEXES[5],
       INDEXES[6],
       INDEXES[7],
       INDEXES[8],
+      INDEXES[9],
       expect.stringMatching(/^CREATE TABLE IF NOT EXISTS "email_suppressions"/),
       expect.stringMatching(/^CREATE TABLE IF NOT EXISTS "resend_webhook_events"/),
-      INDEXES[9],
+      INDEXES[10],
     ]);
   });
 
@@ -292,6 +298,7 @@ describe('migration 0062_seller_conversations', () => {
     expect(indexesOf(conversationEvents)).toEqual([
       { name: 'conversation_events_conversation_idx', unique: false, columns: ['conversation_id', 'occurred_at'], where: null },
       { name: 'conversation_events_sf_log_due_idx', unique: false, columns: ['sf_log_next_at'], where: "sf_log_status = 'pending'" },
+      { name: 'conversation_events_sf_task_unique', unique: true, columns: ['org_id', 'sf_task_id'], where: 'sf_task_id IS NOT NULL' },
     ]);
   });
 

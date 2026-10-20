@@ -8,6 +8,9 @@ const OPP = '0068X00000Oppt1QAA';
 const OWNER = '0058X00000Fsx39QAB';
 const APP = 'https://app.example.com';
 const SELLER_PAGE = `${APP}/sellers/${LEAD}`;
+const EVENT_ID = '6f0c2a9e-1b2c-4d5e-8f90-123456789abc';
+/** The link as the Description carries it: the seller's page, tagged with the event that made the Task. */
+const LINK = `Conversation: ${SELLER_PAGE}#event-${EVENT_ID}`;
 
 const target = (over: Partial<SfTaskTarget> = {}): SfTaskTarget => ({
   sfObject: 'Lead',
@@ -20,6 +23,7 @@ const target = (over: Partial<SfTaskTarget> = {}): SfTaskTarget => ({
 });
 
 const event = (over: Partial<SfLogEvent> = {}): SfLogEvent => ({
+  id: EVENT_ID,
   kind: 'email',
   direction: 'in',
   actor: 'seller',
@@ -43,7 +47,7 @@ describe('sfTaskForEvent: email', () => {
     });
     expect(f).not.toHaveProperty('WhatId');
     expect(f).not.toHaveProperty('Priority');
-    expect(f.Description).toBe(`Yes, still for sale.\n\nConversation: ${SELLER_PAGE}`);
+    expect(f.Description).toBe(`Yes, still for sale.\n\n${LINK}`);
   });
 
   it('an outbound email from Sam says so in the Subject', () => {
@@ -70,8 +74,25 @@ describe('sfTaskForEvent: email', () => {
   it('caps a 40,000-character body at 30,000 and still ends with the conversation link', () => {
     const f = sfTaskForEvent(event({ body: 'a'.repeat(40_000) }), target());
     const description = String(f.Description);
-    expect(description).toBe(`${'a'.repeat(30_000)}\n\nConversation: ${SELLER_PAGE}`);
+    expect(description).toBe(`${'a'.repeat(30_000)}\n\n${LINK}`);
     expect(description.length).toBeLessThan(32_000);
+  });
+
+  it('tags the link with the event, whatever the kind and however long the body: the tag is how a retry finds its own Task', () => {
+    const marker = `#event-${EVENT_ID}`;
+    const kinds = [
+      event({ body: 'a'.repeat(40_000) }),
+      event({ kind: 'flag', direction: 'none', actor: 'system', subject: null, body: null, detail: 'legal' }),
+      event({ kind: 'status', direction: 'none', actor: 'system', subject: null, body: null, detail: 'opted_out' }),
+    ];
+    for (const e of kinds) {
+      const description = String(sfTaskForEvent(e, target()).Description);
+      expect(description.endsWith(`${SELLER_PAGE}${marker}`)).toBe(true);
+      expect(description.length).toBeLessThan(32_000);
+    }
+    // Two events of one seller differ only in the tag.
+    const other = String(sfTaskForEvent(event({ id: '00000000-0000-4000-8000-000000000000' }), target()).Description);
+    expect(other).not.toContain(marker);
   });
 
   it('never cuts a surrogate pair in half at the cap', () => {
@@ -81,8 +102,8 @@ describe('sfTaskForEvent: email', () => {
   });
 
   it('a blank body falls back to the detail, and with neither the Description is the link alone', () => {
-    expect(sfTaskForEvent(event({ body: '  ', detail: 'a note' }), target()).Description).toBe(`a note\n\nConversation: ${SELLER_PAGE}`);
-    expect(sfTaskForEvent(event({ body: null }), target()).Description).toBe(`Conversation: ${SELLER_PAGE}`);
+    expect(sfTaskForEvent(event({ body: '  ', detail: 'a note' }), target()).Description).toBe(`a note\n\n${LINK}`);
+    expect(sfTaskForEvent(event({ body: null }), target()).Description).toBe(LINK);
   });
 });
 
@@ -91,7 +112,7 @@ describe('sfTaskForEvent: flags', () => {
     const f = sfTaskForEvent(event({ kind: 'flag', direction: 'none', actor: 'system', subject: null, body: null, detail: 'offer_or_price' }), target());
     expect(f).toMatchObject({ Subject: 'Sam (AI) needs a person: asked about an offer or price', Status: 'Open', Priority: 'High', WhoId: LEAD });
     expect(f).not.toHaveProperty('TaskSubtype');
-    expect(f.Description).toBe(`offer_or_price\n\nConversation: ${SELLER_PAGE}`);
+    expect(f.Description).toBe(`offer_or_price\n\n${LINK}`);
   });
 
   it.each<[FlagReason, string]>([

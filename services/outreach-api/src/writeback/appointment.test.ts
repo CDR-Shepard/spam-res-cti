@@ -25,7 +25,7 @@ const ADDRESS = '12 Oak St, Fresno, CA 93701';
 const EXISTING_EVENT = /^SELECT Id FROM Event WHERE WhatId = /;
 const HOLD_LOOKUP = /^SELECT Id FROM Event WHERE WhatId = null /;
 const BUSY = /^SELECT StartDateTime, EndDateTime, IsAllDayEvent, ActivityDate FROM Event /;
-const TASK_LOOKUP = /^SELECT Id FROM Task /;
+const TASK_LOOKUP = /^SELECT Id(?:, Description)? FROM Task /;
 
 function org(routes: WriteQueryRoute[] = []) {
   return fakeSfWrites({ queries: [...routes, [EXISTING_EVENT, []], [HOLD_LOOKUP, []], [BUSY, []], [TASK_LOOKUP, []]] });
@@ -262,40 +262,77 @@ describe('createTaskOnce', () => {
     expect(String(taskFields({ whatId: OPP, whoId: null, ownerId: OWNER, subject: 'x'.repeat(400), description: '', today: '2026-10-06' }).Subject).length).toBe(255);
   });
 
-  describe('with a claim test (Tasks that belong to something else are skipped)', () => {
-    const rows = [{ Id: '00T8X00000Task1QAA' }, { Id: '00T8X00000Task2QAA' }, { Id: '00T8X00000Task3QAA' }];
+  describe('with an adoption test (look-alike Tasks are separate things: only the caller\'s own is adopted)', () => {
+    const rows = [
+      { Id: '00T8X00000Task1QAA', Description: 'first\r\n#event-a' },
+      { Id: '00T8X00000Task2QAA', Description: 'second\r\n#event-b' },
+      { Id: '00T8X00000Task3QAA', Description: null },
+    ];
+    const ours = (marker: string) => ({ excludeIds: [], isOurs: (c: { description: string | null }) => c.description?.includes(marker) === true });
 
-    it('asks for up to 10 candidates, oldest first, and adopts the first one nobody claimed', async () => {
+    it('reads up to 10 candidates with their Description, oldest first, and adopts the first that is the caller\'s own', async () => {
       const f = org([[TASK_LOOKUP, rows]]);
-      const asked: string[] = [];
-      const claimed = async (id: string) => {
-        asked.push(id);
-        return id === '00T8X00000Task1QAA';
+      const asked: Array<{ id: string; description: string | null }> = [];
+      const adoption = {
+        excludeIds: [],
+        isOurs: async (c: { id: string; description: string | null }) => {
+          asked.push(c);
+          return c.description?.includes('#event-b') === true;
+        },
       };
-      expect(await createTaskOnce(f.client, fields, CALL_ENDED, claimed)).toBe('00T8X00000Task2QAA');
+      expect(await createTaskOnce(f.client, fields, CALL_ENDED, adoption)).toBe('00T8X00000Task2QAA');
       expect(f.creates).toEqual([]);
-      expect(asked).toEqual(['00T8X00000Task1QAA', '00T8X00000Task2QAA']);
+      expect(asked.map((c) => c.id)).toEqual(['00T8X00000Task1QAA', '00T8X00000Task2QAA']);
+      expect(asked[1]).toEqual({ id: '00T8X00000Task2QAA', description: 'second\r\n#event-b' });
+      expect(f.soql[0]).toMatch(/^SELECT Id, Description FROM Task WHERE /);
       expect(f.soql[0]).toMatch(/AND CreatedDate >= 2026-09-30T17:44:12Z ORDER BY CreatedDate LIMIT 10$/);
     });
 
-    it('creates a new Task when every candidate is claimed', async () => {
+    it('a candidate with no Description is read as null, and is no one\'s own', async () => {
+      const f = org([[TASK_LOOKUP, [rows[2]!]]]);
+      f.onCreate = () => ok('00T8X00000Task9QAA');
+      const seen: Array<string | null> = [];
+      const adoption = { excludeIds: [], isOurs: (c: { description: string | null }) => (seen.push(c.description), false) };
+      expect(await createTaskOnce(f.client, fields, CALL_ENDED, adoption)).toBe('00T8X00000Task9QAA');
+      expect(seen).toEqual([null]);
+    });
+
+    it('creates a new Task when none of the candidates is the caller\'s own', async () => {
       const f = org([[TASK_LOOKUP, rows]]);
       f.onCreate = () => ok('00T8X00000Task9QAA');
-      expect(await createTaskOnce(f.client, fields, CALL_ENDED, async () => true)).toBe('00T8X00000Task9QAA');
+      expect(await createTaskOnce(f.client, fields, CALL_ENDED, ours('#event-zzz'))).toBe('00T8X00000Task9QAA');
       expect(f.creates).toHaveLength(1);
+    });
+
+    it('leaves the ids it is given out of the lookup, keeping only what is shaped like a Salesforce id', async () => {
+      const f = org([[TASK_LOOKUP, []]]);
+      f.onCreate = () => ok('00T8X00000Task9QAA');
+      await createTaskOnce(f.client, fields, CALL_ENDED, { ...ours('x'), excludeIds: ['00T8X00000Task1QAA', "x' OR Id != '", '00T8X00000Task2QAA', '', '00T8X00000Task1QAA'] });
+      expect(f.soql[0]).toContain(" AND Id NOT IN ('00T8X00000Task1QAA','00T8X00000Task2QAA') ORDER BY CreatedDate LIMIT 10");
+      expect(f.soql[0]).not.toContain("x'");
+    });
+
+    it('no NOT IN clause when there is nothing to leave out', async () => {
+      const f = org([[TASK_LOOKUP, []]]);
+      f.onCreate = () => ok('00T8X00000Task9QAA');
+      await createTaskOnce(f.client, fields, CALL_ENDED, { ...ours('x'), excludeIds: ["x' OR Id != '"] });
+      expect(f.soql[0]).not.toContain('NOT IN');
     });
 
     it('reads the candidates again without the origin when the org lacks CTI_Origin__c', async () => {
       const f = org([[TASK_LOOKUP, (q) => (q.includes('CTI_Origin__c') ? new Error('INVALID_FIELD: No such column CTI_Origin__c') : rows)]]);
-      expect(await createTaskOnce(f.client, fields, CALL_ENDED, async (id) => id !== '00T8X00000Task3QAA')).toBe('00T8X00000Task3QAA');
+      expect(await createTaskOnce(f.client, fields, CALL_ENDED, ours('#event-b'))).toBe('00T8X00000Task2QAA');
       expect(f.soql[1]).not.toContain('CTI_Origin__c');
+      expect(f.soql[1]).toMatch(/^SELECT Id, Description FROM Task /);
     });
 
-    it('without a claim test the lookup is exactly what it was: one row, no ordering', async () => {
+    it('without an adoption test the lookup is exactly what it was: Id only, one row, no ordering', async () => {
       const f = org([[TASK_LOOKUP, rows]]);
       expect(await createTaskOnce(f.client, fields, CALL_ENDED)).toBe('00T8X00000Task1QAA');
+      expect(f.soql[0]).toMatch(/^SELECT Id FROM Task WHERE /);
       expect(f.soql[0]).toMatch(/ LIMIT 1$/);
       expect(f.soql[0]).not.toContain('ORDER BY');
+      expect(f.soql[0]).not.toContain('Description');
     });
   });
 });

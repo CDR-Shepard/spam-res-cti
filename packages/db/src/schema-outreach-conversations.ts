@@ -110,6 +110,8 @@ export const conversationEvents = pgTable(
   (t) => ({
     conversationIdx: index('conversation_events_conversation_idx').on(t.conversationId, t.occurredAt),
     sfLogDueIdx: index('conversation_events_sf_log_due_idx').on(t.sfLogNextAt).where(sql`sf_log_status = 'pending'`),
+    // One Salesforce Task, one event (partial: most events have no Task).
+    sfTaskUnique: uniqueIndex('conversation_events_sf_task_unique').on(t.orgId, t.sfTaskId).where(sql`sf_task_id IS NOT NULL`),
   }),
 );
 

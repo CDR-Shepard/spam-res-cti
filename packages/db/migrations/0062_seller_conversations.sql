@@ -35,8 +35,9 @@
 --   meta                 Free-form detail, e.g. { autoReply: true }.
 --   sf_log_status        The Salesforce Task log: pending (the tick owes one) |
 --                        done | failed | skipped (nothing to log, the default).
---                        sf_task_id is the Task it created; sf_log_attempts /
---                        sf_log_next_at / sf_log_error are the tick's backoff.
+--                        sf_task_id is the Task it created (unique per tenant: one
+--                        Task, one event); sf_log_attempts / sf_log_next_at /
+--                        sf_log_error are the tick's backoff.
 -- email_messages         The outbox and the inbox, one row per email, tied to its
 --                        timeline event. direction out | in; purpose first |
 --                        reply | holding | practice | inbound; status queued →
@@ -128,6 +129,9 @@ CREATE INDEX IF NOT EXISTS "conversation_events_conversation_idx" ON "conversati
 
 -- The Salesforce log tick's scan: events that still owe a Task.
 CREATE INDEX IF NOT EXISTS "conversation_events_sf_log_due_idx" ON "conversation_events" ("sf_log_next_at") WHERE "sf_log_status" = 'pending';
+
+-- One Salesforce Task belongs to one timeline event: two events can never end up pointing at the same Task.
+CREATE UNIQUE INDEX IF NOT EXISTS "conversation_events_sf_task_unique" ON "conversation_events" ("org_id", "sf_task_id") WHERE "sf_task_id" IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS "email_messages" (
   "id" uuid PRIMARY KEY DEFAULT gen_random_uuid(),

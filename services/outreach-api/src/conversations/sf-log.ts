@@ -10,16 +10,24 @@
  *    here as well as in the store (appendEvent never makes one pending): nothing of an admin's practice reaches
  *    Salesforce even if a row were forced.
  *  - WORK: the Salesforce calls run outside any transaction (a slow org must not hold a database lock).
- *  - SETTLE: a compare-and-swap on the lease (`pending` and `sf_log_next_at` still the leased value), so a tick that
+ *  - RENEW: just before an event is worked its lease is renewed, with a compare-and-swap on the value this tick
+ *    leased, to the tick's clock + 10 minutes (a slow batch does not lose its later rows). Nothing updated means
+ *    another tick took the row over: it is skipped and no Salesforce call is made for it.
+ *  - SETTLE: a compare-and-swap on the renewed lease (`pending` and `sf_log_next_at` still that value), so a tick that
  *    ran past its lease and lost the row changes nothing and counts nothing; the Task it made is found again by the
  *    next tick's lookup, never doubled.
- *  - A failure counts an attempt and waits 1, 5, 30, 120, then 720 minutes; the 6th failure ends the event `failed`
- *    and raises ONE `sf_log_failed` alert. `sf_log_error` is the error's name (and code) only: Salesforce's message
- *    text can quote the seller's words.
+ *  - A failure counts an attempt and waits 1, 5, 30, 120, then 720 minutes; the 6th failure ends the event `failed`.
+ *    The events of one organization that failed for good in a tick raise ONE `sf_log_failed` alert (a count and the
+ *    first few ids). `sf_log_error` is the error's name (and code) only: Salesforce's message text can quote the
+ *    seller's words.
  *
- * One Task per event, even when several events look alike: createTaskOnce finds a Task of ours made since the event
- * and skips any that already belongs to another event (`sf_task_id`), so two replies with the same subject never
- * share a Task. A Lead Salesforce refuses as converted is retried once, in the same attempt, on its Opportunity.
+ * One Task per event, even when several events look alike (two replies with one subject). Every Task's Description
+ * ends with the seller's page link tagged `#event-<event id>`, and an event adopts a look-alike Task only when its
+ * Description contains its own tag: the Task a lost create answer left behind is found again by the event that made
+ * it and by no other (containment, so Salesforce's line-ending changes cannot break it). Tasks stored on the
+ * conversation's other events are also left out of the lookup, so an event's own Task is never pushed out of the
+ * ten candidates, and a unique index (org, `sf_task_id`) makes a Task held by two events impossible. A Lead
+ * Salesforce refuses as converted is retried once, in the same attempt, on its Opportunity.
  *
  * Logs and alerts carry ids, counts and error names only: never a subject, a body, an address or a name.
  */
@@ -33,7 +41,7 @@ import { CrmNotConnectedError, type SalesforceClientFactory } from '../crm/clien
 import { describeError } from '../email/errors.js';
 import type { RunnerLogger } from '../jobs/boss.js';
 import { cutUtf16 } from '../research/text.js';
-import { createTaskOnce, ORIGIN_FIELD, WriteRefusedError } from '../writeback/appointment.js';
+import { createTaskOnce, ORIGIN_FIELD, WriteRefusedError, type TaskCandidate } from '../writeback/appointment.js';
 import { AI_OUTREACH_ORIGIN } from '../writeback/fields.js';
 import { ptToday } from '../writeback/row-run.js';
 
@@ -75,6 +83,8 @@ const STATUS_SUBJECTS: ReadonlyMap<string, string> = new Map([
 
 /** The part of a timeline event the Task is made from. */
 export interface SfLogEvent {
+  /** The timeline event's id: it tags the Task so a retry can tell its own Task from a look-alike. */
+  id: string;
   kind: string;
   direction: string;
   actor: string;
@@ -95,6 +105,9 @@ export interface SfTaskTarget {
   appPublicUrl: string;
   conversationUrl: string;
 }
+
+/** The tag at the end of a Task's Description that says which event made it. */
+export const eventMarker = (eventId: string): string => `#event-${eventId}`;
 
 const oneLine = (s: string): string => s.replace(/[\u0000-\u001F\u007F]/g, ' ').replace(/\s+/g, ' ').trim();
 const blank = (s: string | null): boolean => s === null || s.trim() === '';
@@ -123,10 +136,11 @@ function zoneOrDefault(zone: string | null): string {
 /**
  * The fields of the Task one event becomes. Pure. A flag is the one Task a person has to act on (open, high priority);
  * every other event is history (completed). `CTI_Origin__c` goes through createTaskOnce's fallback for orgs without it.
+ * Only the body is capped (30,000 characters): the link and its event tag always survive the cap.
  */
 export function sfTaskForEvent(e: SfLogEvent, r: SfTaskTarget): Record<string, unknown> {
   const text = blank(e.body) ? (e.detail ?? '') : cutUtf16(e.body!, DESCRIPTION_BODY_MAX);
-  const link = `Conversation: ${r.conversationUrl}`;
+  const link = `Conversation: ${r.conversationUrl}${eventMarker(e.id)}`;
   const flag = e.kind === 'flag';
   return {
     Subject: cutUtf16(oneLine(eventSubject(e)), SUBJECT_MAX),
@@ -150,6 +164,8 @@ export interface SfLogDeps {
   /** Defaults to dispatchAlert on `log`. Never trusted to succeed: a failed alert is logged, not thrown. */
   alert?: (event: AlertEvent) => Promise<void>;
   batch?: number;
+  /** Milliseconds, `Date.now` by default: how long the tick has been running, so a lease renewal reaches `now` + elapsed + 10 minutes. */
+  clock?: () => number;
 }
 
 export interface SfLogCounts {
@@ -242,18 +258,37 @@ async function convertedOpportunityOf(client: SalesforceClient, leadId: string):
   return typeof id === 'string' && SF_ID.test(id) ? id : null;
 }
 
-/** Another event already owns this Salesforce Task (its `sf_task_id`). */
-async function ownedByAnother(db: Db, taskId: string, eventId: string): Promise<boolean> {
-  const result = await db.execute(sql`select 1 as owned from conversation_events where sf_task_id = ${taskId} and id <> ${eventId}::uuid limit 1`);
+/** Another event of this tenant already owns this Salesforce Task (its `sf_task_id`). */
+async function ownedByAnother(db: Db, c: Claimed, taskId: string): Promise<boolean> {
+  const result = await db.execute(sql`
+    select 1 as owned from conversation_events where org_id = ${c.orgId}::uuid and sf_task_id = ${taskId} and id <> ${c.id}::uuid limit 1`);
   return rows<unknown>(result).length > 0;
+}
+
+/** How many of the conversation's stored Task ids a lookup leaves out (the newest ones; older Tasks are far from any retry). */
+const STORED_TASK_IDS = 200;
+
+/** The Tasks the conversation's other events already hold: Salesforce is asked to leave them out of the candidates. */
+async function storedTaskIds(db: Db, c: Claimed): Promise<string[]> {
+  const result = await db.execute(sql`
+    select sf_task_id as id from conversation_events
+    where org_id = ${c.orgId}::uuid and conversation_id = ${c.conversationId}::uuid and sf_task_id is not null and id <> ${c.id}::uuid
+    order by occurred_at desc, id
+    limit ${STORED_TASK_IDS}`);
+  return rows<{ id: string }>(result).map((r) => r.id);
 }
 
 /** The Salesforce Task for one claimed event, made or found. Throws for the tick to count an attempt. */
 async function logOne(deps: SfLogDeps, client: SalesforceClient, c: Claimed): Promise<string> {
-  const event: SfLogEvent = { kind: c.kind, direction: c.direction, actor: c.actor, occurredAt: new Date(Number(c.occurredAtMs)), subject: c.subject, body: c.body, detail: c.detail };
+  const event: SfLogEvent = { id: c.id, kind: c.kind, direction: c.direction, actor: c.actor, occurredAt: new Date(Number(c.occurredAtMs)), subject: c.subject, body: c.body, detail: c.detail };
   const common = { ownerId: ownerFor(c), orgTimeZone: c.orgTimeZone, appPublicUrl: deps.appPublicUrl, conversationUrl: sellerPageUrl(deps.appPublicUrl, c.sfRecordId) };
   const target = targetFor(c, common);
-  const once = (t: SfTaskTarget) => createTaskOnce(client, sfTaskForEvent(event, t), event.occurredAt, (taskId) => ownedByAnother(deps.db, taskId, c.id));
+  const marker = eventMarker(c.id);
+  const adoption = {
+    excludeIds: await storedTaskIds(deps.db, c),
+    isOurs: async (task: TaskCandidate) => task.description !== null && task.description.includes(marker) && !(await ownedByAnother(deps.db, c, task.id)),
+  };
+  const once = (t: SfTaskTarget) => createTaskOnce(client, sfTaskForEvent(event, t), event.occurredAt, adoption);
   try {
     return await once(target);
   } catch (err) {
@@ -273,8 +308,14 @@ function errorLabel(err: unknown): string {
 
 type Settled = 'done' | 'retried' | 'failed' | 'lost';
 
-/** This tick still holds the event: it is pending and `sf_log_next_at` is the value this tick leased. */
+/** This tick still holds the event: it is pending and `sf_log_next_at` is the lease value this tick set. */
 const holds = (c: Claimed, leasedUntil: Date) => sql`id = ${c.id}::uuid and sf_log_status = 'pending' and sf_log_next_at = ${iso(leasedUntil)}`;
+
+/** The lease moves from the value this tick set to `to`; false when another tick took the row over meanwhile. */
+async function renewLease(db: Db, c: Claimed, from: Date, to: Date): Promise<boolean> {
+  const result = await db.execute(sql`update conversation_events set sf_log_next_at = ${iso(to)} where ${holds(c, from)} returning id`);
+  return rows<unknown>(result).length > 0;
+}
 
 async function settleDone(db: Db, c: Claimed, leasedUntil: Date, taskId: string): Promise<Settled> {
   const result = await db.execute(sql`
@@ -297,17 +338,22 @@ async function settleFailure(db: Db, c: Claimed, leasedUntil: Date, now: Date, e
   return exhausted ? 'failed' : 'retried';
 }
 
-async function alertFailed(deps: SfLogDeps, alert: (event: AlertEvent) => Promise<void>, c: Claimed): Promise<void> {
+/** Most ids one alert names; the count says how many failed. */
+const ALERT_IDS = 5;
+
+/** One alert per organization: how many events failed for good this tick and the first few ids (ids only). */
+async function alertFailed(deps: SfLogDeps, alert: (event: AlertEvent) => Promise<void>, orgId: string, eventIds: readonly string[]): Promise<void> {
+  const count = eventIds.length;
   try {
     await alert({
       kind: 'sf_log_failed',
       severity: 'warning',
-      orgId: c.orgId,
-      message: `A conversation event could not be logged to Salesforce after ${SF_LOG_MAX_ATTEMPTS} attempts (event ${c.id}).`,
-      context: { eventId: c.id, conversationId: c.conversationId },
+      orgId,
+      message: `${count} conversation event${count === 1 ? '' : 's'} could not be logged to Salesforce after ${SF_LOG_MAX_ATTEMPTS} attempts.`,
+      context: { count, eventIds: eventIds.slice(0, ALERT_IDS) },
     });
   } catch (err) {
-    deps.log.error({ eventId: c.id, ...describeError(err) }, 'sf log alert failed');
+    deps.log.error({ orgId, count, ...describeError(err) }, 'sf log alert failed');
   }
 }
 
@@ -318,7 +364,10 @@ async function alertFailed(deps: SfLogDeps, alert: (event: AlertEvent) => Promis
  */
 export async function logEventsToSalesforce(deps: SfLogDeps): Promise<SfLogCounts> {
   const { db, now, log } = deps;
+  const clock = deps.clock ?? Date.now;
+  const started = clock();
   const alert = deps.alert ?? ((event: AlertEvent) => dispatchAlert(log, event));
+  // The lease every claimed row holds until its turn renews it.
   const leasedUntil = new Date(now.getTime() + SF_LOG_LEASE_MS);
   const claimed = await claimDue(db, now, leasedUntil, Math.max(1, Math.trunc(deps.batch ?? SF_LOG_BATCH)));
   const clients = new Map<string, Promise<SalesforceClient>>();
@@ -330,20 +379,27 @@ export async function logEventsToSalesforce(deps: SfLogDeps): Promise<SfLogCount
     return made;
   };
   const counts: SfLogCounts = { done: 0, retried: 0, failed: 0 };
+  const failedByOrg = new Map<string, string[]>();
   let lost = 0;
   for (const c of claimed) {
+    const lease = new Date(now.getTime() + (clock() - started) + SF_LOG_LEASE_MS);
+    if (!(await renewLease(db, c, leasedUntil, lease))) {
+      lost += 1;
+      continue;
+    }
     let outcome: Settled;
     try {
       const client = await clientFor(c.orgId);
-      outcome = await settleDone(db, c, leasedUntil, await logOne(deps, client, c));
+      outcome = await settleDone(db, c, lease, await logOne(deps, client, c));
     } catch (err) {
       log.warn({ eventId: c.id, conversationId: c.conversationId, attempt: c.attempts + 1, ...describeError(err) }, 'salesforce log failed');
-      outcome = await settleFailure(db, c, leasedUntil, now, err);
-      if (outcome === 'failed') await alertFailed(deps, alert, c);
+      outcome = await settleFailure(db, c, lease, now, err);
+      if (outcome === 'failed') failedByOrg.set(c.orgId, [...(failedByOrg.get(c.orgId) ?? []), c.id]);
     }
     if (outcome === 'lost') lost += 1;
     else counts[outcome] += 1;
   }
+  for (const [orgId, eventIds] of failedByOrg) await alertFailed(deps, alert, orgId, eventIds);
   if (claimed.length > 0) log.info({ claimed: claimed.length, ...counts, lost }, 'salesforce log tick');
   return counts;
 }

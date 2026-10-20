@@ -143,20 +143,22 @@ async function createOne(client: SalesforceClient, sobject: string, fields: Reco
   return second ?? unknown;
 }
 
-/** The Id of every row the lookup returns; when the org lacks CTI_Origin__c, the same lookup without it. */
-async function findIds(client: SalesforceClient, soql: (withOrigin: boolean) => string): Promise<string[]> {
-  const ids = (rows: Array<{ Id?: unknown }>): string[] => rows.flatMap((r) => (typeof r.Id === 'string' ? [r.Id] : []));
+type LookupRow = { Id?: unknown; Description?: unknown };
+
+/** The rows a lookup returns; when the org lacks CTI_Origin__c, the same lookup without it. */
+async function findRows(client: SalesforceClient, soql: (withOrigin: boolean) => string): Promise<LookupRow[]> {
   try {
-    return ids(await client.query<{ Id?: unknown }>(soql(true)));
+    return await client.query<LookupRow>(soql(true));
   } catch (err) {
     if (!(err instanceof Error && /INVALID_FIELD/.test(err.message) && err.message.includes(ORIGIN_FIELD))) throw err;
-    return ids(await client.query<{ Id?: unknown }>(soql(false)));
+    return client.query<LookupRow>(soql(false));
   }
 }
 
 /** The first row's Id (the lookup says LIMIT 1), or null. */
 async function findOne(client: SalesforceClient, soql: (withOrigin: boolean) => string): Promise<string | null> {
-  return (await findIds(client, soql))[0] ?? null;
+  const [first] = await findRows(client, soql);
+  return typeof first?.Id === 'string' ? first.Id : null;
 }
 
 const originClause = (withOrigin: boolean): string => (withOrigin ? ` AND ${ORIGIN_FIELD} = '${soqlEscape(AI_OUTREACH_ORIGIN)}'` : '');
@@ -193,42 +195,68 @@ export async function bookOpportunity(
 /** Clock skew allowed between the call's end (our clock) and a Task's CreatedDate (Salesforce's). */
 const TASK_SKEW_MS = 60_000;
 
-/** How many look-alike Tasks a claim test is asked about (createTaskOnce with `isClaimed`). */
+/** How many look-alike Tasks an adoption test is asked about (createTaskOnce with `adoption`). */
 const TASK_CANDIDATES = 10;
+
+/** A Task that looks like the one wanted (same record, owner, Subject and origin), as an adoption test sees it. */
+export interface TaskCandidate {
+  id: string;
+  /** What Salesforce stores (its line endings may differ from what was written); null when empty. */
+  description: string | null;
+}
+
+/**
+ * For a caller whose look-alike Tasks are real, separate things (two emails of one seller with the same subject): only a
+ * Task that is the caller's own may be adopted.
+ */
+export interface TaskAdoption {
+  /** Ids Salesforce is asked to leave out (Tasks that belong to something else); anything not shaped like an id is dropped. */
+  excludeIds: readonly string[];
+  isOurs: (candidate: TaskCandidate) => boolean | Promise<boolean>;
+}
+
+const excludeClause = (ids: readonly string[]): string => {
+  const valid = [...new Set(ids.filter((id) => SF_ID.test(id)))];
+  return valid.length === 0 ? '' : ` AND Id NOT IN (${valid.map((id) => `'${soqlEscape(id)}'`).join(',')})`;
+};
 
 /**
  * A Task once: the one we made since the call ended (same record, owner, Subject and origin), else a new one. `since` is
  * the call's end, so the lookup covers the row's whole life, an admin retry days later included (final review); null
  * (no end time known) looks without a date bound.
  *
- * `isClaimed`: for a caller whose look-alike Tasks are real, separate things (two emails of one seller with the same
- * subject): up to 10 matches are read, oldest first, and the first one `isClaimed` does not call someone else's is adopted
- * (else a new Task is made). Without it the first match is the Task, as above.
+ * `adoption`: instead of the first match, up to 10 matches are read with their Description, oldest first (a Description
+ * can be selected, not filtered on), and the first one `isOurs` accepts is adopted; none, a new Task is made. Without it
+ * the first match is the Task, as above (the write-back's own lookup is unchanged).
  */
 export async function createTaskOnce(
   client: SalesforceClient,
   fields: Record<string, unknown>,
   since: Date | null,
-  isClaimed?: (taskId: string) => Promise<boolean>,
+  adoption?: TaskAdoption,
 ): Promise<string> {
   const ids = (['WhatId', 'WhoId'] as const).flatMap((k) => (typeof fields[k] === 'string' ? [[k, checkId(fields[k] as string, k)] as const] : []));
   const owner = checkId(String(fields.OwnerId), 'OwnerId');
   const on = ids.map(([k, id]) => `${k} = '${soqlEscape(id)}'`);
   const record = on.length > 1 ? `(${on.join(' OR ')})` : (on[0] ?? 'WhatId = null');
-  const lookup = (o: boolean): string =>
-    `SELECT Id FROM Task WHERE ${record} AND OwnerId = '${soqlEscape(owner)}' AND Subject = '${soqlEscape(String(fields.Subject))}'${originClause(o)}${sinceClause(since)}`;
+  const where = (o: boolean): string =>
+    `FROM Task WHERE ${record} AND OwnerId = '${soqlEscape(owner)}' AND Subject = '${soqlEscape(String(fields.Subject))}'${originClause(o)}${sinceClause(since)}`;
   const existing =
-    isClaimed === undefined
-      ? await findOne(client, (o) => `${lookup(o)} LIMIT 1`)
-      : await firstUnclaimed(await findIds(client, (o) => `${lookup(o)} ORDER BY CreatedDate LIMIT ${TASK_CANDIDATES}`), isClaimed);
+    adoption === undefined
+      ? await findOne(client, (o) => `SELECT Id ${where(o)} LIMIT 1`)
+      : await firstOurs(await findRows(client, (o) => `SELECT Id, Description ${where(o)}${excludeClause(adoption.excludeIds)} ORDER BY CreatedDate LIMIT ${TASK_CANDIDATES}`), adoption);
   if (existing !== null) return existing;
   const created = await createOne(client, 'Task', fields);
   if (created.success && created.id) return created.id;
   throw new WriteRefusedError(firstCode(created), `Salesforce refused the Task: ${firstCode(created)}`);
 }
 
-async function firstUnclaimed(candidates: readonly string[], isClaimed: (taskId: string) => Promise<boolean>): Promise<string | null> {
-  for (const id of candidates) if (!(await isClaimed(id))) return id;
+async function firstOurs(candidates: readonly LookupRow[], adoption: TaskAdoption): Promise<string | null> {
+  for (const row of candidates) {
+    if (typeof row.Id !== 'string') continue;
+    const description = typeof row.Description === 'string' ? row.Description : null;
+    if (await adoption.isOurs({ id: row.Id, description })) return row.Id;
+  }
   return null;
 }
 
