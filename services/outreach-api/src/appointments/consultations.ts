@@ -60,6 +60,12 @@ export function consultationsSoql(links: ConsultationLinks): string | null {
 type Row = Record<string, unknown>;
 interface Dated { at: number; fact: ConsultationFact }
 
+/**
+ * A phone consultation's Subject says so as a phrase. A bare "phone" is not enough: an in-person Subject carries the
+ * property address ("Property Consultation 40 Telephone Rd"), and Sam must not call that a phone consultation.
+ */
+const PHONE_SUBJECT = /\bphone\s+consultation\b/i;
+
 const str = (v: unknown): string | null => (typeof v === 'string' && v.trim() !== '' ? v.trim() : null);
 
 /** The owner's name when the contract lets Sam say it, else null. */
@@ -74,7 +80,7 @@ function toDated(row: Row): Dated | null {
   const raw = str(row.StartDateTime);
   const start = raw === null ? null : new Date(raw);
   if (start === null || Number.isNaN(start.getTime())) return null;
-  const kind = /phone/i.test(str(row.Subject) ?? '') ? 'phone' : 'in_person';
+  const kind = PHONE_SUBJECT.test(str(row.Subject) ?? '') ? 'phone' : 'in_person';
   return { at: start.getTime(), fact: { start: start.toISOString(), kind, ownerName: ownerNameOf(row) } };
 }
 
