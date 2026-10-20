@@ -66,6 +66,8 @@ const schema = z.object({
     .optional(),
   /** Shared with cti-api: HMAC key for the internal AI call trigger. */
   OUTREACH_INTERNAL_SECRET: z.string().min(32).optional(),
+  /** Google Maps (Geocoding + Routes) for Sam's booking: property county and rep drive times. Unset = no maps; booking offers no times. */
+  GOOGLE_MAPS_API_KEY: z.string().min(1).optional(),
   /**
    * Plan 1D: the default appointment owner list, comma-separated Salesforce User ids (005…), in order. Used until a tenant
    * saves its own list in the AI calls settings card. Production: Grant Golden. Empty (the default) = nobody to book with.

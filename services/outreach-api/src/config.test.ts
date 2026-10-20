@@ -214,6 +214,15 @@ describe('parseConfig', () => {
       },
     );
   });
+  describe('GOOGLE_MAPS_API_KEY (geocoding and drive times for Sam\'s booking)', () => {
+    it('is optional', () => {
+      expect(parseConfig(base).GOOGLE_MAPS_API_KEY).toBeUndefined();
+      expect(parseConfig({ ...base, GOOGLE_MAPS_API_KEY: '' }).GOOGLE_MAPS_API_KEY).toBeUndefined();
+    });
+    it('is read as given when present', () => {
+      expect(parseConfig({ ...base, GOOGLE_MAPS_API_KEY: 'test-maps-key' }).GOOGLE_MAPS_API_KEY).toBe('test-maps-key');
+    });
+  });
   it('rejects a bad encryption key with a clear message', () => {
     expect(() => parseConfig({ ...base, TOKEN_ENCRYPTION_KEY: 'short' })).toThrow(/TOKEN_ENCRYPTION_KEY/);
   });
