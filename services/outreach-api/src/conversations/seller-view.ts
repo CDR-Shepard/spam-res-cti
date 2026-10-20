@@ -7,9 +7,9 @@
  * separate row that never appears here.
  *
  * Why Sam may not email, in the order the page explains it: the server has no email setup or no writer
- * (`not_configured`), the tenant's switch is off or paused, the record has no usable address, no person approved a
- * call plan for the seller on any AI call campaign (`not_approved`: warm leads only), the record is closed, and then
- * outbox.ts's own rules 2 to 7 for a first email (`sellerBlock`), so the page and the send tick never disagree.
+ * (`not_configured`), the tenant's switch is off or paused, the record has no usable address, and then outbox.ts's
+ * own rules for a first email (`sellerBlock`: no call plan a person approved, a closed record, the conversation,
+ * suppression, Salesforce Email Opt Out), so the page and the send tick never disagree.
  *
  * Every statement is scoped by tenant. No log line here (it writes none), so no address or name can reach one.
  */
@@ -17,7 +17,8 @@ import { sql } from 'drizzle-orm';
 import { FlagReason, StopReason, type ConversationView, type EmailBlock } from '@cti/contracts';
 import type { Db } from '@cti/db';
 import { loadConnection } from '../crm/connection-store.js';
-import { sellerBlock, switchBlock } from '../email/outbox.js';
+import { hasApprovedPlan, phonesOf, sellerBlock, switchBlock } from '../email/outbox.js';
+import { SF_ID_CORE } from '../tenancy/record-owner.js';
 import { suppressionFor } from './store.js';
 import { readTimeline } from './timeline.js';
 
@@ -49,20 +50,26 @@ export interface ConversationState {
   handlerName: string | null;
 }
 
-/** This tenant's record with this Salesforce id, or null (another tenant's record reads as none). */
+/**
+ * This tenant's record with this Salesforce id, or null (another tenant's record reads as none). An 18-character id
+ * matches whole; a 15-character one matches the stored id's case-sensitive 15-character core, the same record.
+ */
 export async function findSeller(db: Db, orgId: string, sfRecordId: string): Promise<SellerRecord | null> {
+  const match = sfRecordId.length === SF_ID_CORE ? sql`left(sf_record_id, ${SF_ID_CORE}::int) = ${sfRecordId}` : sql`sf_record_id = ${sfRecordId}`;
   const result = await db.execute(sql`
     select id, sf_object as "sfObject", sf_record_id as "sfRecordId", name, owner_sf_user_id as "ownerSfUserId", btrim(email) as email,
            is_closed as "isClosed", sf_email_opt_out as "sfEmailOptOut", coalesce(phones, '[]'::jsonb) as phones
     from crm_records
-    where org_id = ${orgId}::uuid and sf_record_id = ${sfRecordId}`);
+    where org_id = ${orgId}::uuid and ${match}
+    order by sf_record_id
+    limit 1`);
   const row = rows<Omit<SellerRecord, 'address' | 'phones'> & { email: string | null; phones: unknown }>(result)[0];
   if (!row) return null;
   const { email, phones, ...rest } = row;
   return {
     ...rest,
     address: email !== null && ADDRESS_SHAPE.test(email) ? email : null,
-    phones: Array.isArray(phones) ? phones.filter((p): p is { e164: string } => typeof (p as { e164?: unknown } | null)?.e164 === 'string') : [],
+    phones: phonesOf(phones),
   };
 }
 
@@ -76,22 +83,6 @@ export async function realConversation(db: Db, orgId: string, crmRecordId: strin
     left join users u on u.id = c.handler_user_id
     where c.org_id = ${orgId}::uuid and c.crm_record_id = ${crmRecordId}::uuid and c.practice_user_id is null`);
   return rows<ConversationState>(result)[0] ?? null;
-}
-
-/**
- * A person approved a call plan for this record on any of its AI call enrollments (call_plans.status `approved` is
- * only ever set by a person's decision, call-plans/decisions.ts). Any enrollment counts, not only the newest: an
- * approval is the warm-lead proof, whichever campaign it was made on.
- */
-export async function hasApprovedPlan(db: Db, orgId: string, crmRecordId: string): Promise<boolean> {
-  const result = await db.execute(sql`
-    select exists (
-      select 1 from campaign_enrollments e
-      join campaigns c on c.id = e.campaign_id and c.org_id = e.org_id and c.mode = 'ai_call'
-      join call_plans p on p.enrollment_id = e.id and p.org_id = e.org_id and p.status = 'approved'
-      where e.org_id = ${orgId}::uuid and e.crm_record_id = ${crmRecordId}::uuid
-    ) as approved`);
-  return rows<{ approved: boolean }>(result)[0]?.approved === true;
 }
 
 /** What the email blocks depend on beyond the record: whether the server can email at all, and the tenant's settings. */
@@ -113,10 +104,10 @@ export async function sellerEmailBlock(
   if (off) return off;
   const { record, conversation } = i;
   if (record.address === null) return 'no_address';
-  if (!(await hasApprovedPlan(db, i.orgId, record.id))) return 'not_approved';
-  if (record.isClosed) return 'closed';
   return sellerBlock({
     purpose: 'first',
+    approved: await hasApprovedPlan(db, i.orgId, record.id),
+    closed: record.isClosed,
     conversationStatus: conversation?.status ?? 'open',
     handler: conversation?.handler ?? 'sam',
     flagReason: conversation?.flagReason ?? null,

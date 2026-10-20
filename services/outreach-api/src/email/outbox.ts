@@ -8,11 +8,13 @@
  * was queued, because an email can wait days (the seller's hours, a retry) and the seller may have opted
  * out, been taken over by a person or been emailed three times since. The order is the order the seller
  * page explains a block in; the first rule that applies wins. A PRACTICE email (an admin's own copy,
- * to their own address) skips the rules that protect the seller (2 to 7) but still obeys the tenant's
- * switch, the daily cap and the hours. "Practice" has ONE meaning everywhere: the conversation is a
- * practice conversation (practice_user_id set), whatever the email's purpose: Sam answers an admin's
- * replies on a practice thread (`reply`, `holding`) exactly as on a real one, and those emails are exempt
- * and never logged to Salesforce too. `queueEmail` keeps the purposes honest (see there).
+ * to their own address) skips the rules that protect the seller (2 to 9) and the seller's hours (the
+ * admin is the recipient), but still obeys the tenant's switch and the daily cap. "Practice" has ONE
+ * meaning everywhere: the conversation is a practice conversation (practice_user_id set), whatever the
+ * email's purpose: Sam answers an admin's replies on a practice thread (`reply`, `holding`) exactly as on
+ * a real one, and those emails are exempt and never logged to Salesforce too. `queueEmail` keeps the
+ * purposes honest (see there). Warm leads only: a `first` email needs a call plan a person approved and
+ * an open record when it is sent, not only when it was queued.
  *
  * Logs: none here. The tick logs ids and counts; no address, subject or text reaches a log line.
  */
@@ -125,9 +127,31 @@ export function emailSendAt(phones: ReadonlyArray<{ e164: string }>, now: Date):
   return first ? nextWindowOpening(first.e164, now, EMAIL_WINDOW) : nextLocalOpening(now, recipientTimezone(null), EMAIL_WINDOW);
 }
 
+/** The `{ e164 }` entries of a stored `phones` value (crm_records.phones jsonb); anything else is dropped. */
+export function phonesOf(value: unknown): Array<{ e164: string }> {
+  return Array.isArray(value) ? value.filter((p): p is { e164: string } => typeof (p as { e164?: unknown } | null)?.e164 === 'string') : [];
+}
+
+/**
+ * A person approved a call plan for this record on any of its AI call enrollments (call_plans.status `approved` is
+ * only ever set by a person's decision, call-plans/decisions.ts). Any enrollment counts, not only the newest: an
+ * approval is the warm-lead proof, whichever campaign it was made on.
+ */
+export async function hasApprovedPlan(db: Db, orgId: string, crmRecordId: string): Promise<boolean> {
+  const result = await db.execute(sql`
+    select exists (
+      select 1 from campaign_enrollments e
+      join campaigns c on c.id = e.campaign_id and c.org_id = e.org_id and c.mode = 'ai_call'
+      join call_plans p on p.enrollment_id = e.id and p.org_id = e.org_id and p.status = 'approved'
+      where e.org_id = ${orgId}::uuid and e.crm_record_id = ${crmRecordId}::uuid
+    ) as approved`);
+  return rows<{ approved: boolean }>(result)[0]?.approved === true;
+}
+
 interface SendFacts {
   orgId: string;
   conversationId: string;
+  crmRecordId: string;
   purpose: string;
   toAddress: string;
   conversationStatus: string;
@@ -136,15 +160,17 @@ interface SendFacts {
   practiceUserId: string | null;
   settings: unknown;
   sfEmailOptOut: boolean;
+  isClosed: boolean;
   phones: Array<{ e164: string }>;
 }
 
 /** The email, its conversation, the tenant's settings and the seller's record, in one read scoped to the email's own tenant. */
 async function loadFacts(db: Db, emailId: string): Promise<SendFacts> {
   const result = await db.execute(sql`
-    select m.org_id as "orgId", m.conversation_id as "conversationId", m.purpose, m.to_address as "toAddress",
+    select m.org_id as "orgId", m.conversation_id as "conversationId", c.crm_record_id as "crmRecordId", m.purpose, m.to_address as "toAddress",
            c.status as "conversationStatus", c.handler, c.flag_reason as "flagReason", c.practice_user_id as "practiceUserId",
-           o.settings, coalesce(r.sf_email_opt_out, false) as "sfEmailOptOut", coalesce(r.phones, '[]'::jsonb) as phones
+           o.settings, coalesce(r.sf_email_opt_out, false) as "sfEmailOptOut", coalesce(r.is_closed, false) as "isClosed",
+           coalesce(r.phones, '[]'::jsonb) as phones
     from email_messages m
     join seller_conversations c on c.id = m.conversation_id and c.org_id = m.org_id
     join organizations o on o.id = m.org_id
@@ -152,8 +178,7 @@ async function loadFacts(db: Db, emailId: string): Promise<SendFacts> {
     where m.id = ${emailId}::uuid and m.direction = 'out'`);
   const facts = rows<Omit<SendFacts, 'phones'> & { phones: unknown }>(result)[0];
   if (!facts) throw new Error(`email message not found: ${emailId}`);
-  const phones = Array.isArray(facts.phones) ? facts.phones.filter((p): p is { e164: string } => typeof (p as { e164?: unknown } | null)?.e164 === 'string') : [];
-  return { ...facts, phones };
+  return { ...facts, phones: phonesOf(facts.phones) };
 }
 
 /** Rule 1, pure: the tenant's switch (`organizations.settings` as stored). */
@@ -163,9 +188,13 @@ export function switchBlock(settings: unknown): 'disabled' | 'paused' | null {
   return s.pausedAt !== null ? 'paused' : null;
 }
 
-/** What rules 2 to 7 read: the conversation (open / Sam / no flag when there is none yet), the address and the record. */
+/** What rules 2 to 9 read: the warm-lead facts, the conversation (open / Sam / no flag when there is none yet), the address and the record. */
 export interface SellerFacts {
   purpose: string;
+  /** A person approved a call plan for the seller (`hasApprovedPlan`); read for a `first` email only. */
+  approved: boolean;
+  /** crm_records.is_closed; read for a `first` email only. */
+  closed: boolean;
   conversationStatus: string;
   handler: string;
   flagReason: string | null;
@@ -175,10 +204,15 @@ export interface SellerFacts {
 }
 
 /**
- * Rules 2 to 7, pure: what protects the seller. The send tick applies it to a due email; the seller page applies
+ * Rules 2 to 9, pure: what protects the seller. The send tick applies it to a due email; the seller page applies
  * it, as purpose `first`, to an email nobody has written yet, so the page's reason and the tick's never disagree.
+ * Warm leads only: a first email needs an approved plan and an open record, checked again when it is due (a plan
+ * rejected or a record closed while it waited cancels it). A reply or holding email answers the seller and needs
+ * neither.
  */
 export function sellerBlock(f: SellerFacts): EmailBlock | null {
+  if (f.purpose === 'first' && !f.approved) return 'not_approved';
+  if (f.purpose === 'first' && f.closed) return 'closed';
   if (f.conversationStatus === 'stopped') return 'stopped';
   if (f.conversationStatus === 'booked' && f.purpose !== 'holding') return 'booked';
   if (f.handler === 'person') return 'taken_over';
@@ -206,11 +240,20 @@ export async function emailsOutInLastDay(db: Db, i: { orgId: string; conversatio
 async function firstBlock(db: Db, f: SendFacts, emailId: string, now: Date): Promise<SendBlock | null> {
   const off = switchBlock(f.settings);
   if (off) return off;
-  if (f.practiceUserId === null) {
-    const held = sellerBlock({ ...f, suppressed: (await suppressionFor(db, f.orgId, f.toAddress)) !== null });
+  const practice = f.practiceUserId !== null;
+  if (!practice) {
+    const held = sellerBlock({
+      ...f,
+      // Only a first email needs the approval, so no other purpose pays for the read.
+      approved: f.purpose !== 'first' || (await hasApprovedPlan(db, f.orgId, f.crmRecordId)),
+      closed: f.isClosed,
+      suppressed: (await suppressionFor(db, f.orgId, f.toAddress)) !== null,
+    });
     if (held) return held;
   }
   if ((await emailsOutInLastDay(db, { orgId: f.orgId, conversationId: f.conversationId, exceptEmailId: emailId }, now)) >= EMAIL_DAILY_CAP) return 'daily_cap';
+  // A practice email goes to the admin, not the seller: the seller's hours do not apply to it.
+  if (practice) return null;
   return emailSendAt(f.phones, now).getTime() > now.getTime() ? 'outside_window' : null;
 }
 
@@ -223,12 +266,15 @@ export async function evaluateSend(db: Db, emailId: string, now: Date): Promise<
 /**
  * Why this queued or claimed email must not go out right now, or null when it may. In order:
  *  1. the tenant's Sam email is off (`disabled`) or paused (`paused`);
- *  2. the conversation is `stopped`;  3. it is `booked` and this is not a `holding` email;
- *  4. a person has taken over;  5. a person is needed (a flag) and this is a `first` or `reply`;
- *  6. the address is suppressed;  7. Salesforce says Email Opt Out;
- *  8. the conversation already had 3 other emails out in the last 24 hours (`daily_cap`);
- *  9. it is outside the seller's 08:00 to 18:00 (`outside_window`: wait, do not cancel).
- * Rules 2 to 7 do not apply to an email on a practice conversation (whatever its purpose). Throws for an email that does not exist.
+ *  2. a `first` email whose seller has no call plan a person approved (`not_approved`);
+ *  3. a `first` email to a closed record (`closed`);
+ *  4. the conversation is `stopped`;  5. it is `booked` and this is not a `holding` email;
+ *  6. a person has taken over;  7. a person is needed (a flag) and this is a `first` or `reply`;
+ *  8. the address is suppressed;  9. Salesforce says Email Opt Out;
+ * 10. the conversation already had 3 other emails out in the last 24 hours (`daily_cap`);
+ * 11. it is outside the seller's 08:00 to 18:00 (`outside_window`: wait, do not cancel).
+ * Rules 2 to 9 and 11 do not apply to an email on a practice conversation (whatever its purpose): it goes to the
+ * admin. Throws for an email that does not exist.
  */
 export async function sendBlock(db: Db, emailId: string, now: Date): Promise<SendBlock | null> {
   return (await evaluateSend(db, emailId, now)).block;

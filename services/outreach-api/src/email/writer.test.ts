@@ -305,7 +305,7 @@ describe.skipIf(!pgLane)('writeEmail (real Postgres)', () => {
   }, 120_000);
   afterAll(async () => {
     await drop?.();
-  });
+  }, 120_000);
 
   it('adds the call to the tenant\'s day, and the next call is over_budget once the day is spent', async () => {
     const orgId = await seedOrg(db);

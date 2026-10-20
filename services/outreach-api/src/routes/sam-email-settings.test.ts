@@ -7,6 +7,7 @@ import { schema } from '@cti/db';
 import { buildApp } from '../app.js';
 import { fakeDb, testConfig } from '../test/harness.js';
 import { createTestDb, pgLane, type TestDb } from '../test/pg.js';
+import type { EmailWriter } from '../email/writer.js';
 import { seedOrg } from '../test/outreach-fixtures.js';
 import { registerSamEmailSettingsRoutes } from './sam-email-settings.js';
 
@@ -22,17 +23,20 @@ const rep = { ...admin, userId: 'U-REP', isAdmin: false };
 const auth = { authorization: 'Bearer t' };
 const EMAIL_CFG = { RESEND_API_KEY: 're_test_key', RESEND_WEBHOOK_SECRET: 'whsec_dGVzdHNlY3JldA==' };
 const PAUSED_AT = '2026-10-19T08:00:00.000Z';
+const WRITER: EmailWriter = { write: async () => { throw new Error('the settings route never asks for a draft'); } };
 
 describe('Sam email settings routes', () => {
   let app: FastifyInstance;
-  async function build(opts: { settings?: unknown; configured?: boolean } = {}) {
+  /** `configured`: Resend is set up; `writer` defaults to one exactly when it is (the server's normal setup). */
+  async function build(opts: { settings?: unknown; configured?: boolean; writer?: EmailWriter | null } = {}) {
     const { db } = fakeDb({ organizations: [{ ...ORG, settings: opts.settings ?? {} }] });
     const execute = vi.fn(async () => {
       throw new Error('the database was written');
     });
     (db as unknown as { execute: unknown }).execute = execute;
     const cfg = testConfig(opts.configured ? EMAIL_CFG : {});
-    app = await buildApp({ cfg, readiness: async () => ({ dbOk: true, jobsOk: true }), apiRoutes: [(scope) => registerSamEmailSettingsRoutes(scope, { db, cfg })] });
+    const writer = opts.writer === undefined ? (opts.configured ? WRITER : null) : opts.writer;
+    app = await buildApp({ cfg, readiness: async () => ({ dbOk: true, jobsOk: true }), apiRoutes: [(scope) => registerSamEmailSettingsRoutes(scope, { db, cfg, writer })] });
     return execute;
   }
   const call = (method: 'GET' | 'PUT', payload?: unknown) =>
@@ -77,6 +81,15 @@ describe('Sam email settings routes', () => {
     expect(execute).not.toHaveBeenCalled();
   });
 
+  it('Resend set up but no writer (no Anthropic key or an unpriced EMAIL_MODEL): configured false, and PUT enabled:true is 409', async () => {
+    const execute = await build({ configured: true, writer: null, settings: { samEmail: { enabled: false } } });
+    expect((await call('GET')).json()).toEqual({ enabled: false, configured: false, pausedAt: null, pausedReason: null });
+    const res = await call('PUT', { enabled: true });
+    expect(res.statusCode).toBe(409);
+    expect(res.json().code).toBe('EMAIL_NOT_CONFIGURED');
+    expect(execute).not.toHaveBeenCalled();
+  });
+
   it.each([[{}], [{ enabled: 'yes' }], [{ enabled: null }]])('PUT %j is 400 INVALID_BODY', async (body) => {
     await build({ configured: true });
     const res = await call('PUT', body);
@@ -91,10 +104,10 @@ describe.skipIf(!pgLane)('Sam email settings routes (real Postgres)', () => {
   let unconfigured: FastifyInstance;
   beforeAll(async () => {
     t = await createTestDb();
-    const build = (cfg: ReturnType<typeof testConfig>) =>
-      buildApp({ cfg, readiness: async () => ({ dbOk: true, jobsOk: true }), apiRoutes: [(scope) => registerSamEmailSettingsRoutes(scope, { db: t.db, cfg })] });
-    configured = await build(testConfig(EMAIL_CFG));
-    unconfigured = await build(testConfig());
+    const build = (cfg: ReturnType<typeof testConfig>, writer: EmailWriter | null) =>
+      buildApp({ cfg, readiness: async () => ({ dbOk: true, jobsOk: true }), apiRoutes: [(scope) => registerSamEmailSettingsRoutes(scope, { db: t.db, cfg, writer })] });
+    configured = await build(testConfig(EMAIL_CFG), WRITER);
+    unconfigured = await build(testConfig(), null);
   }, 120_000);
   afterAll(async () => {
     await configured?.close();

@@ -25,7 +25,8 @@ export async function ownSfUserId(db: Db, userId: string): Promise<string | null
   return conn?.sfUserId ?? null;
 }
 
-const isAdmin = (ctx: RequestContext): boolean => ctx.session.isAdmin || ctx.session.isSuperAdmin;
+/** An admin of the tenant, or a super admin acting on it. */
+export const isAdmin = (ctx: RequestContext): boolean => ctx.session.isAdmin || ctx.session.isSuperAdmin;
 
 /** The pure form, for lists: `mine` is looked up once per request. */
 export function mayDecideWith(ctx: RequestContext, mine: string | null, ownerSfUserId: string | null): boolean {

@@ -8,9 +8,13 @@
  * send is the same email to the admin's own sign-in address, on the admin's own practice conversation: the seller's
  * blocks do not apply (nothing reaches the seller), the server setup and the tenant's switch do.
  *
- * The send queues; it never sends. The send tick (email/send.ts) checks every rule again when the email is due, so
- * a seller who opts out in between is never emailed. A second Send while the first is still queued or sending is
- * refused (EMAIL_ALREADY_QUEUED), so a double click never queues two first emails.
+ * The send queues; it never sends. When the email is due, the send tick (email/send.ts, outbox.ts `sendBlock`) checks
+ * again: the tenant's switch and pause, that the seller still has a call plan a person approved and an open record,
+ * the conversation (stopped, booked, taken over, flagged), suppression, Salesforce Email Opt Out, the daily cap and
+ * the seller's hours. So a seller who opts out, closes or loses their approval in between is never emailed. It does
+ * not check the server setup or the address again (the email carries its own `to`). A practice email is checked
+ * against the switch and the daily cap only. A second Send while the first is still queued or sending is refused
+ * (EMAIL_ALREADY_QUEUED), so a double click never queues two first emails.
  *
  * Logs carry ids, codes and counts only: never an address, a name, a subject or the draft (which is returned to the
  * admin and nowhere else).
@@ -37,7 +41,7 @@ import { emailSendAt, queueEmailOnce } from '../email/outbox.js';
 import { loadWriterContext } from '../email/writer-context.js';
 import { writeEmail, type EmailWriter } from '../email/writer.js';
 import { sendError } from '../http/errors.js';
-import { mayDecide } from '../tenancy/record-owner.js';
+import { isAdmin, mayDecide } from '../tenancy/record-owner.js';
 import { requireAdmin, requireContext, type RequestContext } from '../tenancy/scope.js';
 
 export interface SellerRouteDeps {
@@ -65,8 +69,6 @@ export const SELLER_WORDS = {
   DRAFT_INVALID: 'Fix the draft before it is sent.',
   EMAIL_ALREADY_QUEUED: 'An email to this seller is already waiting to go out. Wait until it is sent, then try again.',
 } as const;
-
-const isAdmin = (ctx: RequestContext): boolean => ctx.session.isAdmin || ctx.session.isSuperAdmin;
 
 /** Sends the error and answers null, for the helpers that either load something or refuse. */
 function refuse(reply: FastifyReply, status: number, code: string, words: string, details?: unknown): null {
@@ -171,7 +173,7 @@ export async function registerSellerRoutes(app: FastifyInstance, deps: SellerRou
     const at = now();
     const userId = s.ctx.session.userId;
     const conversation = await ensureConversation(db, { orgId: s.ctx.orgId, crmRecordId: s.record.id, practiceUserId: practice ? userId : null });
-    // A practice email is queued for now; the send tick still holds it to the seller's hours, as it does every email.
+    // A practice email goes to the admin, so it is due now: the send tick does not hold it to the seller's hours.
     const sendAfter = practice ? at : emailSendAt(s.record.phones, at);
     const queued = await queueEmailOnce(db, {
       orgId: s.ctx.orgId,

@@ -56,21 +56,37 @@ describe('switchBlock (rule 1)', () => {
   });
 });
 
-describe('sellerBlock (rules 2 to 7, pure)', () => {
-  const open: SellerFacts = { purpose: 'first', conversationStatus: 'open', handler: 'sam', flagReason: null, suppressed: false, sfEmailOptOut: false };
+describe('sellerBlock (rules 2 to 9, pure)', () => {
+  const open: SellerFacts = {
+    purpose: 'first',
+    approved: true,
+    closed: false,
+    conversationStatus: 'open',
+    handler: 'sam',
+    flagReason: null,
+    suppressed: false,
+    sfEmailOptOut: false,
+  };
 
-  it('is null for an open conversation Sam handles, an unsuppressed address and no Salesforce opt-out', () => {
+  it('is null for an approved, open seller Sam handles, an unsuppressed address and no Salesforce opt-out', () => {
     expect(sellerBlock(open)).toBeNull();
   });
 
-  it('answers in the order the seller page explains: stopped, booked, taken_over, flagged, suppressed, sf_opt_out', () => {
-    const all: SellerFacts = { ...open, conversationStatus: 'stopped', handler: 'person', flagReason: 'unsure', suppressed: true, sfEmailOptOut: true };
-    expect(sellerBlock(all)).toBe('stopped');
-    expect(sellerBlock({ ...all, conversationStatus: 'booked' })).toBe('booked');
-    expect(sellerBlock({ ...all, conversationStatus: 'open' })).toBe('taken_over');
-    expect(sellerBlock({ ...all, conversationStatus: 'open', handler: 'sam' })).toBe('flagged');
-    expect(sellerBlock({ ...all, conversationStatus: 'open', handler: 'sam', flagReason: null })).toBe('suppressed');
+  it('answers in the order the seller page explains: not_approved, closed, stopped, booked, taken_over, flagged, suppressed, sf_opt_out', () => {
+    const all: SellerFacts = { ...open, approved: false, closed: true, conversationStatus: 'stopped', handler: 'person', flagReason: 'unsure', suppressed: true, sfEmailOptOut: true };
+    expect(sellerBlock(all)).toBe('not_approved');
+    expect(sellerBlock({ ...all, approved: true })).toBe('closed');
+    const warm: SellerFacts = { ...all, approved: true, closed: false };
+    expect(sellerBlock(warm)).toBe('stopped');
+    expect(sellerBlock({ ...warm, conversationStatus: 'booked' })).toBe('booked');
+    expect(sellerBlock({ ...warm, conversationStatus: 'open' })).toBe('taken_over');
+    expect(sellerBlock({ ...warm, conversationStatus: 'open', handler: 'sam' })).toBe('flagged');
+    expect(sellerBlock({ ...warm, conversationStatus: 'open', handler: 'sam', flagReason: null })).toBe('suppressed');
     expect(sellerBlock({ ...open, sfEmailOptOut: true })).toBe('sf_opt_out');
+  });
+
+  it('only a first email needs an approved plan and an open record: a reply or holding email answers the seller', () => {
+    for (const purpose of ['reply', 'holding']) expect(sellerBlock({ ...open, purpose, approved: false, closed: true }), purpose).toBeNull();
   });
 
   it('a holding email still goes to a booked seller; a flag holds back only first emails and replies', () => {

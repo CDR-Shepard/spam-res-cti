@@ -43,6 +43,7 @@ describe.skipIf(!pgLane)('seller conversation routes (real Postgres)', () => {
   let app: FastifyInstance;
   let unconfigured: FastifyInstance;
   let logLines: string[] = [];
+  let sellerSeq = 0;
   const write = vi.fn();
   const writer: EmailWriter = { write };
 
@@ -86,16 +87,21 @@ describe.skipIf(!pgLane)('seller conversation routes (real Postgres)', () => {
     state.session = { userId, orgId, email: 'session@example.com', isAdmin, isSuperAdmin: false, kind: 'human', powerDialerEnabled: false };
   };
 
-  /** A tenant with Sam's email on, a Salesforce connection, an admin, the record's owner and another rep, and one approved seller. */
+  /**
+   * A tenant with Sam's email on, a Salesforce connection, an admin, the record's owner and another rep, and one approved
+   * seller. Each seller's id differs in its 15-character core, as real Salesforce ids do.
+   */
   async function seedSeller(o: PlanLeadOptions & { settings?: Record<string, unknown> } = {}) {
     const { orgId, campaignId } = await seedAiCallCampaign(t.db);
     await t.db.update(schema.organizations).set({ settings: o.settings ?? { samEmail: { enabled: true } } }).where(eq(schema.organizations.id, orgId));
     await seedConnection(t.db, orgId);
-    const lead = await seedPlanLead(t.db, { orgId, campaignId }, { planStatus: 'approved', ownerSfUserId: OWNER_SF, ...o, recordOver: { email: SELLER_EMAIL, ...o.recordOver } });
+    sellerSeq += 1;
+    const sfRecordId = `00Q${String(sellerSeq).padStart(12, '0')}AAA`;
+    const lead = await seedPlanLead(t.db, { orgId, campaignId }, { planStatus: 'approved', ownerSfUserId: OWNER_SF, ...o, recordOver: { sfRecordId, email: SELLER_EMAIL, ...o.recordOver } });
     const admin = await seedPerson(t.db, orgId, { displayName: 'Ada Admin' });
     const owner = await seedPerson(t.db, orgId, { sfUserId: OWNER_SF, displayName: 'Owen Owner' });
     const other = await seedPerson(t.db, orgId, { sfUserId: '005000000000888AAA' });
-    return { ...lead, admin, owner, other };
+    return { ...lead, sfRecordId, admin, owner, other };
   }
 
   const url = (sfRecordId: string, path: string) => `/api/sellers/${sfRecordId}/${path}`;
@@ -125,6 +131,22 @@ describe.skipIf(!pgLane)('seller conversation routes (real Postgres)', () => {
       const res = await get(elsewhere.sfRecordId);
       expect(res.statusCode).toBe(404);
       expect(res.json().code).toBe('NOT_FOUND');
+    });
+
+    it('finds the record by its 15-character id (the case-sensitive prefix) as well as its 18-character one; never another tenant\'s', async () => {
+      const s = await seedSeller();
+      const elsewhere = await seedSeller();
+      sessionFor(s.orgId, s.admin.id, true);
+      const short = await get(s.sfRecordId.slice(0, 15));
+      expect(short.statusCode).toBe(200);
+      expect(short.json().sfRecordId).toBe(s.sfRecordId);
+      expect((await get(s.sfRecordId)).statusCode).toBe(200);
+      // Salesforce's 15-character id is case-sensitive, and an 18-character id is matched whole.
+      expect((await get(s.sfRecordId.slice(0, 15).toLowerCase())).statusCode).toBe(404);
+      expect((await get(`${s.sfRecordId.slice(0, 15)}ZZZ`)).statusCode).toBe(404);
+      const theirs = await get(elsewhere.sfRecordId.slice(0, 15));
+      expect(theirs.statusCode).toBe(404);
+      expect(theirs.json().code).toBe('NOT_FOUND');
     });
 
     it('the owner sees the seller: mayEmail false, mayChangeHandler true, and no conversation row is created', async () => {

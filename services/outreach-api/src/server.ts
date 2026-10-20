@@ -217,7 +217,7 @@ async function main(): Promise<void> {
       (scope) => registerResendWebhookRoutes(scope, { db, secret: cfg.RESEND_WEBHOOK_SECRET ?? null }),
       (scope) => registerEmailUnsubscribeRoutes(scope, { db, companyName: cfg.EMAIL_COMPANY_NAME }),
       (scope) => registerSellerRoutes(scope, { db, writer: emailWriter, cfg }),
-      (scope) => registerSamEmailSettingsRoutes(scope, { db, cfg }),
+      (scope) => registerSamEmailSettingsRoutes(scope, { db, cfg, writer: emailWriter }),
       // Plan 1E: Test a record (admins): preview how the AI would call any Lead or Opportunity, without a campaign.
       (scope) =>
         registerRecordTestRoutes(scope, {

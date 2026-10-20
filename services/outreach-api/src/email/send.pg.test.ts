@@ -8,8 +8,8 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest
 import { eq } from 'drizzle-orm';
 import { schema, type Db } from '@cti/db';
 import { createTestDb, pgLane, type TestDb } from '../test/pg.js';
-import { leadId, seedOrg, seedRecord, snapshot } from '../test/outreach-fixtures.js';
-import { seedUser } from '../test/call-plan-seed.js';
+import { seedCampaign, seedOrg } from '../test/outreach-fixtures.js';
+import { seedPlanLead, seedUser } from '../test/call-plan-seed.js';
 import { appendEvent, ensureConversation, suppressAddress, type SellerConversationRow } from '../conversations/store.js';
 import { queueEmail, sendBlock } from './outbox.js';
 import { sendDueEmails } from './send.js';
@@ -19,6 +19,10 @@ import type { ResendClient, ResendSendRequest, ResendSendResult } from './resend
 const NOW = new Date('2026-10-20T17:00:00.000Z');
 /** Tuesday 21:00 in Chicago. */
 const EVENING = new Date('2026-10-21T02:00:00.000Z');
+/** Tuesday 23:00 in Chicago. */
+const LATE = new Date('2026-10-21T04:00:00.000Z');
+/** Wednesday 08:00 in Chicago: the window's next opening after EVENING or LATE. */
+const MORNING = new Date('2026-10-21T13:00:00.000Z');
 const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
 const ADDRESS = 'delivered@resend.dev';
@@ -56,7 +60,6 @@ const fakeLog = () => ({ info: vi.fn(), warn: vi.fn(), error: vi.fn() });
 describe.skipIf(!pgLane)('outbox and send tick (real Postgres)', () => {
   let t: TestDb;
   let db: Db;
-  let seq = 0;
   beforeAll(async () => {
     t = await createTestDb();
     db = t.db;
@@ -72,23 +75,33 @@ describe.skipIf(!pgLane)('outbox and send tick (real Postgres)', () => {
   interface Seller {
     orgId: string;
     crmRecordId: string;
+    /** The call plan on the seller's AI call enrollment (approved unless `approved: false`). */
+    planId: string;
     conv: SellerConversationRow;
   }
 
-  /** A fresh tenant (Sam email on) with one seller in Chicago and their conversation. */
-  async function seedSeller(over: { settings?: Record<string, unknown>; phones?: Array<{ field: string; e164: string }>; sfEmailOptOut?: boolean } = {}): Promise<Seller> {
-    seq += 1;
-    const orgId = await seedOrg(db, over.settings ?? { samEmail: { enabled: true } });
-    const crmRecordId = await seedRecord(
-      db,
-      orgId,
-      snapshot({ sfRecordId: leadId(seq), email: ADDRESS, phones: over.phones ?? CHICAGO, sfEmailOptOut: over.sfEmailOptOut ?? false }),
-    );
-    return { orgId, crmRecordId, conv: await ensureConversation(db, { orgId, crmRecordId }) };
+  interface SellerOptions {
+    settings?: Record<string, unknown>;
+    phones?: Array<{ field: string; e164: string }>;
+    sfEmailOptOut?: boolean;
+    /** false = the plan is only proposed (warm leads only: a first email needs one a person approved). */
+    approved?: boolean;
   }
 
-  async function seedPracticeSeller(): Promise<Seller & { adminId: string }> {
-    const seller = await seedSeller();
+  /** A fresh tenant (Sam email on) with one seller in Chicago on an AI call campaign, an approved plan, and their conversation. */
+  async function seedSeller(over: SellerOptions = {}): Promise<Seller> {
+    const orgId = await seedOrg(db, over.settings ?? { samEmail: { enabled: true } });
+    const campaign = await seedCampaign(db, orgId, { mode: 'ai_call', status: 'active' });
+    const lead = await seedPlanLead(
+      db,
+      { orgId, campaignId: campaign.id },
+      { planStatus: over.approved === false ? 'proposed' : 'approved', phones: over.phones ?? CHICAGO, recordOver: { email: ADDRESS, sfEmailOptOut: over.sfEmailOptOut ?? false } },
+    );
+    return { orgId, crmRecordId: lead.crmRecordId, planId: lead.planId!, conv: await ensureConversation(db, { orgId, crmRecordId: lead.crmRecordId }) };
+  }
+
+  async function seedPracticeSeller(over: SellerOptions = {}): Promise<Seller & { adminId: string }> {
+    const seller = await seedSeller(over);
     const adminId = await seedUser(db, seller.orgId);
     const conv = await ensureConversation(db, { orgId: seller.orgId, crmRecordId: seller.crmRecordId, practiceUserId: adminId });
     return { ...seller, conv, adminId };
@@ -733,10 +746,10 @@ describe.skipIf(!pgLane)('outbox and send tick (real Postgres)', () => {
         },
       );
 
-      it('a reply on a practice conversation still obeys the tenant switch, the daily cap and the hours', async () => {
+      it('a reply on a practice conversation still obeys the tenant switch and the daily cap, but not the seller\'s hours', async () => {
         const p = await seedPracticeSeller();
         const { emailId } = await queue(p, { purpose: 'reply' });
-        expect(await sendBlock(db, emailId, EVENING)).toBe('outside_window');
+        expect(await sendBlock(db, emailId, EVENING)).toBeNull();
         await seedSent(p, HOUR);
         await seedSent(p, 2 * HOUR);
         await seedSent(p, 3 * HOUR);
@@ -745,15 +758,62 @@ describe.skipIf(!pgLane)('outbox and send tick (real Postgres)', () => {
         expect(await sendBlock(db, emailId, NOW)).toBe('disabled');
       });
 
-      it('skips the seller rules but not the tenant switch, the cap or the hours', async () => {
-        const p = await seedPracticeSeller();
+      it('skips the seller rules and the seller\'s hours (the admin is the recipient) but not the tenant switch or the cap', async () => {
+        const p = await seedPracticeSeller({ approved: false });
         await setConversation(p.conv.id, { status: 'stopped', stopReason: 'opted_out', flagReason: 'unsure' });
         await suppressAddress(db, { orgId: p.orgId, address: ADDRESS, reason: 'opted_out', conversationId: null });
+        await db.update(schema.crmRecords).set({ isClosed: true }).where(eq(schema.crmRecords.id, p.crmRecordId));
         const sendable = await queue(p, { purpose: 'practice', requestedBy: p.adminId });
         expect(await sendBlock(db, sendable.emailId, NOW)).toBeNull();
-        expect(await sendBlock(db, sendable.emailId, EVENING)).toBe('outside_window');
+        expect(await sendBlock(db, sendable.emailId, EVENING)).toBeNull();
+        await seedSent(p, HOUR);
+        await seedSent(p, 2 * HOUR);
+        await seedSent(p, 3 * HOUR);
+        expect(await sendBlock(db, sendable.emailId, EVENING)).toBe('daily_cap');
         await db.update(schema.organizations).set({ settings: { samEmail: { enabled: false } } }).where(eq(schema.organizations.id, p.orgId));
         expect(await sendBlock(db, sendable.emailId, NOW)).toBe('disabled');
+      });
+    });
+
+    it('a practice email due at 23:00 seller-local goes out on that tick; a real first email due then waits for 08:00', async () => {
+      const p = await seedPracticeSeller();
+      const practice = await queue(p, { purpose: 'practice', requestedBy: p.adminId, inReplyTo: null, references: null, sendAfter: LATE });
+      const real = await seedSeller();
+      const first = await queue(real, { purpose: 'first', inReplyTo: null, references: null, sendAfter: LATE });
+      const resend = fakeResend();
+      expect(await tick(resend.client, { now: LATE })).toEqual({ sent: 1, retried: 0, canceled: 0, failed: 0 });
+      expect(await rowOf(practice.emailId)).toMatchObject({ status: 'sent' });
+      expect(await rowOf(first.emailId)).toMatchObject({ status: 'queued', sendAfter: MORNING, attempts: 0 });
+      expect(resend.calls.map((c) => c.key)).toEqual([`email:${practice.emailId}`]);
+    });
+
+    describe('a first email is checked again for a warm lead when it is due', () => {
+      it('the record closed after it was queued: canceled closed, and Resend sees nothing', async () => {
+        const s = await seedSeller();
+        const { emailId } = await queue(s, { purpose: 'first', inReplyTo: null, references: null });
+        await db.update(schema.crmRecords).set({ isClosed: true }).where(eq(schema.crmRecords.id, s.crmRecordId));
+        const resend = fakeResend();
+        expect(await tick(resend.client)).toEqual({ sent: 0, retried: 0, canceled: 1, failed: 0 });
+        expect(await rowOf(emailId)).toMatchObject({ status: 'canceled', lastError: 'closed' });
+        expect(resend.calls).toEqual([]);
+      });
+
+      it('the call plan was rejected after it was queued: canceled not_approved, and Resend sees nothing', async () => {
+        const s = await seedSeller();
+        const { emailId } = await queue(s, { purpose: 'first', inReplyTo: null, references: null });
+        await db.update(schema.callPlans).set({ status: 'rejected' }).where(eq(schema.callPlans.id, s.planId));
+        const resend = fakeResend();
+        expect(await tick(resend.client)).toEqual({ sent: 0, retried: 0, canceled: 1, failed: 0 });
+        expect(await rowOf(emailId)).toMatchObject({ status: 'canceled', lastError: 'not_approved' });
+        expect(resend.calls).toEqual([]);
+      });
+
+      it('a reply and a holding email to a closed seller with no approved plan still go', async () => {
+        const s = await seedSeller({ approved: false });
+        await db.update(schema.crmRecords).set({ isClosed: true }).where(eq(schema.crmRecords.id, s.crmRecordId));
+        await queue(s, { purpose: 'reply' });
+        await queue(s, { purpose: 'holding' });
+        expect(await tick(fakeResend().client)).toEqual({ sent: 2, retried: 0, canceled: 0, failed: 0 });
       });
     });
 
@@ -819,13 +879,28 @@ describe.skipIf(!pgLane)('outbox and send tick (real Postgres)', () => {
       expect(await sendBlock(db, (await queue(offAndPaused)).emailId, NOW)).toBe('disabled');
     });
 
-    it('2. stopped', async () => {
+    it('2. a first email needs a call plan a person approved; a reply or holding email does not', async () => {
+      const cold = await seedSeller({ approved: false });
+      expect(await sendBlock(db, (await queue(cold, { purpose: 'first' })).emailId, NOW)).toBe('not_approved');
+      expect(await sendBlock(db, (await queue(cold, { purpose: 'reply' })).emailId, NOW)).toBeNull();
+      expect(await sendBlock(db, (await queue(cold, { purpose: 'holding' })).emailId, NOW)).toBeNull();
+    });
+
+    it('3. a first email to a closed record; a reply or holding email still goes', async () => {
+      const s = await seedSeller();
+      await db.update(schema.crmRecords).set({ isClosed: true }).where(eq(schema.crmRecords.id, s.crmRecordId));
+      expect(await sendBlock(db, (await queue(s, { purpose: 'first' })).emailId, NOW)).toBe('closed');
+      expect(await sendBlock(db, (await queue(s, { purpose: 'reply' })).emailId, NOW)).toBeNull();
+      expect(await sendBlock(db, (await queue(s, { purpose: 'holding' })).emailId, NOW)).toBeNull();
+    });
+
+    it('4. stopped', async () => {
       const s = await seedSeller();
       await setConversation(s.conv.id, { status: 'stopped', stopReason: 'asked_to_stop' });
       for (const purpose of SELLER_RULES) expect(await sendBlock(db, (await queue(s, { purpose })).emailId, NOW), purpose).toBe('stopped');
     });
 
-    it('3. booked stops everything but a holding email', async () => {
+    it('5. booked stops everything but a holding email', async () => {
       const s = await seedSeller();
       await setConversation(s.conv.id, { status: 'booked' });
       expect(await sendBlock(db, (await queue(s, { purpose: 'first' })).emailId, NOW)).toBe('booked');
@@ -833,13 +908,13 @@ describe.skipIf(!pgLane)('outbox and send tick (real Postgres)', () => {
       expect(await sendBlock(db, (await queue(s, { purpose: 'holding' })).emailId, NOW)).toBeNull();
     });
 
-    it('4. taken over by a person', async () => {
+    it('6. taken over by a person', async () => {
       const s = await seedSeller();
       await setConversation(s.conv.id, { handler: 'person' });
       for (const purpose of SELLER_RULES) expect(await sendBlock(db, (await queue(s, { purpose })).emailId, NOW), purpose).toBe('taken_over');
     });
 
-    it('5. flagged stops a first or reply email but not a holding one', async () => {
+    it('7. flagged stops a first or reply email but not a holding one', async () => {
       const s = await seedSeller();
       await setConversation(s.conv.id, { flagReason: 'wants_appointment', flaggedAt: NOW });
       expect(await sendBlock(db, (await queue(s, { purpose: 'first' })).emailId, NOW)).toBe('flagged');
@@ -847,7 +922,7 @@ describe.skipIf(!pgLane)('outbox and send tick (real Postgres)', () => {
       expect(await sendBlock(db, (await queue(s, { purpose: 'holding' })).emailId, NOW)).toBeNull();
     });
 
-    it('6. a suppressed address, whatever its case, in this tenant only', async () => {
+    it('8. a suppressed address, whatever its case, in this tenant only', async () => {
       const s = await seedSeller();
       const other = await seedSeller();
       await suppressAddress(db, { orgId: s.orgId, address: 'Delivered@Resend.dev', reason: 'opted_out', conversationId: s.conv.id });
@@ -856,12 +931,12 @@ describe.skipIf(!pgLane)('outbox and send tick (real Postgres)', () => {
       expect(await sendBlock(db, (await queue(other)).emailId, NOW)).toBeNull();
     });
 
-    it('7. Salesforce Email Opt Out on the record', async () => {
+    it('9. Salesforce Email Opt Out on the record', async () => {
       const s = await seedSeller({ sfEmailOptOut: true });
       expect(await sendBlock(db, (await queue(s)).emailId, NOW)).toBe('sf_opt_out');
     });
 
-    it('8. the daily cap, 9. then the hours', async () => {
+    it('10. the daily cap, 11. then the hours', async () => {
       const s = await seedSeller();
       await seedSent(s, HOUR);
       await seedSent(s, 2 * HOUR);
@@ -874,9 +949,16 @@ describe.skipIf(!pgLane)('outbox and send tick (real Postgres)', () => {
     });
 
     it('checks in the brief\'s order when several apply', async () => {
-      const everything = await seedSeller({ sfEmailOptOut: true });
+      const everything = await seedSeller({ sfEmailOptOut: true, approved: false });
+      await db.update(schema.crmRecords).set({ isClosed: true }).where(eq(schema.crmRecords.id, everything.crmRecordId));
       await setConversation(everything.conv.id, { status: 'stopped', stopReason: 'opted_out', handler: 'person', flagReason: 'unsure', flaggedAt: NOW });
       await suppressAddress(db, { orgId: everything.orgId, address: ADDRESS, reason: 'opted_out', conversationId: null });
+      const first = await queue(everything, { purpose: 'first' });
+      expect(await sendBlock(db, first.emailId, EVENING)).toBe('not_approved');
+      await db.update(schema.callPlans).set({ status: 'approved' }).where(eq(schema.callPlans.id, everything.planId));
+      expect(await sendBlock(db, first.emailId, EVENING)).toBe('closed');
+      await db.update(schema.crmRecords).set({ isClosed: false }).where(eq(schema.crmRecords.id, everything.crmRecordId));
+      expect(await sendBlock(db, first.emailId, EVENING)).toBe('stopped');
       const { emailId } = await queue(everything);
       expect(await sendBlock(db, emailId, EVENING)).toBe('stopped');
       await setConversation(everything.conv.id, { status: 'open' });

@@ -138,12 +138,12 @@ Sam emails approved sellers from `sam@rethinkre.team` through Resend and reads t
 - `EMAIL_REPLY_DOMAIN`: where replies land, `sam+<token>@` this host (default `reply.rethinkre.team`).
 - `EMAIL_POSTAL_ADDRESS`: the postal address in every email footer (default `18872 MacArthur Blvd #220, Irvine, CA 92612`).
 - `EMAIL_COMPANY_NAME`: the company named in the footer and on the unsubscribe page (default `GG Homes`).
-- `EMAIL_MODEL`: the Claude model that drafts Sam's emails (default `claude-sonnet-5-5`). It must have a price in `services/outreach-api/src/ai/model.ts`; with an unpriced model (or no `ANTHROPIC_API_KEY`) Sam drafts nothing and every reply goes to a person.
+- `EMAIL_MODEL`: the Claude model that drafts Sam's emails (default `claude-sonnet-5-5`). It must have a price in `services/outreach-api/src/ai/model.ts`; with an unpriced model (or no `ANTHROPIC_API_KEY`) Sam drafts nothing, every reply goes to a person, and Settings shows email as not set up (it cannot be turned on).
 
 **DNS.** `rethinkre.team` mail is Google Workspace: **never add, change or remove the root domain's MX records.**
-1. Resend → **Domains**: add `rethinkre.team` for sending and add exactly the records Resend lists (DKIM and the bounce/SPF records sit on subdomains such as `resend._domainkey` and `send`). Wait for it to verify.
-2. Resend → **Domains**: turn on **receiving** for `reply.rethinkre.team`. Resend shows one MX record for `reply.rethinkre.team`; add that record (on the `reply` host only) at the DNS provider.
-3. On the domain's settings, turn **open tracking and click tracking off** (click tracking would rewrite the unsubscribe link; open tracking adds a pixel).
+1. Resend → **Domains**: add `rethinkre.team` for sending and add exactly the records Resend lists (DKIM and the bounce/SPF records sit on subdomains such as `resend._domainkey` and `send`). Wait for it to verify. **Leave receiving off on this `rethinkre.team` entry**: turning it on there makes Resend ask for an MX record on the root domain.
+2. Resend → **Domains**: add `reply.rethinkre.team` as its **own** domain and turn **receiving** on there. Resend shows an MX record for `reply.rethinkre.team`; add that record (on the `reply` host only) at the DNS provider, plus any other records Resend lists for that domain.
+3. On each domain's settings, turn **open tracking and click tracking off** (click tracking would rewrite the unsubscribe link; open tracking adds a pixel).
 
 **Webhook.** Resend → **Webhooks → Add endpoint**:
 - URL: `<outreach-api public URL>/api/webhooks/resend` (e.g. `https://<name>.up.railway.app/api/webhooks/resend`).
