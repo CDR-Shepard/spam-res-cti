@@ -4,7 +4,7 @@
  */
 import type { Db } from '@cti/db';
 import { SalesforceApiError, type SalesforceClient } from '@cti/salesforce';
-import { readUsers, type OwnerUser } from '../appointments/calendar.js';
+import { DEFAULT_OWNER_TIME_ZONE, readUsers, type OwnerUser } from '../appointments/calendar.js';
 import type { SalesforceClientFactory } from '../crm/client-factory.js';
 import type { RunnerLogger } from '../jobs/boss.js';
 import type { DescribeCache } from '../research/describe.js';
@@ -107,9 +107,9 @@ export function ownerOf(run: RowRun): Promise<OwnerUser | null> {
   return run.owner;
 }
 
-/** The org's PT calendar date (a Task's ActivityDate). */
-export function ptToday(now: Date): string {
-  return new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Los_Angeles', year: 'numeric', month: '2-digit', day: '2-digit' }).format(now);
+/** The calendar date of `now` (a Task's ActivityDate) in `timeZone`: the org's Pacific by default. The zone must be a valid IANA name. */
+export function ptToday(now: Date, timeZone: string = DEFAULT_OWNER_TIME_ZONE): string {
+  return new Intl.DateTimeFormat('en-CA', { timeZone, year: 'numeric', month: '2-digit', day: '2-digit' }).format(now);
 }
 
 /** The first statusCode among a step's saved refusals, for last_error. */

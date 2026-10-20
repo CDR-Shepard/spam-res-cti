@@ -45,7 +45,7 @@ export class WriteRefusedError extends Error {
   }
 }
 
-const ORIGIN_FIELD = 'CTI_Origin__c';
+export const ORIGIN_FIELD = 'CTI_Origin__c';
 const SUBJECT_MAX = 255;
 const MIN_MS = 60_000;
 const SUBJECTS: Readonly<Record<BookedAppointment['kind'], string>> = { phone: 'Phone Consultation', walkthrough: 'Property Consultation' };
@@ -143,16 +143,20 @@ async function createOne(client: SalesforceClient, sobject: string, fields: Reco
   return second ?? unknown;
 }
 
-/** The first row's Id; when the org lacks CTI_Origin__c, the same lookup without it. */
-async function findOne(client: SalesforceClient, soql: (withOrigin: boolean) => string): Promise<string | null> {
+/** The Id of every row the lookup returns; when the org lacks CTI_Origin__c, the same lookup without it. */
+async function findIds(client: SalesforceClient, soql: (withOrigin: boolean) => string): Promise<string[]> {
+  const ids = (rows: Array<{ Id?: unknown }>): string[] => rows.flatMap((r) => (typeof r.Id === 'string' ? [r.Id] : []));
   try {
-    const rows = await client.query<{ Id?: unknown }>(soql(true));
-    return typeof rows[0]?.Id === 'string' ? rows[0].Id : null;
+    return ids(await client.query<{ Id?: unknown }>(soql(true)));
   } catch (err) {
     if (!(err instanceof Error && /INVALID_FIELD/.test(err.message) && err.message.includes(ORIGIN_FIELD))) throw err;
-    const rows = await client.query<{ Id?: unknown }>(soql(false));
-    return typeof rows[0]?.Id === 'string' ? rows[0].Id : null;
+    return ids(await client.query<{ Id?: unknown }>(soql(false)));
   }
+}
+
+/** The first row's Id (the lookup says LIMIT 1), or null. */
+async function findOne(client: SalesforceClient, soql: (withOrigin: boolean) => string): Promise<string | null> {
+  return (await findIds(client, soql))[0] ?? null;
 }
 
 const originClause = (withOrigin: boolean): string => (withOrigin ? ` AND ${ORIGIN_FIELD} = '${soqlEscape(AI_OUTREACH_ORIGIN)}'` : '');
@@ -189,25 +193,43 @@ export async function bookOpportunity(
 /** Clock skew allowed between the call's end (our clock) and a Task's CreatedDate (Salesforce's). */
 const TASK_SKEW_MS = 60_000;
 
+/** How many look-alike Tasks a claim test is asked about (createTaskOnce with `isClaimed`). */
+const TASK_CANDIDATES = 10;
+
 /**
  * A Task once: the one we made since the call ended (same record, owner, Subject and origin), else a new one. `since` is
  * the call's end, so the lookup covers the row's whole life, an admin retry days later included (final review); null
  * (no end time known) looks without a date bound.
+ *
+ * `isClaimed`: for a caller whose look-alike Tasks are real, separate things (two emails of one seller with the same
+ * subject): up to 10 matches are read, oldest first, and the first one `isClaimed` does not call someone else's is adopted
+ * (else a new Task is made). Without it the first match is the Task, as above.
  */
-export async function createTaskOnce(client: SalesforceClient, fields: Record<string, unknown>, since: Date | null): Promise<string> {
+export async function createTaskOnce(
+  client: SalesforceClient,
+  fields: Record<string, unknown>,
+  since: Date | null,
+  isClaimed?: (taskId: string) => Promise<boolean>,
+): Promise<string> {
   const ids = (['WhatId', 'WhoId'] as const).flatMap((k) => (typeof fields[k] === 'string' ? [[k, checkId(fields[k] as string, k)] as const] : []));
   const owner = checkId(String(fields.OwnerId), 'OwnerId');
   const on = ids.map(([k, id]) => `${k} = '${soqlEscape(id)}'`);
   const record = on.length > 1 ? `(${on.join(' OR ')})` : (on[0] ?? 'WhatId = null');
-  const existing = await findOne(
-    client,
-    (o) =>
-      `SELECT Id FROM Task WHERE ${record} AND OwnerId = '${soqlEscape(owner)}' AND Subject = '${soqlEscape(String(fields.Subject))}'${originClause(o)}${sinceClause(since)} LIMIT 1`,
-  );
+  const lookup = (o: boolean): string =>
+    `SELECT Id FROM Task WHERE ${record} AND OwnerId = '${soqlEscape(owner)}' AND Subject = '${soqlEscape(String(fields.Subject))}'${originClause(o)}${sinceClause(since)}`;
+  const existing =
+    isClaimed === undefined
+      ? await findOne(client, (o) => `${lookup(o)} LIMIT 1`)
+      : await firstUnclaimed(await findIds(client, (o) => `${lookup(o)} ORDER BY CreatedDate LIMIT ${TASK_CANDIDATES}`), isClaimed);
   if (existing !== null) return existing;
   const created = await createOne(client, 'Task', fields);
   if (created.success && created.id) return created.id;
   throw new WriteRefusedError(firstCode(created), `Salesforce refused the Task: ${firstCode(created)}`);
+}
+
+async function firstUnclaimed(candidates: readonly string[], isClaimed: (taskId: string) => Promise<boolean>): Promise<string | null> {
+  for (const id of candidates) if (!(await isClaimed(id))) return id;
+  return null;
 }
 
 const sinceClause = (since: Date | null): string =>

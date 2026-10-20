@@ -261,4 +261,41 @@ describe('createTaskOnce', () => {
   it('a subject over 255 characters is cut', () => {
     expect(String(taskFields({ whatId: OPP, whoId: null, ownerId: OWNER, subject: 'x'.repeat(400), description: '', today: '2026-10-06' }).Subject).length).toBe(255);
   });
+
+  describe('with a claim test (Tasks that belong to something else are skipped)', () => {
+    const rows = [{ Id: '00T8X00000Task1QAA' }, { Id: '00T8X00000Task2QAA' }, { Id: '00T8X00000Task3QAA' }];
+
+    it('asks for up to 10 candidates, oldest first, and adopts the first one nobody claimed', async () => {
+      const f = org([[TASK_LOOKUP, rows]]);
+      const asked: string[] = [];
+      const claimed = async (id: string) => {
+        asked.push(id);
+        return id === '00T8X00000Task1QAA';
+      };
+      expect(await createTaskOnce(f.client, fields, CALL_ENDED, claimed)).toBe('00T8X00000Task2QAA');
+      expect(f.creates).toEqual([]);
+      expect(asked).toEqual(['00T8X00000Task1QAA', '00T8X00000Task2QAA']);
+      expect(f.soql[0]).toMatch(/AND CreatedDate >= 2026-09-30T17:44:12Z ORDER BY CreatedDate LIMIT 10$/);
+    });
+
+    it('creates a new Task when every candidate is claimed', async () => {
+      const f = org([[TASK_LOOKUP, rows]]);
+      f.onCreate = () => ok('00T8X00000Task9QAA');
+      expect(await createTaskOnce(f.client, fields, CALL_ENDED, async () => true)).toBe('00T8X00000Task9QAA');
+      expect(f.creates).toHaveLength(1);
+    });
+
+    it('reads the candidates again without the origin when the org lacks CTI_Origin__c', async () => {
+      const f = org([[TASK_LOOKUP, (q) => (q.includes('CTI_Origin__c') ? new Error('INVALID_FIELD: No such column CTI_Origin__c') : rows)]]);
+      expect(await createTaskOnce(f.client, fields, CALL_ENDED, async (id) => id !== '00T8X00000Task3QAA')).toBe('00T8X00000Task3QAA');
+      expect(f.soql[1]).not.toContain('CTI_Origin__c');
+    });
+
+    it('without a claim test the lookup is exactly what it was: one row, no ordering', async () => {
+      const f = org([[TASK_LOOKUP, rows]]);
+      expect(await createTaskOnce(f.client, fields, CALL_ENDED)).toBe('00T8X00000Task1QAA');
+      expect(f.soql[0]).toMatch(/ LIMIT 1$/);
+      expect(f.soql[0]).not.toContain('ORDER BY');
+    });
+  });
 });
