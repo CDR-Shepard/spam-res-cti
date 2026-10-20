@@ -8,14 +8,17 @@
  * The fallback (a booked Lead Salesforce would not convert, or conversion is off) is a plain hold on the owner's calendar,
  * which no consultation flow fires on, plus an urgent "convert it and book it" Task to the owner.
  */
-import type { BookedAppointment } from '@cti/contracts';
+import { ROUTING_ZONE, type BookedAppointment } from '@cti/contracts';
 import { SalesforceApiError, soqlEscape, type CompositeResult, type SalesforceClient } from '@cti/salesforce';
 import type { MapsClient } from '../appointments/maps.js';
 import { SF_ID } from '../campaigns/records.js';
 import { cutUtf16 } from '../research/text.js';
 import { recheckCalendar, type CalendarConflict, type RecheckLog } from './appointment-recheck.js';
+import { consultationWords, eventSubject } from './booking-words.js';
 import { AI_OUTREACH_ORIGIN } from './fields.js';
-import { consultationWords, ptWords } from './render.js';
+import { ptWords } from './render.js';
+
+export { eventSubject, PRIORITY_SUBJECT } from './booking-words.js';
 
 export type AppointmentResult =
   | { kind: 'created' | 'existing'; eventId: string }
@@ -49,13 +52,10 @@ export class WriteRefusedError extends Error {
 export const ORIGIN_FIELD = 'CTI_Origin__c';
 const SUBJECT_MAX = 255;
 const LOCATION_MAX = 255;
-const PT_ZONE = 'America/Los_Angeles';
-export const PRIORITY_SUBJECT = 'High Priority Property Consultation';
-const SUBJECTS: Readonly<Record<BookedAppointment['kind'], string>> = { phone: 'Phone Consultation', walkthrough: 'Property Consultation' };
 /** The fallback hold's Subject words (an Event, not a consultation). */
 const HOLD_WORDS: Readonly<Record<BookedAppointment['kind'], string>> = { phone: 'phone call', walkthrough: 'walkthrough' };
-const PT_MONTH_DAY = new Intl.DateTimeFormat('en-US', { timeZone: PT_ZONE, month: 'short', day: 'numeric' });
-const PT_YEAR = new Intl.DateTimeFormat('en-US', { timeZone: PT_ZONE, year: 'numeric' });
+const PT_MONTH_DAY = new Intl.DateTimeFormat('en-US', { timeZone: ROUTING_ZONE, month: 'short', day: 'numeric' });
+const PT_YEAR = new Intl.DateTimeFormat('en-US', { timeZone: ROUTING_ZONE, year: 'numeric' });
 
 /** SOQL dateTime literal: UTC, whole seconds (Salesforce stores Event times to the second). */
 const soqlDateTime = (iso: string): string => new Date(iso).toISOString().replace(/\.\d{3}Z$/, 'Z');
@@ -71,9 +71,6 @@ function checkId(id: string, what: string): string {
 function sentence(s: string): string {
   return /[.!?]$/.test(s) ? s : `${s}.`;
 }
-
-/** The Event's Subject, as reps name consultations (so the org's consultation flows run). */
-export const eventSubject = (b: BookedAppointment): string => (b.priority === true ? PRIORITY_SUBJECT : SUBJECTS[b.kind]);
 
 /** The Event's Location: a walkthrough's address on one line, or null (a phone call, or no address). */
 function eventLocation(booked: BookedAppointment, location: string | null): string | null {

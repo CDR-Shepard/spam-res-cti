@@ -3,8 +3,8 @@
  * deterministic. Every value is shown as given, on one line, with control characters stripped; the changes text stays
  * within the field's length and the post within the org's Lead FeedItem limit (980 characters, both objects).
  */
-import type { BookedAppointment } from '@cti/contracts';
 import { cutUtf16, wellFormed } from '../research/text.js';
+import { consultationWords } from './booking-words.js';
 import { DNC_FIELDS, TABLE_FIELDS, type Change, type Skipped, type WritePlan } from './plan.js';
 
 export const CHATTER_MAX = 980;
@@ -121,12 +121,6 @@ function dncRefusals(i: RenderInput): Array<{ label: string; reason: string }> {
     ...i.plan.skipped.filter((s) => isDnc(s.field)).map((s) => ({ label: oneLine(s.label), reason: SKIP_WORDS[s.why] })),
     ...i.applied.notWritten.filter((n) => isDnc(n.field)).map((n) => ({ label: oneLine(n.label), reason: oneLine(n.reason) })),
   ];
-}
-
-/** A booking as the Task and Chatter words name it (Task 8): phone, property, or high-priority property consultation. */
-export function consultationWords(b: Pick<BookedAppointment, 'kind' | 'priority'>): string {
-  if (b.priority === true) return 'high-priority property consultation';
-  return b.kind === 'phone' ? 'phone consultation' : 'property consultation';
 }
 
 const codePart = (code: string | undefined): string => (code === undefined || oneLine(code) === '' ? '' : ` (${capped(oneLine(code), 80)})`);

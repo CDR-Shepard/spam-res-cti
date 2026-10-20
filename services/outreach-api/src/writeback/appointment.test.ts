@@ -2,7 +2,8 @@
 import { describe, expect, it } from 'vitest';
 import type { BookedAppointment } from '@cti/contracts';
 import { SalesforceApiError } from '@cti/salesforce';
-import { MapsUnavailableError, type MapsClient } from '../appointments/maps.js';
+import { straightLineMinutes } from '../appointments/drive.js';
+import { MapsUnavailableError, type GeoPoint, type MapsClient } from '../appointments/maps.js';
 import { fakeSfWrites, ok, refused, type WriteQueryRoute } from '../test/fake-sf-writes.js';
 import {
   bookingPassed, bookOpportunity, createTaskOnce, holdForLead, leadHoldFields, opportunityEventFields, PRIORITY_SUBJECT, previousConsultationLine, taskFields,
@@ -227,18 +228,22 @@ const ROUTED: BookedAppointment = { ...WALK, start: '2026-10-21T16:00:00.000Z', 
 /** An earlier Event 08:00–08:45 PT at an address: inside the old 30-minute walkthrough buffer, clear of the slot itself. */
 const EARLIER = { StartDateTime: '2026-10-21T15:00:00.000+0000', EndDateTime: '2026-10-21T15:45:00.000+0000', IsAllDayEvent: false, Location: EARLIER_PLACE, Subject: 'Property Consultation' };
 
-/** Google answering every route with `minutes`; or failing (routes and geocodes) with `fail`. */
-function fakeMaps(o: { minutes?: number; fail?: Error } = {}) {
+/**
+ * Google answering every route with `minutes`; or failing (routes and geocodes) with `fail`; or with only Routes failing
+ * (`routesFail`) while Geocoding places addresses at `points`.
+ */
+function fakeMaps(o: { minutes?: number; fail?: Error; routesFail?: Error; points?: Readonly<Record<string, GeoPoint>> } = {}) {
   const calls: string[] = [];
   const maps: MapsClient = {
-    async geocode() {
+    async geocode(address) {
       calls.push('geocode');
       if (o.fail) throw o.fail;
-      return null;
+      const point = o.points?.[address];
+      return point ? { point, county: 'Orange', state: 'CA' } : null;
     },
     async routeMinutes(origins, destinations) {
       calls.push('route');
-      if (o.fail) throw o.fail;
+      if (o.fail ?? o.routesFail) throw o.fail ?? o.routesFail;
       return { minutes: origins.map(() => destinations.map(() => o.minutes ?? 15)), requestedElements: origins.length * destinations.length };
     },
   };
@@ -319,6 +324,29 @@ describe('bookOpportunity: a routed booking (overlap with no buffer, then the dr
     expect(said).not.toContain('Fake Elm');
     expect(said).not.toContain('MacArthur');
     expect(r.warns.some(([o]) => o.oppId === OPP && (o.code === 'timeout' || o.errName === 'TypeError'))).toBe(true);
+  });
+
+  describe('ruling: Routes down, Geocoding up: the straight-line estimate the offer used decides', () => {
+    // Made-up points: the earlier visit, a house about 3 miles away, and one about 40 miles away.
+    const EARLIER_AT: GeoPoint = { lat: 33.7458, lng: -117.8262 };
+    const NEAR: GeoPoint = { lat: 33.7, lng: -117.8 };
+    const FAR: GeoPoint = { lat: 34.2, lng: -118.2 };
+    const down = (property: GeoPoint) => fakeMaps({ routesFail: new MapsUnavailableError('http_503'), points: { [EARLIER_PLACE]: EARLIER_AT, [ADDRESS]: property } });
+
+    it('the estimate is over the slack (08:45 + more than 30 minutes): conflict for the drive', async () => {
+      expect(straightLineMinutes(EARLIER_AT, FAR)).toBeGreaterThan(30);
+      const g = down(FAR);
+      const f = org([[BUSY, [EARLIER]]]);
+      expect(await bookRouted(f, ROUTED, g.maps)).toEqual({ kind: 'conflict', reason: 'drive' });
+      expect(g.calls).toEqual(['route', 'geocode', 'geocode']);
+      expect(f.creates).toEqual([]);
+    });
+
+    it('the estimate fits: created', async () => {
+      expect(straightLineMinutes(EARLIER_AT, NEAR)).toBeLessThanOrEqual(30);
+      const f = org([[BUSY, [EARLIER]]]);
+      expect(await bookRouted(f, ROUTED, down(NEAR).maps)).toEqual({ kind: 'created', eventId: expect.stringMatching(/^00U/) });
+    });
   });
 
   it('a booking with no region keeps today\'s check, its walkthrough buffer included', async () => {

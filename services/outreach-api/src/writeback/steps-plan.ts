@@ -2,12 +2,14 @@
  * Plan 1D write-back steps 0.5 and 1: convert a Lead that booked (spec §5.7), then plan the write against the record the
  * steps write to (the new Opportunity after a conversion). The plan is built once and frozen on the row.
  */
+import type { BookedAppointment } from '@cti/contracts';
 import { soqlEscape } from '@cti/salesforce';
 import { addSpend, budgetMicros, spentTodayMicros } from '../ai/budget.js';
 import { costMicros, type TriageUsage } from '../ai/model.js';
 import { describeObject } from '../research/describe.js';
 import { bookingSettings } from '../settings.js';
 import { bookingPassed, createTaskOnce, taskFields, WriteRefusedError } from './appointment.js';
+import { consultationWords } from './booking-words.js';
 import { CARRY_FIELDS, carryPatch, convertStep, LEAD_MANAGER_FIELD, leadManagerFor, type ConvertOutcome } from './convert.js';
 import { readCurrent, writableFields, type WritableField } from './fields.js';
 import { MappingOutputError, type MappedAnswers } from './mapping-model.js';
@@ -47,12 +49,19 @@ async function carry(run: RowRun, oppId: string, lead: Row, adopted: boolean): P
   return { carried: Object.keys(result.sent ?? {}), notCarried };
 }
 
+/** The words of the "converted without an Opportunity" Task. */
+export function noOpportunityTaskWords(aiCallId: string, leadId: string, booked: BookedAppointment): { subject: string; description: string } {
+  const kind = consultationWords(booked);
+  return {
+    subject: `AI booked a ${kind} for ${ptWords(new Date(booked.start))}; this Lead was already converted without an Opportunity — create one and book it`,
+    description: `The AI assistant booked a ${kind} on a call (AI call ${aiCallId}) for Lead ${leadId}, which someone had already converted without an Opportunity. Create the Opportunity and book the time.`,
+  };
+}
+
 /** "Converted without an Opportunity": a Task to the appointment owner on the Account; the row then ends partial. */
 async function noOpportunityTask(run: RowRun, accountId: string | null): Promise<RowRun> {
   const booked = run.ctx.call.appointment!;
-  const kind = booked.kind === 'phone' ? 'phone call' : 'walkthrough';
-  const subject = `AI booked a ${kind} for ${ptWords(new Date(booked.start))}; this Lead was already converted without an Opportunity — create one and book it`;
-  const description = `The AI assistant booked a ${kind} on a call (AI call ${run.row.aiCallId}) for Lead ${run.row.sfRecordId}, which someone had already converted without an Opportunity. Create the Opportunity and book the time.`;
+  const { subject, description } = noOpportunityTaskWords(run.row.aiCallId, run.row.sfRecordId, booked);
   let taskId: string | null = null;
   try {
     taskId = await createTaskOnce(run.client, taskFields({ whatId: accountId, whoId: null, ownerId: booked.specialistSfUserId, subject, description, today: ptToday(run.deps.now) }), run.ctx.call.endedAt);

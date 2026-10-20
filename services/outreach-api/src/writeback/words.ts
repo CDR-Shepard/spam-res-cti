@@ -5,10 +5,11 @@
 import type { BookedAppointment } from '@cti/contracts';
 import { timezoneForNumber } from '@cti/firewall';
 import type { OwnerUser } from '../appointments/calendar.js';
-import { eventSubject, type AppointmentResult } from './appointment.js';
+import type { AppointmentResult } from './appointment.js';
+import { conflictReason, consultationWords, eventSubject } from './booking-words.js';
 import { OUTCOME_WORDS } from './context.js';
 import type { Change, WritePlan } from './plan.js';
-import { consultationWords, ptWords, type Applied, type RenderInput } from './render.js';
+import { ptWords, type Applied, type RenderInput } from './render.js';
 import type { RowRun } from './row-run.js';
 
 const PT_ZONE = 'America/Los_Angeles';
@@ -83,7 +84,7 @@ export function appointmentWords(i: {
       return `${kind} with ${owner?.firstName ?? name}${at}, ${when}${sellerPart(start, i.sellerZone)}`;
     }
     case 'conflict':
-      return `${kind} for ${when} not booked: the calendar was taken${taskPart(name, i.task)}`;
+      return `${kind} for ${when} not booked: ${conflictReason(result)}${taskPart(name, i.task)}`;
     case 'refused':
       return `${kind} for ${when} not booked: Salesforce refused the Event, ${result.code}${taskPart(name, i.task)}`;
     case 'expired':

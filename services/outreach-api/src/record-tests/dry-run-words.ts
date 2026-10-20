@@ -5,6 +5,7 @@
  */
 import type { BookedAppointment, RecordTestDryRun, WritebackChange } from '@cti/contracts';
 import { MAX_WRITEBACK_CHANGES, SKIPPED_WORDS } from '../ai-calls/results-query.js';
+import { consultationWords, eventSubject } from '../writeback/booking-words.js';
 import type { Change, WritePlan } from '../writeback/plan.js';
 import { ptWords } from '../writeback/render.js';
 
@@ -17,9 +18,6 @@ export const WRITEBACK_OFF_NOTE =
 
 /** The dry run's note: each that applies, in order, or null. */
 export const notesOf = (notes: ReadonlyArray<string | null>): string | null => notes.filter((n): n is string => n !== null).join(' ') || null;
-
-const EVENT_SUBJECTS: Readonly<Record<BookedAppointment['kind'], string>> = { phone: 'Phone Consultation', walkthrough: 'Property Consultation' };
-const KIND_WORDS: Readonly<Record<BookedAppointment['kind'], string>> = { phone: 'phone consultation', walkthrough: 'walkthrough' };
 
 export const emptyDryRun = (status: RecordTestDryRun['status'], note: string | null): RecordTestDryRun => ({
   status, changes: [], changesText: null, chatterText: null, wouldCreate: [], conversion: null, note,
@@ -54,7 +52,7 @@ export function createdRecords(sfObject: 'Lead' | 'Opportunity', b: Booking | nu
   if (sfObject === 'Lead' && b.convertsWithLeadManager === null) {
     return [`Hold on ${b.ownerName}'s calendar: ${when}`, `Task to ${b.ownerName}: convert the Lead and book it`];
   }
-  return [`Event: ${EVENT_SUBJECTS[b.booked.kind]}, ${when}, owner ${b.ownerName}`];
+  return [`Event: ${eventSubject(b.booked)}, ${when}, owner ${b.ownerName}`];
 }
 
 export function conversionWords(b: Booking | null): string | null {
@@ -65,5 +63,5 @@ export function conversionWords(b: Booking | null): string | null {
 /** The Chatter post's "Booked:" words, as a made Event reads ("phone consultation with Grant, Wed Oct 7, 11:00 AM PT"). */
 export function bookedWords(b: Booking | null): string | null {
   if (b === null) return null;
-  return `${KIND_WORDS[b.booked.kind]} with ${b.ownerFirstName ?? b.ownerName}, ${ptWords(new Date(b.booked.start))}`;
+  return `${consultationWords(b.booked)} with ${b.ownerFirstName ?? b.ownerName}, ${ptWords(new Date(b.booked.start))}`;
 }

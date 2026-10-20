@@ -61,15 +61,19 @@ async function bufferedCheck(client: SalesforceClient, i: RecheckInput, w: Windo
   return conflicts(w, busy, zone, bufferMs) ? { kind: 'conflict' } : null;
 }
 
-/** Both drives still fit. A fresh timer per booking: one whose Routes failed stays on straight lines for its life. */
-async function drivesFit(i: RecheckInput & { maps: MapsClient; location: string }, busy: readonly Busy[], start: Date): Promise<boolean> {
+/**
+ * The drive conflict: the rep can no longer make both drives; null when they can, or when the check itself fails (logged).
+ * A fresh timer per booking: one whose Routes failed stays on straight lines for its life.
+ */
+async function driveConflict(i: RecheckInput & { maps: MapsClient; location: string }, busy: readonly Busy[], start: Date): Promise<CalendarConflict | null> {
   const office: Place = { address: i.officeAddress };
   try {
-    return await repCanReach({ busy, start, slackMinutes: DRIVE_SLACK_MINUTES, property: { address: i.location }, office, drive: driveTimer(i.maps, office, i.log) });
+    const reaches = await repCanReach({ busy, start, slackMinutes: DRIVE_SLACK_MINUTES, property: { address: i.location }, office, drive: driveTimer(i.maps, office, i.log) });
+    return reaches ? null : { kind: 'conflict', reason: 'drive' };
   } catch (err) {
     const code = err instanceof MapsUnavailableError ? { code: err.code } : {};
     i.log.warn({ aiCallId: i.aiCallId, oppId: i.oppId, errName: errName(err), ...code }, 'ai_call.writeback: the drive re-check failed; the overlap check stands');
-    return true;
+    return null;
   }
 }
 
@@ -81,7 +85,7 @@ async function routedCheck(client: SalesforceClient, i: RecheckInput, w: Window)
   if (conflicts(w, busy, ROUTING_ZONE, 0)) return { kind: 'conflict' };
   const { maps, location } = i;
   if (maps === null || location === null) return null;
-  return (await drivesFit({ ...i, maps, location }, busy, w.start)) ? null : { kind: 'conflict', reason: 'drive' };
+  return driveConflict({ ...i, maps, location }, busy, w.start);
 }
 
 /** Null when the booking still stands; else why it does not. */

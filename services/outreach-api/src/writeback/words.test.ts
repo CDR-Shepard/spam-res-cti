@@ -53,7 +53,8 @@ describe('Task 8: the consultation kinds in the Chatter words, and the Event by 
   it('a walkthrough is a property consultation; a high-priority one is a high-priority property consultation', () => {
     expect(say(walk, { kind: 'created', eventId: '00U8X00000Evnt1QAA' })).toBe('property consultation with Grant, Wed Oct 7, 11:00 AM PT');
     expect(say(priority, { kind: 'created', eventId: '00U8X00000Evnt1QAA' })).toBe('high-priority property consultation with Grant, Wed Oct 7, 11:00 AM PT');
-    expect(say(walk, { kind: 'conflict', reason: 'drive' })).toBe('property consultation for Wed Oct 7, 11:00 AM PT not booked: the calendar was taken');
+    expect(say(walk, { kind: 'conflict', reason: 'drive' })).toBe("property consultation for Wed Oct 7, 11:00 AM PT not booked: the rep's calendar no longer leaves time to drive there");
+    expect(say(walk, { kind: 'conflict' })).toBe('property consultation for Wed Oct 7, 11:00 AM PT not booked: the calendar was taken');
   });
 
   it("the changes text's Created line names a high-priority Event by its Subject", () => {

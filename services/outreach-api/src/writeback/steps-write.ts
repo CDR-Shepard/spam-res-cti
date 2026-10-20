@@ -13,7 +13,8 @@ import { CHANGES_FIELD, writableFields, type WritableField } from './fields.js';
 import { keepUnedited, readFresh, type NotChanged } from './fresh.js';
 import { patchDroppingRefused, without, type FieldRefusal } from './patch.js';
 import type { Change, WritePlan } from './plan.js';
-import { changesFieldText, chatterMarker, chatterText, consultationWords, ptWords } from './render.js';
+import { conflictReason, consultationWords } from './booking-words.js';
+import { changesFieldText, chatterMarker, chatterText, ptWords } from './render.js';
 import { isDone, ownerOf, ptToday, RecordGoneError, saveStep, throwIfNotARefusal, type RowRun } from './row-run.js';
 import { writeTarget } from './store.js';
 import { appointmentWords, createdLines, refusedWords, renderInputFor, sellerTimeZone, stripUrls, taskMade, writtenChanges, type NotWritten } from './words.js';
@@ -86,8 +87,7 @@ export async function appointmentStep(run: RowRun, plan: WritePlan): Promise<{ r
 
 /** Why the booking was not made, as the Task says it. */
 function whyNotBooked(appt: Extract<AppointmentResult, { kind: 'conflict' | 'refused' }>): string {
-  if (appt.kind === 'refused') return `Salesforce refused the Event (${appt.code})`;
-  return appt.reason === 'drive' ? "the rep's calendar no longer leaves time to drive there" : 'the calendar was taken';
+  return appt.kind === 'refused' ? `Salesforce refused the Event (${appt.code})` : conflictReason(appt);
 }
 
 /** The Task's words: the slot was taken or refused (an Opportunity), or the booked time passed (either object, I-1). */
