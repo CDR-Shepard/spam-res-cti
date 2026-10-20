@@ -3,6 +3,8 @@ import { z } from 'zod';
 /** A Salesforce User id (key prefix 005), 15 or 18 characters: the same shape the booking settings contract accepts. */
 const SF_USER_ID = /^005[a-zA-Z0-9]{12}(?:[a-zA-Z0-9]{3})?$/;
 const SPECIALISTS_MESSAGE = 'AI_CALL_DEFAULT_SPECIALISTS must be comma-separated Salesforce User ids (15 or 18 characters starting 005)';
+/** A dotted DNS hostname (`reply.example.com`): no scheme, path, port, address or space. The reply mailboxes live under it, so a bare `localhost` cannot work. */
+const REPLY_DOMAIN = /^(?=.{1,253}$)(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$/;
 
 const schema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
@@ -41,6 +43,20 @@ const schema = z.object({
    */
   // Claude 4: the Lead mapping schema is "too complex" for a Claude 5 structured output, and Claude 5 refuses a forced tool.
   WRITEBACK_MODEL: z.string().min(1).default('claude-haiku-4-5-20251001'),
+  /** Resend (Sam's email channel): the send/read API key. Both Resend variables or neither; see parseConfig. */
+  RESEND_API_KEY: z.string().min(1).optional(),
+  /** Resend's Svix signing secret for the inbound webhook: `whsec_` + base64. The message never echoes the value. */
+  RESEND_WEBHOOK_SECRET: z.string().regex(/^whsec_[A-Za-z0-9+/=]+$/, 'RESEND_WEBHOOK_SECRET must be Resend\'s signing secret: whsec_ followed by base64').optional(),
+  /** The From header of every email Sam sends: a display name and an address on the verified Resend domain. */
+  EMAIL_FROM: z.string().min(1).default('Sam at GG Homes <sam@rethinkre.team>'),
+  /** Where replies land: `sam+<token>@<this>` (email/addresses.ts). Its MX points at Resend's inbound. */
+  EMAIL_REPLY_DOMAIN: z.string().regex(REPLY_DOMAIN, 'EMAIL_REPLY_DOMAIN must be a hostname such as reply.example.com (no scheme, path or address)').default('reply.rethinkre.team'),
+  /** The sender's physical postal address, printed in every email footer (CAN-SPAM). */
+  EMAIL_POSTAL_ADDRESS: z.string().min(1).default('18872 MacArthur Blvd #220, Irvine, CA 92612'),
+  /** The company named in the email footer. */
+  EMAIL_COMPANY_NAME: z.string().min(1).default('GG Homes'),
+  /** Claude model that drafts Sam's emails. Must be priced in ai/model.ts PRICE_MICROS_PER_TOKEN: the email worker refuses an unpriced one. */
+  EMAIL_MODEL: z.string().min(1).default('claude-sonnet-5-5'),
   /** cti-api on Railway's private network, e.g. http://ctiapi.railway.internal:4000 (plan 1C). */
   CTI_INTERNAL_URL: z
     .string()
@@ -82,6 +98,8 @@ export type AppConfig = z.infer<typeof schema> & {
   aiEnabled: boolean;
   /** The internal AI call trigger is configured: CTI_INTERNAL_URL and OUTREACH_INTERNAL_SECRET are both set. */
   aiCallsEnabled: boolean;
+  /** The email channel is configured: RESEND_API_KEY and RESEND_WEBHOOK_SECRET are both set. */
+  emailEnabled: boolean;
 };
 
 /** Pure: parses a raw env map. Empty strings count as unset (deploy UIs write them). */
@@ -100,6 +118,11 @@ export function parseConfig(env: Record<string, string | undefined>): AppConfig 
     const missing = ['WORKOS_API_KEY', 'WORKOS_CLIENT_ID', 'WORKOS_REDIRECT_URI'].filter((k) => !(c as Record<string, unknown>)[k]);
     throw new Error(`Invalid environment configuration:\n  - WorkOS: set all three or none; missing ${missing.join(', ')}`);
   }
+  const resendVars = { RESEND_API_KEY: c.RESEND_API_KEY, RESEND_WEBHOOK_SECRET: c.RESEND_WEBHOOK_SECRET };
+  const resendMissing = Object.entries(resendVars).filter(([, v]) => !v).map(([k]) => k);
+  if (resendMissing.length === 1) {
+    throw new Error(`Invalid environment configuration:\n  - Resend: set both RESEND_API_KEY and RESEND_WEBHOOK_SECRET or neither; missing ${resendMissing[0]}`);
+  }
   const redirects = [c.SALESFORCE_REDIRECT_URI, c.SALESFORCE_SIGNIN_REDIRECT_URI].filter(Boolean).length;
   if (redirects > 0 && !c.SALESFORCE_CLIENT_ID) {
     throw new Error('Invalid environment configuration:\n  - Salesforce: a redirect uri is set but SALESFORCE_CLIENT_ID is missing');
@@ -114,6 +137,7 @@ export function parseConfig(env: Record<string, string | undefined>): AppConfig 
     salesforceSignInEnabled: Boolean(c.SALESFORCE_CLIENT_ID && c.SALESFORCE_SIGNIN_REDIRECT_URI),
     aiEnabled: Boolean(c.ANTHROPIC_API_KEY),
     aiCallsEnabled: Boolean(c.CTI_INTERNAL_URL && c.OUTREACH_INTERNAL_SECRET),
+    emailEnabled: resendMissing.length === 0,
   };
 }
 

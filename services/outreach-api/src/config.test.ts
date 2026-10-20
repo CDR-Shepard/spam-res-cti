@@ -146,6 +146,74 @@ describe('parseConfig', () => {
       expect(() => parseConfig({ ...base, AI_CALL_DEFAULT_SPECIALISTS: ids })).toThrow(/AI_CALL_DEFAULT_SPECIALISTS/);
     });
   });
+  describe('the email channel (Resend)', () => {
+    const apiKey = 're_test_key';
+    const secret = 'whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw';
+    it('is off by default and carries the sending defaults', () => {
+      const cfg = parseConfig(base);
+      expect(cfg.emailEnabled).toBe(false);
+      expect(cfg.RESEND_API_KEY).toBeUndefined();
+      expect(cfg.RESEND_WEBHOOK_SECRET).toBeUndefined();
+      expect(cfg.EMAIL_FROM).toBe('Sam at GG Homes <sam@rethinkre.team>');
+      expect(cfg.EMAIL_REPLY_DOMAIN).toBe('reply.rethinkre.team');
+      expect(cfg.EMAIL_POSTAL_ADDRESS).toBe('18872 MacArthur Blvd #220, Irvine, CA 92612');
+      expect(cfg.EMAIL_COMPANY_NAME).toBe('GG Homes');
+      expect(cfg.EMAIL_MODEL).toBe('claude-sonnet-5-5');
+    });
+    it('is enabled only when the API key and the webhook secret are both set', () => {
+      const cfg = parseConfig({ ...base, RESEND_API_KEY: apiKey, RESEND_WEBHOOK_SECRET: secret });
+      expect(cfg.emailEnabled).toBe(true);
+      expect(cfg.RESEND_API_KEY).toBe(apiKey);
+      expect(cfg.RESEND_WEBHOOK_SECRET).toBe(secret);
+    });
+    it('set all or none: one variable alone fails startup naming the missing one, and never the value that is set', () => {
+      const keyOnly = () => parseConfig({ ...base, RESEND_API_KEY: apiKey });
+      expect(keyOnly).toThrow(/Invalid environment configuration/);
+      expect(keyOnly).toThrow(/RESEND_WEBHOOK_SECRET/);
+      expect(keyOnly).not.toThrow(new RegExp(apiKey));
+      const secretOnly = () => parseConfig({ ...base, RESEND_WEBHOOK_SECRET: secret });
+      expect(secretOnly).toThrow(/Invalid environment configuration/);
+      expect(secretOnly).toThrow(/RESEND_API_KEY/);
+      expect(secretOnly).not.toThrow(new RegExp(secret));
+    });
+    it('treats empty strings as unset', () => {
+      const cfg = parseConfig({ ...base, RESEND_API_KEY: '', RESEND_WEBHOOK_SECRET: '', EMAIL_FROM: '', EMAIL_MODEL: '' });
+      expect(cfg.emailEnabled).toBe(false);
+      expect(cfg.EMAIL_FROM).toBe('Sam at GG Homes <sam@rethinkre.team>');
+      expect(cfg.EMAIL_MODEL).toBe('claude-sonnet-5-5');
+    });
+    it.each([
+      ['whsec_', null],
+      ['MfKQ9r8GKYqrTwjUPD8I', 'MfKQ9r8GKYqrTwjUPD8I'],
+      ['whsec_has space', 'has space'],
+      ['whsec_bad!chars', 'bad!chars'],
+    ])('rejects the webhook secret %s without echoing it', (bad, leak) => {
+      const attempt = () => parseConfig({ ...base, RESEND_API_KEY: apiKey, RESEND_WEBHOOK_SECRET: bad });
+      expect(attempt).toThrow(/RESEND_WEBHOOK_SECRET/);
+      if (leak) expect(attempt).not.toThrow(new RegExp(leak.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+    });
+    it('takes overrides for the sender, the reply domain, the postal address, the company and the model', () => {
+      const cfg = parseConfig({
+        ...base,
+        EMAIL_FROM: 'Sam <sam@example.com>',
+        EMAIL_REPLY_DOMAIN: 'mail.example.com',
+        EMAIL_POSTAL_ADDRESS: '1 Main St, Springfield, CA 90000',
+        EMAIL_COMPANY_NAME: 'Example Homes',
+        EMAIL_MODEL: 'claude-haiku-4-5-20251001',
+      });
+      expect(cfg.EMAIL_FROM).toBe('Sam <sam@example.com>');
+      expect(cfg.EMAIL_REPLY_DOMAIN).toBe('mail.example.com');
+      expect(cfg.EMAIL_POSTAL_ADDRESS).toBe('1 Main St, Springfield, CA 90000');
+      expect(cfg.EMAIL_COMPANY_NAME).toBe('Example Homes');
+      expect(cfg.EMAIL_MODEL).toBe('claude-haiku-4-5-20251001');
+    });
+    it.each(['sam@reply.example.com', 'reply example.com', 'https://reply.example.com', 'reply.example.com/path', 'localhost', '-bad.example.com'])(
+      'rejects %s as the reply domain: it is a hostname, not an address or a URL',
+      (bad) => {
+        expect(() => parseConfig({ ...base, EMAIL_REPLY_DOMAIN: bad })).toThrow(/EMAIL_REPLY_DOMAIN/);
+      },
+    );
+  });
   it('rejects a bad encryption key with a clear message', () => {
     expect(() => parseConfig({ ...base, TOKEN_ENCRYPTION_KEY: 'short' })).toThrow(/TOKEN_ENCRYPTION_KEY/);
   });
