@@ -20,7 +20,10 @@ import {
   CallPlansResponse,
   CampaignsResponse,
   ReleaseCallsResponse,
+  ConversationView,
   CrmConnectionStatus,
+  EmailDraftResponse,
+  EmailSendResponse,
   InboundTestCallsResponse,
   ListViewsResponse,
   NeedsReviewResponse,
@@ -28,6 +31,7 @@ import {
   RecordTest,
   RecordTestDryRun,
   RecordTestsResponse,
+  SamEmailSettings,
   SelectionResponse,
   StartConnectionResponse,
   TESTING_INBOUND_CALLS_PATH,
@@ -42,7 +46,11 @@ import {
   type AgentPromptSaveRequest,
   type CallStage,
   type CampaignStatusChange,
+  type ConversationHandler,
   type EditCallPlanRequest,
+  type EmailDraftRequest,
+  type EmailSendRequest,
+  type HandlerChangeRequest,
   type CreateCampaignInput,
   type EnrollmentStatus,
   type FieldMap,
@@ -50,6 +58,7 @@ import {
   type PreviewRequest,
   type RecordTestCallRequest,
   type ReviewDecision,
+  type SamEmailSettingsSave,
   type SelectionChange,
   type SfObject,
   type TestCallRequest,
@@ -89,6 +98,8 @@ export const outreachKeys = {
   agentPrompts: ['settings', 'agent-prompts'] as const,
   testPhones: ['testing', 'phones'] as const,
   inboundTestCalls: ['testing', 'inbound-calls'] as const,
+  sellerConversation: (sfRecordId: string) => ['sellers', 'conversation', sfRecordId] as const,
+  samEmailSettings: ['settings', 'sam-email'] as const,
 };
 
 const seg = (value: string): string => encodeURIComponent(value);
@@ -338,4 +349,37 @@ export function removeTestPhone(id: string): Promise<void> {
 /** Admin only: the agent's numbers to dial, and the newest inbound test calls. */
 export function getInboundTestCalls(): Promise<InboundTestCallsResponse> {
   return api(TESTING_INBOUND_CALLS_PATH, InboundTestCallsResponse);
+}
+
+/** One seller's page (plan 2026-10-19): the timeline, who handles the seller, and why Sam may not email. The record's owner or an admin. */
+export function getSellerConversation(sfRecordId: string): Promise<ConversationView> {
+  return api(`/api/sellers/${seg(sfRecordId)}/conversation`, ConversationView);
+}
+
+/** A person takes the seller over (`person`) or gives them back to Sam (`sam`; also clears a flag). Answers the page's new view. */
+export function setSellerHandler(sfRecordId: string, handler: ConversationHandler): Promise<ConversationView> {
+  const body: HandlerChangeRequest = { handler };
+  return api(`/api/sellers/${seg(sfRecordId)}/handler`, ConversationView, { method: 'PUT', body: json(body) });
+}
+
+/** Admin only: ask Sam for a first email. `practice` addresses it to the admin's own sign-in address instead of the seller's. */
+export function draftSellerEmail(sfRecordId: string, practice: boolean): Promise<EmailDraftResponse> {
+  const body: EmailDraftRequest = { practice };
+  return api(`/api/sellers/${seg(sfRecordId)}/email/draft`, EmailDraftResponse, { method: 'POST', body: json(body) });
+}
+
+/** Admin only: queue the (edited) draft. It is sent later, in the seller's sending hours; a practice copy goes out right away. */
+export function sendSellerEmail(sfRecordId: string, req: EmailSendRequest): Promise<EmailSendResponse> {
+  return api(`/api/sellers/${seg(sfRecordId)}/email/send`, EmailSendResponse, { method: 'POST', body: json(req) });
+}
+
+/** Admin only: whether Sam may email sellers, whether the server can, and any spam-complaint pause. */
+export function getSamEmailSettings(): Promise<SamEmailSettings> {
+  return api('/api/settings/sam-email', SamEmailSettings);
+}
+
+/** Admin only: turn Sam's email on (clears a pause) or off. Turning it on while the server is not set up answers 409 EMAIL_NOT_CONFIGURED. */
+export function saveSamEmailSettings(enabled: boolean): Promise<SamEmailSettings> {
+  const body: SamEmailSettingsSave = { enabled };
+  return api('/api/settings/sam-email', SamEmailSettings, { method: 'PUT', body: json(body) });
 }

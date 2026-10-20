@@ -204,3 +204,24 @@ describe('ConnectionsPage AI call settings (plan 1D)', () => {
   });
 });
 
+
+describe('ConnectionsPage Sam email settings', () => {
+  it('shows an admin the Email from Sam card right after the AI calls card', async () => {
+    stubApi({
+      'GET /api/connections/salesforce': connection(),
+      'GET /api/settings/sam-email': { enabled: false, configured: true, pausedAt: null, pausedReason: null },
+    });
+    renderWithProviders(<ConnectionsPage />, { isAdmin: true });
+    expect(await screen.findByRole('switch', { name: 'Email from Sam' })).toBeInTheDocument();
+    const titles = [...document.querySelectorAll('[data-slot="card-title"]')].map((t) => t.textContent);
+    expect(titles.indexOf('Email from Sam')).toBe(titles.indexOf('AI calls') + 1);
+  });
+
+  it('never shows it to a member, nor asks for the setting', async () => {
+    const calls = stubApi({ 'GET /api/connections/salesforce': connection() });
+    renderWithProviders(<ConnectionsPage />);
+    expect(await screen.findByText('https://gghomes.my.salesforce.com')).toBeInTheDocument();
+    expect(screen.queryByRole('switch', { name: 'Email from Sam' })).not.toBeInTheDocument();
+    expect(calls.some((c) => c.url === '/api/settings/sam-email')).toBe(false);
+  });
+});

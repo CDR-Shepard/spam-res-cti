@@ -11,6 +11,7 @@ import { AiCallSettingsCard } from './ai-call-settings';
 import { AiTestCall } from './ai-test-call';
 import { ConfirmAction } from './confirm-action';
 import { FieldMapEditor } from './field-map-editor';
+import { SamEmailSettingsCard } from './sam-email-settings-card';
 
 /** Keyed by the `?error=` code outreach-api's Salesforce callback redirects with (A5's `routes/connections.ts`). */
 const CALLBACK_ERROR_WORDS: Readonly<Record<string, string>> = {
@@ -67,6 +68,7 @@ export function ConnectionsPage({ connected, error }: ConnectionsPageProps) {
       </Card>
       {isAdmin && <AiTestCall />}
       {isAdmin && <AiCallSettingsCard />}
+      {isAdmin && <SamEmailSettingsCard />}
       {data?.fieldMap && (data.connected || data.status === 'broken') && (
         <FieldMapEditor key={data.connectedAt ?? 'field-map'} value={data.fieldMap} canEdit={isAdmin} />
       )}

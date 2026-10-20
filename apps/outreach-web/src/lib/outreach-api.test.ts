@@ -5,6 +5,7 @@ import { CAMPAIGN_ID, LIST_VIEW_ID, campaign, connection, fieldMap, preview } fr
 import { respond, StubResponse, stubApi } from '../test/stub-api';
 import { IDENTITY, LEAD_ID, TEST_ID, recordTest } from '../test/record-test-fixtures';
 import { VERSION_A, promptState, promptsResponse } from '../test/agent-prompt-fixtures';
+import { SELLER_ID, rowId, samEmailSettings, sellerView } from '../test/seller-fixtures';
 import { PHONE_A, inboundCall, inboundResponse, phonesResponse, testPhone } from '../test/testing-fixtures';
 
 afterEach(() => vi.unstubAllGlobals());
@@ -51,6 +52,12 @@ const cases: Case[] = [
   { name: 'addTestPhone', call: () => outreach.addTestPhone('(619) 555-0123', 'Grant cell'), route: 'POST /api/testing/phones', response: respond(201, testPhone()), body: { phone: '(619) 555-0123', label: 'Grant cell' } },
   { name: 'removeTestPhone', call: () => outreach.removeTestPhone(PHONE_A), route: `DELETE /api/testing/phones/${PHONE_A}`, response: respond(204) },
   { name: 'getInboundTestCalls', call: () => outreach.getInboundTestCalls(), route: 'GET /api/testing/inbound-calls', response: inboundResponse({ calls: [inboundCall()] }) },
+  { name: 'getSellerConversation', call: () => outreach.getSellerConversation(SELLER_ID), route: `GET /api/sellers/${SELLER_ID}/conversation`, response: sellerView() },
+  { name: 'setSellerHandler', call: () => outreach.setSellerHandler(SELLER_ID, 'person'), route: `PUT /api/sellers/${SELLER_ID}/handler`, response: sellerView({ handler: 'person', handlerName: 'Dana' }), body: { handler: 'person' } },
+  { name: 'draftSellerEmail', call: () => outreach.draftSellerEmail(SELLER_ID, true), route: `POST /api/sellers/${SELLER_ID}/email/draft`, response: { subject: 'About your house', body: 'Hi Jane', to: 'admin@gg.co' }, body: { practice: true } },
+  { name: 'sendSellerEmail', call: () => outreach.sendSellerEmail(SELLER_ID, { subject: 'About your house', body: 'Hi Jane', practice: false }), route: `POST /api/sellers/${SELLER_ID}/email/send`, response: { emailId: rowId(5), sendAfter: '2026-10-20T16:00:00.000Z', to: 'jane@example.com' }, body: { subject: 'About your house', body: 'Hi Jane', practice: false } },
+  { name: 'getSamEmailSettings', call: () => outreach.getSamEmailSettings(), route: 'GET /api/settings/sam-email', response: samEmailSettings() },
+  { name: 'saveSamEmailSettings', call: () => outreach.saveSamEmailSettings(true), route: 'PUT /api/settings/sam-email', response: samEmailSettings({ enabled: true }), body: { enabled: true } },
   { name: 'startTestCall', call: () => outreach.startTestCall('+15125550111'), route: 'POST /api/ai-calls/test', response: { result: 'placed', aiCallId: AI_CALL_ID }, body: { to: '+15125550111' } },
 ];
 
@@ -85,6 +92,17 @@ describe('outreach-api', () => {
     const err = await outreach.saveAgentPrompt('instructions', '{{nope}}').catch((e: unknown) => e);
     expect(err).toBeInstanceOf(ApiRequestError);
     expect(err).toMatchObject({ status: 400, body: { error: 'invalid_prompt', problems: ['Unknown placeholder: nope'] } });
+  });
+
+  it('keys a seller\'s conversation by its Salesforce id, and the email switch under the settings prefix', () => {
+    expect(outreach.outreachKeys.sellerConversation(SELLER_ID)).toEqual(['sellers', 'conversation', SELLER_ID]);
+    expect(outreach.outreachKeys.samEmailSettings).toEqual(['settings', 'sam-email']);
+  });
+
+  it('keeps a seller id out of the path\'s structure', async () => {
+    const calls = stubApi({ 'GET /api/sellers/a%2Fb%3Fc/conversation': sellerView() });
+    await outreach.getSellerConversation('a/b?c');
+    expect(calls[0]?.url).toBe('/api/sellers/a%2Fb%3Fc/conversation');
   });
 
   it('keys the testing page under one prefix, so adding or removing a phone refreshes the list', () => {

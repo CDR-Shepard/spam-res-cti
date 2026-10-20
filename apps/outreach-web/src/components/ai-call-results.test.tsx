@@ -4,7 +4,7 @@ import userEvent from '@testing-library/user-event';
 import type { AiCallResult, AiCallResultsResponse, BookedAppointment, WritebackSummary } from '@cti/contracts';
 import { appointmentWords } from '@/lib/call-words';
 import { formatDateTime } from '@/lib/outreach-words';
-import { renderWithProviders } from '../test/render';
+import { renderWithRouter } from '../test/render';
 import { CAMPAIGN_ID } from '../test/outreach-fixtures';
 import { respond, stubApi } from '../test/stub-api';
 import { AiCallResults, RESULTS_POLL_MS, resultsPollInterval } from './ai-call-results';
@@ -59,7 +59,7 @@ describe('AiCallResults', () => {
         }),
       ]),
     });
-    renderWithProviders(<AiCallResults campaignId={CAMPAIGN_ID} />);
+    renderWithRouter(<AiCallResults campaignId={CAMPAIGN_ID} />);
     const link = await screen.findByRole('link', { name: 'Lead 1' });
     expect(link).toHaveAttribute('href', 'https://gghomes.my.salesforce.com/00Q000000000001AAA');
     expect(link).toHaveAttribute('target', '_blank');
@@ -77,13 +77,13 @@ describe('AiCallResults', () => {
 
   it('2: a refused call says why it was not called', async () => {
     stubApi({ [`GET ${RESULTS}`]: page([row(2, { touchStatus: 'failed', lastBlockReason: 'no_consent', enrollmentStatus: 'exited', exitReason: 'ai_call_no_consent' })]) });
-    renderWithProviders(<AiCallResults campaignId={CAMPAIGN_ID} />);
+    renderWithRouter(<AiCallResults campaignId={CAMPAIGN_ID} />);
     expect(within(await rowOf('Lead 2')).getByText('Not called: no AI consent in Salesforce')).toBeInTheDocument();
   });
 
   it('3: a waiting call shows its next try and the attempt it will be', async () => {
     stubApi({ [`GET ${RESULTS}`]: page([row(3, { touchStatus: 'planned', attempts: 1, lastBlockReason: 'calling_hours', dueAt: '2026-10-06T13:00:00.000Z' })]) });
-    renderWithProviders(<AiCallResults campaignId={CAMPAIGN_ID} />);
+    renderWithRouter(<AiCallResults campaignId={CAMPAIGN_ID} />);
     const r = within(await rowOf('Lead 3'));
     expect(r.getByText(`Waiting — next try ${formatDateTime('2026-10-06T13:00:00.000Z')}`)).toBeInTheDocument();
     expect(r.getByText(/attempt 2/)).toBeInTheDocument();
@@ -96,7 +96,7 @@ describe('AiCallResults', () => {
         row(5, { recordUrl: null, touchStatus: 'skipped', exitReason: 'deselected', enrollmentStatus: 'exited' }),
       ]),
     });
-    renderWithProviders(<AiCallResults campaignId={CAMPAIGN_ID} />);
+    renderWithRouter(<AiCallResults campaignId={CAMPAIGN_ID} />);
     const r = within(await rowOf('Lead 4'));
     expect(r.getByText('Voicemail')).toBeInTheDocument();
     expect(r.getByText('No answer after every attempt')).toBeInTheDocument();
@@ -116,7 +116,7 @@ describe('AiCallResults', () => {
         turnStats: null,
       },
     });
-    renderWithProviders(<AiCallResults campaignId={CAMPAIGN_ID} />);
+    renderWithRouter(<AiCallResults campaignId={CAMPAIGN_ID} />);
     const first = within(await rowOf('Lead 1'));
     expect(within(await rowOf('Lead 2')).queryByRole('button', { name: 'Transcript' })).not.toBeInTheDocument();
     expect(calls.some((c) => c.url.includes('/transcript'))).toBe(false);
@@ -129,12 +129,20 @@ describe('AiCallResults', () => {
     expect(screen.queryByText('Oh, hello.')).not.toBeInTheDocument();
   });
 
+  it('each row links to the seller\'s conversation page, by the record\'s Salesforce id', async () => {
+    stubApi({ [`GET ${RESULTS}`]: page([row(1), row(5, { recordUrl: null })]) });
+    renderWithRouter(<AiCallResults campaignId={CAMPAIGN_ID} />);
+    const links = await screen.findAllByRole('link', { name: 'Conversation' });
+    expect(links.map((l) => l.getAttribute('href'))).toEqual(['/sellers/00Q000000000001AAA', '/sellers/00Q000000000005AAA']);
+    expect(within(await rowOf('Lead 1')).getByRole('link', { name: 'Conversation' })).toHaveAttribute('href', '/sellers/00Q000000000001AAA');
+  });
+
   it('pages with Load more', async () => {
     const calls = stubApi({
       [`GET ${RESULTS}`]: page([row(1)], 'next1'),
       [`GET ${RESULTS}?cursor=next1`]: page([row(2)]),
     });
-    renderWithProviders(<AiCallResults campaignId={CAMPAIGN_ID} />);
+    renderWithRouter(<AiCallResults campaignId={CAMPAIGN_ID} />);
     await userEvent.click(await screen.findByRole('button', { name: 'Load more' }));
     expect(await screen.findByRole('link', { name: 'Lead 2' })).toBeInTheDocument();
     expect(calls.map((c) => c.url)).toContain(`${RESULTS}?cursor=next1`);
@@ -142,7 +150,7 @@ describe('AiCallResults', () => {
 
   it('says so when no call was queued yet', async () => {
     stubApi({ [`GET ${RESULTS}`]: page([]) });
-    renderWithProviders(<AiCallResults campaignId={CAMPAIGN_ID} />);
+    renderWithRouter(<AiCallResults campaignId={CAMPAIGN_ID} />);
     expect(await screen.findByText(/No AI calls yet/)).toBeInTheDocument();
   });
 });
@@ -161,7 +169,7 @@ describe('plan 1D: appointment and Salesforce columns', () => {
 
   it('a booked call shows the appointment in the viewer\'s zone and a Done badge that opens what was written', async () => {
     stubApi({ [`GET ${RESULTS}`]: page([booked()]) });
-    renderWithProviders(<AiCallResults campaignId={CAMPAIGN_ID} />);
+    renderWithRouter(<AiCallResults campaignId={CAMPAIGN_ID} />);
     const r = within(await rowOf('Lead 1'));
     expect(r.getByText(appointmentWords(BOOKED))).toBeInTheDocument();
     expect(screen.queryByText('Stage: New Opportunity → Appointment Set')).not.toBeInTheDocument();
@@ -177,7 +185,7 @@ describe('plan 1D: appointment and Salesforce columns', () => {
       [`GET ${RESULTS}`]: page([booked({ mayReadTranscript: true })]),
       [`GET /api/ai-calls/${CALL}/transcript`]: { aiCallId: CALL, lines: [], turnStats: null },
     });
-    renderWithProviders(<AiCallResults campaignId={CAMPAIGN_ID} />);
+    renderWithRouter(<AiCallResults campaignId={CAMPAIGN_ID} />);
     const button = within(await rowOf('Lead 1')).getByRole('button', { name: 'Transcript' });
     expect(button).toHaveAttribute('aria-expanded', 'false');
     await userEvent.click(button);
@@ -189,7 +197,7 @@ describe('plan 1D: appointment and Salesforce columns', () => {
       [`GET ${RESULTS}`]: page([booked({ writeback: { ...WB, status: 'failed', mayRetry: true, error: 'SERVER_UNAVAILABLE' } })]),
       [`POST /api/ai-calls/${CALL}/writeback/retry`]: respond(204),
     });
-    renderWithProviders(<AiCallResults campaignId={CAMPAIGN_ID} />, { isAdmin: true });
+    renderWithRouter(<AiCallResults campaignId={CAMPAIGN_ID} />, { isAdmin: true });
     await userEvent.click(within(await rowOf('Lead 1')).getByRole('button', { name: 'Salesforce write-back: Failed, show what was written' }));
     await userEvent.click(await screen.findByRole('button', { name: 'Retry' }));
     await vi.waitFor(() => expect(calls.filter((c) => c.url === RESULTS)).toHaveLength(2));
@@ -200,14 +208,14 @@ describe('plan 1D: appointment and Salesforce columns', () => {
     // P6 M-3: the link is the server's, never rebuilt from the Lead's URL.
     const url = 'https://gghomes.lightning.force.com/lightning/r/Opportunity/006000000000009AAA/view';
     stubApi({ [`GET ${RESULTS}`]: page([booked({ writeback: { ...WB, convertedOpportunityId: '006000000000009AAA', convertedOpportunityUrl: url } })]) });
-    renderWithProviders(<AiCallResults campaignId={CAMPAIGN_ID} />);
+    renderWithRouter(<AiCallResults campaignId={CAMPAIGN_ID} />);
     const link = await screen.findByRole('link', { name: 'Converted to Opportunity' });
     expect(link).toHaveAttribute('href', url);
   });
 
   it('no write-back and no booking leave both cells empty', async () => {
     stubApi({ [`GET ${RESULTS}`]: page([row(1, { aiCallId: CALL, callStatus: 'completed', outcome: 'not_interested' })]) });
-    renderWithProviders(<AiCallResults campaignId={CAMPAIGN_ID} />);
+    renderWithRouter(<AiCallResults campaignId={CAMPAIGN_ID} />);
     const r = within(await rowOf('Lead 1'));
     expect(r.queryByRole('button', { name: /Salesforce write-back/ })).not.toBeInTheDocument();
     expect(r.queryByText(/Phone call|Walkthrough/)).not.toBeInTheDocument();
@@ -218,7 +226,7 @@ describe('plan 1D: appointment and Salesforce columns', () => {
       [`GET ${RESULTS}`]: page([row(2), booked({ mayReadTranscript: true })], 'next1'),
       [`GET /api/ai-calls/${CALL}/transcript`]: { aiCallId: CALL, lines: [{ role: 'agent', text: 'Hello from the deep link.', at: null }], turnStats: null },
     });
-    renderWithProviders(<AiCallResults campaignId={CAMPAIGN_ID} focusCallId={CALL} />);
+    renderWithRouter(<AiCallResults campaignId={CAMPAIGN_ID} focusCallId={CALL} />);
     expect(await screen.findByText('Hello from the deep link.')).toBeInTheDocument();
     expect(screen.getByText('Stage: New Opportunity → Appointment Set')).toBeInTheDocument();
     expect(await rowOf('Lead 1')).toHaveAttribute('aria-current', 'true');
@@ -230,14 +238,14 @@ describe('plan 1D: appointment and Salesforce columns', () => {
       [`GET ${RESULTS}`]: page([row(2)], 'next1'),
       [`GET ${RESULTS}?cursor=next1`]: page([booked()]),
     });
-    renderWithProviders(<AiCallResults campaignId={CAMPAIGN_ID} focusCallId={CALL} />);
+    renderWithRouter(<AiCallResults campaignId={CAMPAIGN_ID} focusCallId={CALL} />);
     expect(await rowOf('Lead 1')).toHaveAttribute('aria-current', 'true');
     expect(calls.map((c) => c.url)).toContain(`${RESULTS}?cursor=next1`);
   });
 
   it('P6 M-4: a deep-linked call on none of the pages says so', async () => {
     stubApi({ [`GET ${RESULTS}`]: page([row(2)]) });
-    renderWithProviders(<AiCallResults campaignId={CAMPAIGN_ID} focusCallId={CALL} />);
+    renderWithRouter(<AiCallResults campaignId={CAMPAIGN_ID} focusCallId={CALL} />);
     expect(await screen.findByText("That call isn't in the latest results.")).toBeInTheDocument();
     expect(await rowOf('Lead 2')).not.toHaveAttribute('aria-current');
   });
@@ -246,7 +254,7 @@ describe('plan 1D: appointment and Salesforce columns', () => {
     const routes: Record<string, AiCallResultsResponse> = { [`GET ${RESULTS}`]: page([row(100)], 'p1') };
     for (let n = 1; n <= 12; n += 1) routes[`GET ${RESULTS}?cursor=p${n}`] = page([row(100 + n)], `p${n + 1}`);
     const calls = stubApi(routes);
-    renderWithProviders(<AiCallResults campaignId={CAMPAIGN_ID} focusCallId={CALL} />);
+    renderWithRouter(<AiCallResults campaignId={CAMPAIGN_ID} focusCallId={CALL} />);
     expect(await screen.findByText("That call isn't in the latest results.")).toBeInTheDocument();
     expect(calls.filter((c) => c.url.startsWith(RESULTS))).toHaveLength(10);
   });

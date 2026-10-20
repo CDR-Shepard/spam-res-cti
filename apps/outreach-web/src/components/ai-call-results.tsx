@@ -1,4 +1,5 @@
 import { useInfiniteQuery, useQueryClient } from '@tanstack/react-query';
+import { Link } from '@tanstack/react-router';
 import { Fragment, useEffect, useRef, useState } from 'react';
 import type { AiCallResult, AiCallResultsResponse } from '@cti/contracts';
 import { Button } from '@/components/ui/button';
@@ -111,7 +112,12 @@ function ResultsTable({ items, focusCallId, onRetried }: { items: AiCallResult[]
         {items.map((r) => (
           <Fragment key={r.touchId}>
             <TableRow ref={r === focused ? focusRef : undefined} aria-current={r === focused ? 'true' : undefined} className={r === focused ? 'bg-brand/15 hover:bg-brand/20' : undefined}>
-              <TableCell>{r.recordUrl ? <a href={r.recordUrl} target="_blank" rel="noreferrer" className="font-medium underline decoration-foreground/20 underline-offset-4 hover:decoration-foreground">{r.name ?? r.sfRecordId}</a> : (r.name ?? r.sfRecordId)}</TableCell>
+              <TableCell>
+                <div className="space-y-1">
+                  <div>{r.recordUrl ? <a href={r.recordUrl} target="_blank" rel="noreferrer" className="font-medium underline decoration-foreground/20 underline-offset-4 hover:decoration-foreground">{r.name ?? r.sfRecordId}</a> : (r.name ?? r.sfRecordId)}</div>
+                  <Link to="/sellers/$sfRecordId" params={{ sfRecordId: r.sfRecordId }} className="text-xs text-muted-foreground underline-offset-4 hover:text-foreground hover:underline">Conversation</Link>
+                </div>
+              </TableCell>
               <TableCell className="whitespace-normal"><StatusCell r={r} /></TableCell>
               <TableCell className="whitespace-normal"><OutcomeCell r={r} /></TableCell>
               <TableCell className="whitespace-normal">
