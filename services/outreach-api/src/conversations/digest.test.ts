@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { TimelineItem } from '@cti/contracts';
-import { historyDigest } from './digest.js';
+import { historyDigest, type HistoryItem } from './digest.js';
 
 type Call = Extract<TimelineItem, { type: 'call' }>;
 type Email = Extract<TimelineItem, { type: 'email' }>;
@@ -93,6 +93,32 @@ describe('historyDigest', () => {
       1000,
     );
     expect(digest).toBe('2026-10-03 Email from Sam — "Real": Hi.');
+  });
+
+  it('lists Sam\'s outbound email only once the seller got it: sent, delivered or complained (M3)', () => {
+    const statuses = ['queued', 'sending', 'sent', 'delivered', 'bounced', 'complained', 'failed', 'canceled'] as const;
+    const digest = historyDigest(
+      statuses.map((status, i) => email(`2026-10-0${i + 1}T12:00:00.000Z`, { subject: status, body: `body ${status}`, status })),
+      2000,
+    );
+    expect(digest.split('\n')).toEqual([
+      '2026-10-03 Email from Sam — "sent": body sent',
+      '2026-10-04 Email from Sam — "delivered": body delivered',
+      '2026-10-06 Email from Sam — "complained": body complained',
+    ]);
+  });
+
+  it('always lists the seller\'s own email (received), unless it is an auto-reply (M3)', () => {
+    const digest = historyDigest([email('2026-10-01T12:00:00.000Z', { direction: 'in', actor: 'seller', subject: 'Re: Your house', body: 'Call me.', status: 'received' })], 1000);
+    expect(digest).toBe('2026-10-01 Email from the seller — "Re: Your house": Call me.');
+  });
+
+  it('leaves out an email from an address other than the seller\'s (M8): it is not the seller speaking', () => {
+    const items: HistoryItem[] = [
+      { ...email('2026-10-01T12:00:00.000Z', { direction: 'in', actor: 'seller', subject: 'Re: Your house', body: 'I am the neighbour.', status: 'received' }), otherSender: true },
+      email('2026-10-02T12:00:00.000Z', { direction: 'in', actor: 'seller', subject: 'Re: Your house', body: 'This is Pat.', status: 'received' }),
+    ];
+    expect(historyDigest(items, 1000)).toBe('2026-10-02 Email from the seller — "Re: Your house": This is Pat.');
   });
 
   it('flattens a body with newlines to one line', () => {

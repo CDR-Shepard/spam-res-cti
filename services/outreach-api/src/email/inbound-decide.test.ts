@@ -7,6 +7,7 @@ const base: InboundState = {
   autoReply: false,
   optOutText: false,
   senderMatches: true,
+  addressBlocked: false,
   practice: false,
   status: 'open',
   recordClosed: false,
@@ -74,6 +75,24 @@ describe('decideInbound', () => {
 
   it('5 beats 6: another sender on a booked conversation is other_sender', () => {
     expect(decide({ senderMatches: false, status: 'booked' })).toEqual({ kind: 'flag', reason: 'other_sender' });
+  });
+
+  it('5b. a reply from a suppressed or Salesforce-opted-out address is flagged unsure: the writer is never asked (M4)', () => {
+    expect(decide({ addressBlocked: true })).toEqual({ kind: 'flag', reason: 'unsure' });
+  });
+
+  it('5b comes after the opt-out, stopped and other-sender rules', () => {
+    expect(decide({ addressBlocked: true, unsubscribeAddress: true })).toEqual({ kind: 'opt_out' });
+    expect(decide({ addressBlocked: true, autoReply: true })).toEqual({ kind: 'record_only' });
+    expect(decide({ addressBlocked: true, optOutText: true })).toEqual({ kind: 'opt_out' });
+    expect(decide({ addressBlocked: true, status: 'stopped' })).toEqual({ kind: 'record_only' });
+    expect(decide({ addressBlocked: true, senderMatches: false })).toEqual({ kind: 'flag', reason: 'other_sender' });
+  });
+
+  it('5b beats everything after it: booked, closed, a person handling, a flag, the loop guard, email off', () => {
+    for (const over of [{ status: 'booked' as const }, { recordClosed: true }, { handler: 'person' as const }, { flagged: true }, { samSentLast24h: 9 }, { emailOn: false }]) {
+      expect(decide({ addressBlocked: true, ...over }), JSON.stringify(over)).toEqual({ kind: 'flag', reason: 'unsure' });
+    }
   });
 
   it('6. a booked conversation is flagged after_close', () => {

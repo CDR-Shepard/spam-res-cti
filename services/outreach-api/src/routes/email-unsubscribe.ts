@@ -6,7 +6,9 @@
  *  - GET shows a button and changes NOTHING. Mail scanners and link previewers fetch every URL in a message;
  *    if a GET stopped the seller, a scanner would unsubscribe people who never asked.
  *  - POST stops the seller for good (`stopSeller` with `opted_out`: every Sam channel, every record with the
- *    same address, the address on the suppression list) and shows the confirmation. Repeating it is fine.
+ *    same address, the address on the suppression list) and shows the confirmation. Repeating it is fine. A stop
+ *    that lost a lock race (a deadlock, 40P01, or a serialization failure, 40001) rolled back whole, so it is run
+ *    once more before the seller sees the failed page: a seller's one click must not be lost to a busy row.
  *  - The body is ignored and any content type is accepted: one-click senders post `List-Unsubscribe=One-Click`
  *    as urlencoded, but some send multipart or nothing, and a refusal here is a seller who keeps getting mail.
  *    The parser is plugin-scoped (Fastify scopes a content-type parser to its plugin) and bounded at 8 KB.
@@ -23,7 +25,7 @@
 import type { FastifyInstance, FastifyReply } from 'fastify';
 import type { Db } from '@cti/db';
 import { dispatchAlert, type AlertEvent } from '../alerts.js';
-import { raiseSharedAddressAlert, sharedAddressCollector } from '../conversations/shared-address.js';
+import { raiseSharedAddressAlert, sharedAddressCollector, type SharedAddressNotice } from '../conversations/shared-address.js';
 import { findConversationByToken, stopSeller } from '../conversations/store.js';
 import { describeError } from '../email/errors.js';
 import { escapeHtml, possessive } from '../email/render.js';
@@ -33,6 +35,11 @@ export const UNSUBSCRIBE_BODY_LIMIT_BYTES = 8 * 1024;
 
 /** What `newConversationToken()` mints: 26 characters of lowercase base32. */
 const TOKEN_SHAPE = /^[a-z2-7]{26}$/;
+
+/** A deadlock or a serialization failure: the stop's transaction rolled back whole, so running it again is safe. */
+const LOCK_RACE_CODES: ReadonlySet<string> = new Set(['40P01', '40001']);
+const lostLockRace = (err: unknown): boolean =>
+  typeof err === 'object' && err !== null && LOCK_RACE_CODES.has(String((err as { code?: unknown }).code));
 
 export interface EmailUnsubscribeDeps {
   db: Db;
@@ -131,12 +138,23 @@ export async function registerEmailUnsubscribeRoutes(app: FastifyInstance, deps:
     return sendPage(reply, 200, confirmPage(deps.companyName));
   });
 
+  /** One stop, in its own transaction; the shared-address notices it heard, for after it committed (a fresh collector per try). */
+  async function stopOnce(conversationId: string): Promise<readonly SharedAddressNotice[]> {
+    const shared = sharedAddressCollector();
+    await stopSeller(deps.db, { conversationId, reason: 'opted_out', now: deps.now?.() ?? new Date(), onSharedAddress: shared.onSharedAddress });
+    return shared.notices();
+  }
+
   app.post<{ Params: { token: string } }>('/email/unsubscribe/:token', async (req, reply) => {
     const conversation = await conversationFor(req.params.token);
     if (!conversation) return sendPage(reply, 404, notValidPage());
-    const shared = sharedAddressCollector();
+    let notices: readonly SharedAddressNotice[];
     try {
-      await stopSeller(deps.db, { conversationId: conversation.id, reason: 'opted_out', now: deps.now?.() ?? new Date(), onSharedAddress: shared.onSharedAddress });
+      notices = await stopOnce(conversation.id).catch(async (err: unknown) => {
+        if (!lostLockRace(err)) throw err;
+        req.log.warn({ conversationId: conversation.id, requestId: req.id, ...describeError(err) }, 'unsubscribe retried');
+        return stopOnce(conversation.id);
+      });
     } catch (err) {
       req.log.error({ conversationId: conversation.id, requestId: req.id, ...describeError(err) }, 'unsubscribe failed');
       return sendPage(reply, 500, failedPage());
@@ -144,7 +162,7 @@ export async function registerEmailUnsubscribeRoutes(app: FastifyInstance, deps:
     req.log.info({ conversationId: conversation.id, requestId: req.id }, 'seller unsubscribed');
     // stopSeller ran its own transaction, so the stop has committed: a stop held back by a shared address may page now.
     const alert = deps.alert ?? ((event: AlertEvent) => dispatchAlert(req.log, event));
-    for (const notice of shared.notices()) await raiseSharedAddressAlert({ alert, log: req.log }, notice);
+    for (const notice of notices) await raiseSharedAddressAlert({ alert, log: req.log }, notice);
     return sendPage(reply, 200, donePage(deps.companyName));
   });
 }

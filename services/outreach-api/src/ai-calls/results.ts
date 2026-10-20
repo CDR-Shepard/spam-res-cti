@@ -9,7 +9,8 @@
  * meanwhile keeps its hold, and only the touch's outcome is recorded. What the call says about
  * the SELLER (an appointment books the seller's conversation, a not-interested or do-not-call
  * stops it) is recorded in that same transaction whatever the enrollment's state: the seller said
- * it, held or not.
+ * it, held or not. It is recorded first, right after the count: the conversation row is locked before the
+ * enrollment's, the order stopSeller takes them in, so a call result and a seller's opt-out cannot deadlock.
  */
 import { inArray, sql } from 'drizzle-orm';
 import { AiCallOutcome } from '@cti/contracts';
@@ -131,11 +132,12 @@ async function collectOne(
       update touches set outcome = ${f.outcome}, counted_at = ${iso(now)}, updated_at = ${iso(now)}
       where id = ${f.touch_id}::uuid and counted_at is null returning id`);
     if (rows<unknown>(counted).length === 0) return { done: null, shared: [] };
+    // The conversation before the enrollment row: stopSeller takes them in that order, so the two cannot deadlock.
+    const callOutcome = outcome.success ? outcome.data : null;
+    await setStatusFromCall(tx as unknown as Db, { orgId: f.org_id, crmRecordId: f.crm_record_id, outcome: callOutcome, now, onSharedAddress: shared.onSharedAddress });
     await tx.execute(sql`
       update campaign_enrollments set touches_done = touches_done + 1, updated_at = ${iso(now)} where id = ${f.enrollment_id}::uuid`);
     await tx.execute(enqueueWritebackSql({ touchId: f.touch_id, now, writebackOn: settings.aiCallWriteback }));
-    const callOutcome = outcome.success ? outcome.data : null;
-    await setStatusFromCall(tx as unknown as Db, { orgId: f.org_id, crmRecordId: f.crm_record_id, outcome: callOutcome, now, onSharedAddress: shared.onSharedAddress });
     const step = nextStepFor(callOutcome, f.answered, settings.aiCallMaxAttempts);
     return { done: await applyStep(tx as unknown as Db, f, step, now), shared: shared.notices() };
   });

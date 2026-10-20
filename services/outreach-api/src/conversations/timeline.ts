@@ -2,7 +2,9 @@
  * One seller's timeline: what the seller's page lists and what Sam's history digest is made from. It merges
  * two sources into one list, oldest first:
  *  - the conversation's own events (emails, hand-overs, status changes, flags), joined to email_messages for an
- *    email's status, whether it is an auto-reply and, for a canceled one, why it did not go;
+ *    email's status, whether it is an auto-reply and, for a canceled one, why it did not go. An email from an address
+ *    other than the seller's (meta.otherSender) also says so (`otherSender: true`, a HistoryItem): the history digest
+ *    leaves it out, and the seller page drops the key (forPage) and shows the email as it is;
  *  - every real AI call (not `is_test`) placed from one of the record's enrollments, reached through
  *    touches.ai_call_id. Calls are never copied into the conversation, so they cannot go stale or be written
  *    twice; a call shows from the moment its row exists, with outcome / summary / duration null until it has them.
@@ -16,6 +18,7 @@
 import { sql } from 'drizzle-orm';
 import { EmailBlock, EmailStatus, AiCallOutcome, type TimelineItem } from '@cti/contracts';
 import type { Db } from '@cti/db';
+import type { HistoryItem } from './digest.js';
 
 /** How many of the newest items a timeline read returns unless the caller asks for another number. */
 export const DEFAULT_TIMELINE_LIMIT = 200;
@@ -33,6 +36,7 @@ interface EventRow {
   body: string | null;
   detail: string | null;
   autoReply: boolean;
+  otherSender: boolean;
   emailStatus: string | null;
   lastError: string | null;
   byName: string | null;
@@ -52,6 +56,7 @@ async function eventRows(db: Db, i: { orgId: string; crmRecordId: string; conver
   const result = await db.execute(sql`
     select ce.id, ce.kind, ce.direction, ce.actor, ce.occurred_at as "at", ce.subject, ce.body, ce.detail,
            coalesce(ce.meta -> 'autoReply' = 'true'::jsonb, false) as "autoReply",
+           coalesce(ce.meta -> 'otherSender' = 'true'::jsonb, false) as "otherSender",
            em.status as "emailStatus", em.last_error as "lastError",
            coalesce(nullif(btrim(u.display_name), ''), nullif(split_part(u.email, '@', 1), '')) as "byName"
     from conversation_events ce
@@ -114,7 +119,7 @@ function notSentReason(status: string, lastError: string | null): EmailBlock | n
   return reason.success ? reason.data : null;
 }
 
-function eventItem(row: EventRow): TimelineItem {
+function eventItem(row: EventRow): HistoryItem {
   if (row.kind !== 'email') {
     return { type: 'note', id: row.id, at: isoOf(row.at), kind: row.kind, detail: row.detail ?? '', byName: row.byName };
   }
@@ -132,7 +137,17 @@ function eventItem(row: EventRow): TimelineItem {
     status,
     autoReply: row.autoReply,
     notSentReason: notSentReason(status, row.lastError),
+    ...(row.otherSender ? { otherSender: true as const } : {}),
   };
+}
+
+/** Items as the seller page's contract has them: the server-only `otherSender` key dropped (the page shows the email as it is). */
+export function forPage(items: readonly HistoryItem[]): TimelineItem[] {
+  return items.map((item) => {
+    if (item.type !== 'email' || item.otherSender === undefined) return item;
+    const { otherSender: _otherSender, ...email } = item;
+    return email;
+  });
 }
 
 /**
@@ -143,7 +158,7 @@ function eventItem(row: EventRow): TimelineItem {
 export async function readTimeline(
   db: Db,
   i: { orgId: string; crmRecordId: string; conversationId: string | null; limit?: number },
-): Promise<TimelineItem[]> {
+): Promise<HistoryItem[]> {
   const limit = Math.max(1, Math.trunc(i.limit ?? DEFAULT_TIMELINE_LIMIT));
   const events = i.conversationId === null ? [] : await eventRows(db, { orgId: i.orgId, crmRecordId: i.crmRecordId, conversationId: i.conversationId, limit });
   const calls = await callRows(db, { orgId: i.orgId, crmRecordId: i.crmRecordId, conversationId: i.conversationId, limit });

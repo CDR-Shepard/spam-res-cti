@@ -16,7 +16,8 @@
  *  - SETTLE: a compare-and-swap on the renewed lease (`pending` and `sf_log_next_at` still that value), so a tick that
  *    ran past its lease and lost the row changes nothing and counts nothing; the Task it made is found again by the
  *    next tick's lookup, never doubled.
- *  - A failure counts an attempt and waits 1, 5, 30, 120, then 720 minutes; the 6th failure ends the event `failed`.
+ *  - A failure counts an attempt and waits 1, 5, 30, 120, then 720 minutes from the moment it failed (the tick's clock,
+ *    not its start); the 6th failure ends the event `failed`.
  *    The events of one organization that failed for good in a tick raise ONE `sf_log_failed` alert (a count and the
  *    first few ids). `sf_log_error` is the error's name (and code) only: Salesforce's message text can quote the
  *    seller's words.
@@ -92,6 +93,8 @@ export interface SfLogEvent {
   subject: string | null;
   body: string | null;
   detail: string | null;
+  /** An email from an address other than the seller's (the event's meta.otherSender): its Subject says so. */
+  otherSender?: boolean;
 }
 
 /** Where the Task goes and the facts it is built from. */
@@ -112,11 +115,14 @@ export const eventMarker = (eventId: string): string => `#event-${eventId}`;
 const oneLine = (s: string): string => s.replace(/[\u0000-\u001F\u007F]/g, ' ').replace(/\s+/g, ' ').trim();
 const blank = (s: string | null): boolean => s === null || s.trim() === '';
 
+/** Who an email is from, as the Task Subject starts: the seller, someone at another address, or Sam. */
+function emailFrom(e: SfLogEvent): string {
+  if (e.direction !== 'in') return 'Email from Sam (AI)';
+  return e.otherSender ? 'Email from another address' : 'Email reply from seller';
+}
+
 function eventSubject(e: SfLogEvent): string {
-  if (e.kind === 'email') {
-    const subject = blank(e.subject) ? '(no subject)' : e.subject!;
-    return `${e.direction === 'in' ? 'Email reply from seller' : 'Email from Sam (AI)'}: ${subject}`;
-  }
+  if (e.kind === 'email') return `${emailFrom(e)}: ${blank(e.subject) ? '(no subject)' : e.subject!}`;
   if (e.kind === 'flag') return e.detail === null ? 'Sam (AI) needs a person' : `Sam (AI) needs a person: ${FLAG_WORDS.get(e.detail) ?? e.detail}`;
   if (e.kind === 'status') return (e.detail === null ? undefined : STATUS_SUBJECTS.get(e.detail)) ?? `Sam (AI) conversation: ${e.detail ?? 'status'}`;
   return `Sam (AI): ${e.kind}`;
@@ -184,6 +190,7 @@ interface Claimed {
   subject: string | null;
   body: string | null;
   detail: string | null;
+  otherSender: boolean;
   attempts: number;
   occurredAtMs: number | string;
   sfObject: 'Lead' | 'Opportunity';
@@ -215,10 +222,10 @@ async function claimDue(db: Db, now: Date, leaseEnd: Date, limit: number): Promi
     ), leased as (
       update conversation_events ev set sf_log_next_at = ${iso(leaseEnd)}
       from due where ev.id = due.id
-      returning ev.id, ev.org_id, ev.conversation_id, ev.kind, ev.direction, ev.actor, ev.occurred_at, ev.subject, ev.body, ev.detail, ev.sf_log_attempts
+      returning ev.id, ev.org_id, ev.conversation_id, ev.kind, ev.direction, ev.actor, ev.occurred_at, ev.subject, ev.body, ev.detail, ev.meta, ev.sf_log_attempts
     )
     select l.id, l.org_id as "orgId", l.conversation_id as "conversationId", l.kind, l.direction, l.actor, l.subject, l.body, l.detail,
-           l.sf_log_attempts as attempts, (extract(epoch from l.occurred_at) * 1000)::float8 as "occurredAtMs",
+           coalesce(l.meta -> 'otherSender' = 'true'::jsonb, false) as "otherSender", l.sf_log_attempts as attempts, (extract(epoch from l.occurred_at) * 1000)::float8 as "occurredAtMs",
            r.sf_object as "sfObject", r.sf_record_id as "sfRecordId", r.owner_sf_user_id as "ownerSfUserId",
            w.converted_opportunity_id as "convertedOpportunityId", o.timezone as "orgTimeZone", cc.sf_user_id as "connectionSfUserId"
     from leased l
@@ -280,7 +287,17 @@ async function storedTaskIds(db: Db, c: Claimed): Promise<string[]> {
 
 /** The Salesforce Task for one claimed event, made or found. Throws for the tick to count an attempt. */
 async function logOne(deps: SfLogDeps, client: SalesforceClient, c: Claimed): Promise<string> {
-  const event: SfLogEvent = { id: c.id, kind: c.kind, direction: c.direction, actor: c.actor, occurredAt: new Date(Number(c.occurredAtMs)), subject: c.subject, body: c.body, detail: c.detail };
+  const event: SfLogEvent = {
+    id: c.id,
+    kind: c.kind,
+    direction: c.direction,
+    actor: c.actor,
+    occurredAt: new Date(Number(c.occurredAtMs)),
+    subject: c.subject,
+    body: c.body,
+    detail: c.detail,
+    otherSender: c.otherSender,
+  };
   const common = { ownerId: ownerFor(c), orgTimeZone: c.orgTimeZone, appPublicUrl: deps.appPublicUrl, conversationUrl: sellerPageUrl(deps.appPublicUrl, c.sfRecordId) };
   const target = targetFor(c, common);
   const marker = eventMarker(c.id);
@@ -325,10 +342,11 @@ async function settleDone(db: Db, c: Claimed, leasedUntil: Date, taskId: string)
   return rows<unknown>(result).length > 0 ? 'done' : 'lost';
 }
 
-async function settleFailure(db: Db, c: Claimed, leasedUntil: Date, now: Date, err: unknown): Promise<Settled> {
+/** `at` is the tick's clock when the attempt failed (its `now` plus the time the batch has run), so the wait counts from then. */
+async function settleFailure(db: Db, c: Claimed, leasedUntil: Date, at: Date, err: unknown): Promise<Settled> {
   const attempts = c.attempts + 1;
   const exhausted = attempts >= SF_LOG_MAX_ATTEMPTS;
-  const nextAt = exhausted ? sql`null` : iso(new Date(now.getTime() + backoffMinutes(attempts) * 60_000));
+  const nextAt = exhausted ? sql`null` : iso(new Date(at.getTime() + backoffMinutes(attempts) * 60_000));
   const result = await db.execute(sql`
     update conversation_events
     set sf_log_attempts = ${attempts}, sf_log_error = ${errorLabel(err)}, sf_log_status = ${exhausted ? 'failed' : 'pending'}, sf_log_next_at = ${nextAt}
@@ -360,12 +378,16 @@ async function alertFailed(deps: SfLogDeps, alert: (event: AlertEvent) => Promis
 /**
  * One tick: logs up to `batch` due events, oldest first, one at a time (within a tick a Task one event just made is
  * already owned when the next looks; the schedule must not overlap two ticks on one seller). A Salesforce client is built once per
- * organization per tick; one that cannot be built counts an attempt for each of that organization's events.
+ * organization per tick; one that cannot be built counts an attempt for each of that organization's events. The alerts
+ * for events that failed for good go out in a `finally`: a throw later in the batch (a database error) must not lose
+ * the alert for a row already settled `failed`, which no later tick picks up again.
  */
 export async function logEventsToSalesforce(deps: SfLogDeps): Promise<SfLogCounts> {
   const { db, now, log } = deps;
   const clock = deps.clock ?? Date.now;
   const started = clock();
+  /** The tick's clock: `now` plus how long the tick has been running. */
+  const tickNow = (): Date => new Date(now.getTime() + (clock() - started));
   const alert = deps.alert ?? ((event: AlertEvent) => dispatchAlert(log, event));
   // The lease every claimed row holds until its turn renews it.
   const leasedUntil = new Date(now.getTime() + SF_LOG_LEASE_MS);
@@ -381,25 +403,28 @@ export async function logEventsToSalesforce(deps: SfLogDeps): Promise<SfLogCount
   const counts: SfLogCounts = { done: 0, retried: 0, failed: 0 };
   const failedByOrg = new Map<string, string[]>();
   let lost = 0;
-  for (const c of claimed) {
-    const lease = new Date(now.getTime() + (clock() - started) + SF_LOG_LEASE_MS);
-    if (!(await renewLease(db, c, leasedUntil, lease))) {
-      lost += 1;
-      continue;
+  try {
+    for (const c of claimed) {
+      const lease = new Date(tickNow().getTime() + SF_LOG_LEASE_MS);
+      if (!(await renewLease(db, c, leasedUntil, lease))) {
+        lost += 1;
+        continue;
+      }
+      let outcome: Settled;
+      try {
+        const client = await clientFor(c.orgId);
+        outcome = await settleDone(db, c, lease, await logOne(deps, client, c));
+      } catch (err) {
+        log.warn({ eventId: c.id, conversationId: c.conversationId, attempt: c.attempts + 1, ...describeError(err) }, 'salesforce log failed');
+        outcome = await settleFailure(db, c, lease, tickNow(), err);
+        if (outcome === 'failed') failedByOrg.set(c.orgId, [...(failedByOrg.get(c.orgId) ?? []), c.id]);
+      }
+      if (outcome === 'lost') lost += 1;
+      else counts[outcome] += 1;
     }
-    let outcome: Settled;
-    try {
-      const client = await clientFor(c.orgId);
-      outcome = await settleDone(db, c, lease, await logOne(deps, client, c));
-    } catch (err) {
-      log.warn({ eventId: c.id, conversationId: c.conversationId, attempt: c.attempts + 1, ...describeError(err) }, 'salesforce log failed');
-      outcome = await settleFailure(db, c, lease, now, err);
-      if (outcome === 'failed') failedByOrg.set(c.orgId, [...(failedByOrg.get(c.orgId) ?? []), c.id]);
-    }
-    if (outcome === 'lost') lost += 1;
-    else counts[outcome] += 1;
+  } finally {
+    for (const [orgId, eventIds] of failedByOrg) await alertFailed(deps, alert, orgId, eventIds);
   }
-  for (const [orgId, eventIds] of failedByOrg) await alertFailed(deps, alert, orgId, eventIds);
   if (claimed.length > 0) log.info({ claimed: claimed.length, ...counts, lost }, 'salesforce log tick');
   return counts;
 }

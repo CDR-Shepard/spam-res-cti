@@ -5,7 +5,8 @@ import { schema, type Db } from '@cti/db';
 import { seedAiCallCampaign } from '../test/call-plan-seed.js';
 import { seedAiCall, seedReleasedLead, type ReleasedLead } from '../test/ai-call-seed.js';
 import { seedCampaign, seedEnrollment, seedOrg, seedRecord, snapshot, leadId } from '../test/outreach-fixtures.js';
-import { createTestDb, pgLane } from '../test/pg.js';
+import { drizzle } from 'drizzle-orm/node-postgres';
+import { createTestDb, pgLane, type TestDb } from '../test/pg.js';
 import { appendEvent, ensureConversation } from '../conversations/store.js';
 import { loadWriterContext } from './writer-context.js';
 
@@ -15,9 +16,10 @@ const COMPANY = 'GG Homes';
 
 describe.skipIf(!pgLane)('loadWriterContext (real Postgres)', () => {
   let db: Db;
+  let pool: TestDb['pool'];
   let drop: () => Promise<void>;
   beforeAll(async () => {
-    ({ db, drop } = await createTestDb());
+    ({ db, pool, drop } = await createTestDb());
   }, 120_000);
   afterAll(async () => {
     await drop?.();
@@ -30,6 +32,32 @@ describe.skipIf(!pgLane)('loadWriterContext (real Postgres)', () => {
 
   const contextOf = (lead: { orgId: string; crmRecordId: string }, conversationId: string | null = null, now: Date = NOW) =>
     loadWriterContext(db, { orgId: lead.orgId, crmRecordId: lead.crmRecordId, conversationId, now, companyName: COMPANY });
+
+  it('reads one query at a time, so it can run on one client inside a transaction (M2: no "client.query() already executing")', async () => {
+    const lead = await seedSeller();
+    const client = await pool.connect();
+    let inFlight = 0;
+    let most = 0;
+    const query = client.query.bind(client) as (...args: unknown[]) => Promise<unknown>;
+    (client as unknown as { query: unknown }).query = async (...args: unknown[]) => {
+      inFlight += 1;
+      most = Math.max(most, inFlight);
+      try {
+        return await query(...args);
+      } finally {
+        inFlight -= 1;
+      }
+    };
+    try {
+      const single = drizzle(client, { schema }) as unknown as Db;
+      const ctx = await loadWriterContext(single, { orgId: lead.orgId, crmRecordId: lead.crmRecordId, conversationId: null, now: NOW, companyName: COMPANY });
+      expect(ctx.firstName).toBe('Pat');
+      expect(ctx.planText).not.toBeNull();
+    } finally {
+      client.release();
+    }
+    expect(most).toBe(1);
+  });
 
   it('a seeded record with an approved plan has the plan text and the first word of the name', async () => {
     const lead = await seedSeller();

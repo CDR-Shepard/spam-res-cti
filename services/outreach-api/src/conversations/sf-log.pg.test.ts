@@ -179,6 +179,25 @@ describe.skipIf(!pgLane)('Salesforce log tick (real Postgres)', () => {
       assertNoPii(h);
     });
 
+    it('a reply stored as from another address (meta.otherSender) is logged as "Email from another address" (M8)', async () => {
+      const s = await seedSeller();
+      const id = await appendEvent(db, {
+        orgId: s.orgId,
+        conversationId: s.conv.id,
+        kind: 'email',
+        direction: 'in',
+        actor: 'seller',
+        subject: SECRET_SUBJECT,
+        body: SECRET_BODY,
+        meta: { autoReply: false, otherSender: true },
+        sfLog: true,
+      });
+      const h = harness();
+      expect(await h.run()).toEqual({ done: 1, retried: 0, failed: 0 });
+      expect(h.org.sf.creates[0]!.fields).toMatchObject({ Subject: `Email from another address: ${SECRET_SUBJECT}`, TaskSubtype: 'Email', WhoId: s.sfRecordId });
+      expect((await eventOf(id)).sfLogStatus).toBe('done');
+    });
+
     it("Sam's outbound email, once Resend accepted it, is logged as an email from Sam", async () => {
       const s = await seedSeller();
       const id = await appendEvent(db, { orgId: s.orgId, conversationId: s.conv.id, kind: 'email', direction: 'out', actor: 'sam', subject: 'Your home on Oak Street', body: 'Hi, this is Sam.', sfLog: true });
@@ -499,7 +518,8 @@ describe.skipIf(!pgLane)('Salesforce log tick (real Postgres)', () => {
       const s = await seedSeller();
       const id = await inbound(s);
       const h = harness();
-      const notConnected = { clients: async () => Promise.reject(new CrmNotConnectedError()) };
+      // A still tick clock: the waits count from the failure, which is then the tick's `now`.
+      const notConnected = { clients: async () => Promise.reject(new CrmNotConnectedError()), clock: () => 0 };
       const waits = [1, 5, 30, 120, 720];
       let now = T0;
 
@@ -579,6 +599,42 @@ describe.skipIf(!pgLane)('Salesforce log tick (real Postgres)', () => {
       expect(await h.run({ clients: async () => Promise.reject(new CrmNotConnectedError()) })).toEqual({ done: 0, retried: 0, failed: 3 });
       expect(h.alert).toHaveBeenCalledTimes(1);
       expect(h.alerts[0]).toMatchObject({ kind: 'sf_log_failed', orgId: s.orgId, context: { count: 3, eventIds: ids } });
+    });
+
+    it('a tick that throws after an event failed for good still sends that event\'s alert (the alerts go out in a finally)', async () => {
+      const failing = await seedSeller();
+      const next = await seedSeller();
+      const failedId = await inbound(failing, { occurredAt: new Date('2026-10-20T17:00:00.000Z') });
+      const nextId = await inbound(next, { occurredAt: new Date('2026-10-20T17:01:00.000Z') });
+      await t.pool.query('update conversation_events set sf_log_attempts = $2 where id = $1', [failedId, SF_LOG_MAX_ATTEMPTS - 1]);
+      const h = harness();
+      // The database refuses the next event's lease RENEWAL (a lease past the claim's T0 + 10 min; the tick clock moves a
+      // minute per event), so the tick throws mid-batch after the first event has failed for good.
+      await t.pool.query(`create or replace function test_block_next_lease() returns trigger language plpgsql as $$
+        begin
+          if new.id = '${nextId}'::uuid and new.sf_log_next_at > '${after(10).toISOString()}'::timestamptz then raise exception 'blocked for the test'; end if;
+          return new;
+        end $$`);
+      await t.pool.query('create trigger test_block_next_lease before update on conversation_events for each row execute function test_block_next_lease()');
+      try {
+        const clients = async (orgId: string) => (orgId === failing.orgId ? Promise.reject(new CrmNotConnectedError()) : h.org.sf.client);
+        let tick = 0;
+        const clock = () => (tick += MINUTE);
+        await expect(h.run({ clients, clock })).rejects.toThrow();
+      } finally {
+        await t.pool.query('drop trigger test_block_next_lease on conversation_events');
+      }
+      expect((await eventOf(failedId)).sfLogStatus).toBe('failed');
+      expect(h.alerts).toEqual([expect.objectContaining({ kind: 'sf_log_failed', orgId: failing.orgId, context: { count: 1, eventIds: [failedId] } })]);
+    });
+
+    it('the backoff counts from the tick clock, not the tick\'s start: a failure 4 minutes into a slow batch waits 1 minute from then', async () => {
+      const s = await seedSeller();
+      const id = await inbound(s);
+      const h = harness();
+      const clock = vi.fn<() => number>().mockReturnValueOnce(1_000).mockReturnValue(1_000 + 4 * MINUTE);
+      expect(await h.run({ clock, clients: async () => Promise.reject(new CrmNotConnectedError()) })).toEqual({ done: 0, retried: 1, failed: 0 });
+      expect((await eventOf(id)).sfLogNextAt!.getTime()).toBe(after(4 + 1).getTime());
     });
 
     it('an alert that throws does not break the tick', async () => {

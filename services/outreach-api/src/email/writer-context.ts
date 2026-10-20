@@ -66,19 +66,21 @@ async function approvedPlanText(db: Db, i: { orgId: string; crmRecordId: string;
   return rendered.ok ? rendered.text : null;
 }
 
+/**
+ * The three reads run one after another, never at once: the reply handler calls this inside its transaction, on one pg
+ * client, and a client takes one query at a time (concurrent calls are deprecated in pg 8 and refused in pg 9).
+ */
 export async function loadWriterContext(
   db: Db,
   i: { orgId: string; crmRecordId: string; conversationId: string | null; now: Date; companyName: string },
 ): Promise<Omit<WriterInput, 'mode' | 'inbound'>> {
   const r = schema.crmRecords;
-  const [[record], planText, timeline] = await Promise.all([
-    db
-      .select({ name: r.name, phones: r.phones })
-      .from(r)
-      .where(and(eq(r.id, i.crmRecordId), eq(r.orgId, i.orgId))),
-    approvedPlanText(db, i),
-    readTimeline(db, { orgId: i.orgId, crmRecordId: i.crmRecordId, conversationId: i.conversationId }),
-  ]);
+  const [record] = await db
+    .select({ name: r.name, phones: r.phones })
+    .from(r)
+    .where(and(eq(r.id, i.crmRecordId), eq(r.orgId, i.orgId)));
+  const planText = await approvedPlanText(db, i);
+  const timeline = await readTimeline(db, { orgId: i.orgId, crmRecordId: i.crmRecordId, conversationId: i.conversationId });
   return {
     firstName: firstWord(record?.name),
     companyName: i.companyName,

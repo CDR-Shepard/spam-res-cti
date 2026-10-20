@@ -10,7 +10,7 @@ import { and, eq, sql } from 'drizzle-orm';
 import { ConversationView, EmailDraftResponse, EmailSendResponse } from '@cti/contracts';
 import { schema, type Db } from '@cti/db';
 import { buildApp } from '../app.js';
-import { ensureConversation, flagConversation, stopSeller, suppressAddress } from '../conversations/store.js';
+import { appendEvent, ensureConversation, flagConversation, stopSeller, suppressAddress } from '../conversations/store.js';
 import type { EmailDecision, EmailWriter } from '../email/writer.js';
 import { seedAiCallCampaign, seedPlanLead, type PlanLeadOptions } from '../test/call-plan-seed.js';
 import { leadId, seedConnection, seedRecord, snapshot } from '../test/outreach-fixtures.js';
@@ -219,6 +219,17 @@ describe.skipIf(!pgLane)('seller conversation routes (real Postgres)', () => {
       const other = await seedSeller();
       sessionFor(other.orgId, other.admin.id, true);
       expect((await get(other.sfRecordId)).json()).toMatchObject({ emailBlock: null, mayEmail: true });
+    });
+
+    it('an email from another address shows on the page as the seller\'s email, without the server-only otherSender key (M8)', async () => {
+      const s = await seedSeller();
+      const conv = await ensureConversation(t.db, { orgId: s.orgId, crmRecordId: s.crmRecordId });
+      const eventId = await appendEvent(t.db, { orgId: s.orgId, conversationId: conv.id, kind: 'email', direction: 'in', actor: 'seller', subject: 'Re: hi', body: 'Neighbour here.', meta: { autoReply: false, otherSender: true }, sfLog: false });
+      await t.db.insert(schema.emailMessages).values({ orgId: s.orgId, conversationId: conv.id, eventId, direction: 'in', status: 'received', purpose: 'inbound', toAddress: 'sam@example.com', fromAddress: 'neighbour@example.com' });
+      sessionFor(s.orgId, s.admin.id, true);
+      const body = (await get(s.sfRecordId)).json() as { items: Array<Record<string, unknown>> };
+      expect(body.items).toEqual([expect.objectContaining({ id: eventId, type: 'email', direction: 'in', actor: 'seller', body: 'Neighbour here.' })]);
+      expect(body.items[0]).not.toHaveProperty('otherSender');
     });
 
     it('the seller rules read the real conversation: stopped, taken over, flagged, suppressed', async () => {

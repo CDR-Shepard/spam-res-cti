@@ -6,8 +6,10 @@
  * when an auto-responder wrote to it, because a mail client's List-Unsubscribe mailto can look automatic); an
  * auto-reply is never answered and never raises a flag (an out-of-office must not start a mail loop or page a
  * person); a stopped seller is never written to again; and only then come the reasons a person must look (someone
- * other than the seller, a booked or closed seller, the 3-a-day loop guard, Sam's email not available). A seller a
- * person already handles, or one already flagged, is recorded only: the person has it.
+ * other than the seller, an address Sam may not email, a booked or closed seller, the 3-a-day loop guard, Sam's
+ * email not available). A seller a person already handles, or one already flagged, is recorded only: the person has
+ * it. A reply from an address that is suppressed or opted out in Salesforce never reaches Sam's writer: she could
+ * not send her answer anyway, and the seller's words must not be dropped silently.
  */
 import type { ConversationHandler, ConversationStatus, FlagReason } from '@cti/contracts';
 
@@ -23,6 +25,11 @@ export interface InboundState {
   optOutText: boolean;
   /** The From address is the seller's (the record's email), or for a practice conversation the admin's. */
   senderMatches: boolean;
+  /**
+   * The From address is suppressed in this tenant, or Salesforce Email Opt Out is set on any record with it (the send
+   * tick's own reads, outbox.ts addressBlocks). Always false on a practice conversation (the admin's own address).
+   */
+  addressBlocked: boolean;
   /** An admin's practice conversation. */
   practice: boolean;
   status: ConversationStatus;
@@ -52,6 +59,7 @@ export function decideInbound(s: InboundState): InboundDecision {
   if (s.optOutText) return OPT_OUT;
   if (s.status === 'stopped') return RECORD_ONLY;
   if (!s.senderMatches) return flag('other_sender');
+  if (s.addressBlocked) return flag('unsure');
   if (s.status === 'booked' || s.recordClosed) return flag('after_close');
   if (s.handler === 'person') return RECORD_ONLY;
   if (s.flagged) return RECORD_ONLY;

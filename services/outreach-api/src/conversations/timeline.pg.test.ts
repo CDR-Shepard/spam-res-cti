@@ -6,7 +6,9 @@ import { seedAiCallCampaign, seedUser } from '../test/call-plan-seed.js';
 import { seedAiCall, seedReleasedLead, type ReleasedLead } from '../test/ai-call-seed.js';
 import { createTestDb, pgLane } from '../test/pg.js';
 import { appendEvent, ensureConversation, type ConversationEventInput } from './store.js';
-import { readTimeline } from './timeline.js';
+import { TimelineItem } from '@cti/contracts';
+import { historyDigest } from './digest.js';
+import { forPage, readTimeline } from './timeline.js';
 
 const T0 = new Date('2026-10-19T15:00:00.000Z');
 const at = (minutes: number) => new Date(T0.getTime() + minutes * 60_000);
@@ -152,6 +154,25 @@ describe.skipIf(!pgLane)('readTimeline (real Postgres)', () => {
       { type: 'email', direction: 'in', actor: 'seller', status: 'received', autoReply: true },
       { type: 'email', direction: 'in', actor: 'seller', status: 'received', autoReply: false },
     ]);
+  });
+
+  it('marks an email from another address (meta.otherSender) for the server only: the page items drop the key (M8)', async () => {
+    const lead = await seedSeller();
+    const conv = await ensureConversation(db, { orgId: lead.orgId, crmRecordId: lead.crmRecordId });
+    const other = await addEmail(conv, { occurredAt: at(1), direction: 'in', meta: { autoReply: false, otherSender: true } });
+    const own = await addEmail(conv, { occurredAt: at(2), direction: 'in', meta: { autoReply: false } });
+    const items = await readTimeline(db, { orgId: lead.orgId, crmRecordId: lead.crmRecordId, conversationId: conv.id });
+    expect(items).toEqual([
+      expect.objectContaining({ id: other, type: 'email', actor: 'seller', otherSender: true }),
+      expect.objectContaining({ id: own, type: 'email', actor: 'seller' }),
+    ]);
+    expect(items[1]).not.toHaveProperty('otherSender');
+    const page = forPage(items);
+    expect(page.map((i) => i.id)).toEqual([other, own]);
+    for (const item of page) expect(item).not.toHaveProperty('otherSender');
+    expect(page.map((i) => TimelineItem.parse(i))).toEqual(page);
+    // The history digest leaves the other address's email out.
+    expect(historyDigest(items, 1000)).toBe('2026-10-19 Email from the seller — "Your house": Hello there.');
   });
 
   it('reads a null subject or body of an email, and a null detail of a note, as an empty string', async () => {

@@ -41,7 +41,7 @@ import { describeError } from './errors.js';
 import type { ReceivedOutcome } from './events.js';
 import { decideInbound, type InboundDecision } from './inbound-decide.js';
 import { htmlToText, isAutoReply, isOptOutText, optOutScanText, stripQuoted } from './inbound-text.js';
-import { emailSendAt, emailsOutInLastDay, queueEmail } from './outbox.js';
+import { addressBlocks, emailSendAt, emailsOutInLastDay, phonesOf, queueEmail } from './outbox.js';
 import { ResendError, type ReceivedEmail, type ResendClient } from './resend-client.js';
 import { loadWriterContext } from './writer-context.js';
 import { writeEmail, type EmailWriter } from './writer.js';
@@ -265,13 +265,33 @@ class AlreadyStored extends Error {
 }
 
 /**
- * The inbound row and its timeline event (the seller's email, logged to Salesforce unless the conversation is a
- * practice one), together. A row already stored for this Resend id is returned as it is, whichever tick wrote it.
- * The ON CONFLICT repeats the partial unique index's predicate: without it Postgres refuses every insert (42P10).
+ * The address a reply on this conversation should come from: the seller's record email, or for a practice conversation
+ * the admin's own (trimmed, lowercased; null when there is none). The same facts the handling reads (sellerAddress).
+ */
+async function expectedSender(db: Db, thread: Thread): Promise<string | null> {
+  const result = await db.execute(sql`
+    select case when c.practice_user_id is null then r.email else u.email end as address
+    from seller_conversations c
+    join crm_records r on r.id = c.crm_record_id and r.org_id = c.org_id
+    left join users u on u.id = c.practice_user_id and u.org_id = c.org_id
+    where c.id = ${thread.conversationId}::uuid and c.org_id = ${thread.orgId}::uuid`);
+  return normalAddress(rows<{ address: string | null }>(result)[0]?.address ?? null);
+}
+
+/**
+ * The inbound row and its timeline event, together. A row already stored for this Resend id is returned as it is,
+ * whichever tick wrote it. The ON CONFLICT repeats the partial unique index's predicate: without it Postgres refuses
+ * every insert (42P10).
+ *
+ * The event is the seller's side of the timeline (actor `seller`) and is logged to Salesforce (never for a practice
+ * conversation, appendEvent), except an auto-reply: an out-of-office says nothing a rep needs a Task for. One from an
+ * address other than the seller's is marked `otherSender` when it is stored, before the Salesforce tick can see it:
+ * its Task says "Email from another address", and the history digest leaves it out (it is not the seller speaking).
  */
 async function storeReply(db: Db, thread: Thread, r: ReadReply, now: Date): Promise<StoredReply> {
   const existing = await storedReply(db, r.resendId);
   if (existing) return existing;
+  const otherSender = r.sender === null || r.sender !== (await expectedSender(db, thread));
   try {
     return await db.transaction(async (tx) => {
       const t = asDb(tx);
@@ -284,8 +304,8 @@ async function storeReply(db: Db, thread: Thread, r: ReadReply, now: Date): Prom
         occurredAt: now,
         subject: r.subject,
         body: r.body,
-        meta: { autoReply: r.autoReply },
-        sfLog: true,
+        meta: { autoReply: r.autoReply, ...(otherSender ? { otherSender: true } : {}) },
+        sfLog: !r.autoReply,
       });
       const inserted = await t.execute(sql`
         insert into email_messages
@@ -352,8 +372,15 @@ function sellerAddress(ctx: ReplyContext): string | null {
   return normalAddress(ctx.practiceUserId !== null ? ctx.practiceEmail : ctx.recordEmail);
 }
 
-function phonesOf(ctx: ReplyContext): Array<{ e164: string }> {
-  return Array.isArray(ctx.phones) ? ctx.phones.filter((p): p is { e164: string } => typeof (p as { e164?: unknown } | null)?.e164 === 'string') : [];
+/**
+ * The sender's address may not be emailed (suppressed, or Email Opt Out on any record with it): the send tick's own
+ * reads (outbox.ts addressBlocks), so a reply Sam could never answer is not handed to her writer. A practice
+ * conversation's sender is the admin, whose own address is never a seller's block.
+ */
+async function senderBlocked(t: Db, ctx: ReplyContext, sender: string | null): Promise<boolean> {
+  if (sender === null || ctx.practiceUserId !== null) return false;
+  const blocks = await addressBlocks(t, ctx.orgId, sender);
+  return blocks.suppressed || blocks.sfOptOut;
 }
 
 async function decide(t: Db, deps: InboundDeps, ctx: ReplyContext, r: ReadReply, unsubscribe: boolean, now: Date): Promise<InboundDecision> {
@@ -363,6 +390,7 @@ async function decide(t: Db, deps: InboundDeps, ctx: ReplyContext, r: ReadReply,
     autoReply: r.autoReply,
     optOutText: asksToStop(r, deps.cfg.EMAIL_COMPANY_NAME),
     senderMatches: r.sender !== null && r.sender === sellerAddress(ctx),
+    addressBlocked: await senderBlocked(t, ctx, r.sender),
     practice: ctx.practiceUserId !== null,
     status: ctx.status,
     recordClosed: ctx.recordClosed,
@@ -422,7 +450,7 @@ async function queueAnswer(t: Db, deps: InboundDeps, ctx: ReplyContext, r: ReadR
     requestedBy: null,
     inReplyTo: r.messageId === null ? null : angled(r.messageId),
     references: answerReferences(r),
-    sendAfter: ctx.practiceUserId !== null ? now : emailSendAt(phonesOf(ctx), now),
+    sendAfter: ctx.practiceUserId !== null ? now : emailSendAt(phonesOf(ctx.phones), now),
   });
   return true;
 }

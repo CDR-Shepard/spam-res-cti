@@ -14,6 +14,7 @@ import { appendEvent, ensureConversation, suppressAddress, type SellerConversati
 import { queueEmail, sendBlock } from './outbox.js';
 import { sendDueEmails } from './send.js';
 import type { ResendClient, ResendSendRequest, ResendSendResult } from './resend-client.js';
+import type { AlertEvent } from '../alerts.js';
 
 /** Tuesday 12:00 in Chicago (CDT): inside the 08:00-18:00 window. */
 const NOW = new Date('2026-10-20T17:00:00.000Z');
@@ -346,6 +347,93 @@ describe.skipIf(!pgLane)('outbox and send tick (real Postgres)', () => {
       expect(await tick(resend.client)).toEqual({ sent: 1, retried: 0, canceled: 1, failed: 0 });
       expect((await rowOf(a.emailId)).status).toBe('sent');
       expect(await rowOf(b.emailId)).toMatchObject({ status: 'canceled', lastError: 'disabled' });
+    });
+
+    describe("a seller's answer canceled for the tenant's switch or the daily cap goes to a person (M6)", () => {
+      /** A tick with its own alert sink. */
+      const tickWithAlerts = async (resend: ResendClient, now: Date = NOW) => {
+        const alerts: AlertEvent[] = [];
+        const log = fakeLog();
+        const counts = await sendDueEmails({ db, resend, cfg: CFG, now, log, alert: async (event) => void alerts.push(event) });
+        return { counts, alerts, log };
+      };
+      const conversationOf = async (id: string) => (await db.select().from(schema.sellerConversations).where(eq(schema.sellerConversations.id, id)))[0]!;
+      const PAUSED = { samEmail: { enabled: true, pausedAt: NOW.toISOString(), pausedReason: 'complaint' } };
+
+      it.each([
+        ['paused', 'reply', { settings: PAUSED }],
+        ['paused', 'holding', { settings: PAUSED }],
+        ['disabled', 'reply', { settings: {} }],
+        ['disabled', 'holding', { settings: { samEmail: { enabled: false } } }],
+      ] as const)('%s: a %s email is canceled, the conversation flagged unsure, and one seller_needs_person alert carries ids only', async (block, purpose, over) => {
+        const s = await seedSeller(over);
+        const { emailId } = await queue(s, { purpose });
+        const resend = fakeResend();
+        const { counts, alerts, log } = await tickWithAlerts(resend.client);
+        expect(counts.canceled).toBe(1);
+        expect(resend.calls).toHaveLength(0);
+        expect(await rowOf(emailId)).toMatchObject({ status: 'canceled', lastError: block });
+        expect(await conversationOf(s.conv.id)).toMatchObject({ flagReason: 'unsure' });
+        expect(alerts).toEqual([
+          expect.objectContaining({ kind: 'seller_needs_person', orgId: s.orgId, context: { conversationId: s.conv.id, emailId, reason: 'unsure', block } }),
+        ]);
+        const everything = JSON.stringify([alerts, log.info.mock.calls, log.warn.mock.calls, log.error.mock.calls]);
+        for (const secret of [ADDRESS, SUBJECT, BODY]) expect(everything).not.toContain(secret);
+      });
+
+      it('daily_cap: a reply over the cap is canceled and the conversation flagged unsure, with one alert', async () => {
+        const s = await seedSeller();
+        for (const ago of [HOUR, 2 * HOUR, 3 * HOUR]) await seedSent(s, ago);
+        const { emailId } = await queue(s);
+        const { alerts } = await tickWithAlerts(fakeResend().client);
+        expect(await rowOf(emailId)).toMatchObject({ status: 'canceled', lastError: 'daily_cap' });
+        expect(await conversationOf(s.conv.id)).toMatchObject({ flagReason: 'unsure' });
+        expect(alerts).toEqual([expect.objectContaining({ kind: 'seller_needs_person', context: expect.objectContaining({ block: 'daily_cap' }) })]);
+      });
+
+      it('a first email canceled for the switch is unchanged: no flag, no alert', async () => {
+        const s = await seedSeller({ settings: PAUSED });
+        await queue(s, { purpose: 'first', inReplyTo: null, references: null });
+        const { alerts } = await tickWithAlerts(fakeResend().client);
+        expect(await conversationOf(s.conv.id)).toMatchObject({ flagReason: null });
+        expect(alerts).toEqual([]);
+      });
+
+      it('a practice conversation\'s answer canceled for the switch is unchanged: no flag, no alert', async () => {
+        const s = await seedPracticeSeller({ settings: PAUSED });
+        await queue(s, { to: 'admin@example.com' });
+        const { alerts } = await tickWithAlerts(fakeResend().client);
+        expect(await conversationOf(s.conv.id)).toMatchObject({ flagReason: null });
+        expect(alerts).toEqual([]);
+      });
+
+      it('a reply canceled for a seller rule (suppressed) is unchanged: no flag, no alert', async () => {
+        const s = await seedSeller();
+        await suppressAddress(db, { orgId: s.orgId, address: ADDRESS, reason: 'opted_out', conversationId: null });
+        await queue(s);
+        const { alerts } = await tickWithAlerts(fakeResend().client);
+        expect(await conversationOf(s.conv.id)).toMatchObject({ flagReason: null });
+        expect(alerts).toEqual([]);
+      });
+
+      it('an already flagged conversation keeps its first reason and raises no second alert', async () => {
+        const s = await seedSeller({ settings: PAUSED });
+        await setConversation(s.conv.id, { flagReason: 'offer_or_price', flaggedAt: NOW });
+        await queue(s, { purpose: 'holding' });
+        const { alerts } = await tickWithAlerts(fakeResend().client);
+        expect(await conversationOf(s.conv.id)).toMatchObject({ flagReason: 'offer_or_price' });
+        expect(alerts).toEqual([]);
+      });
+
+      it('an alert that throws is logged by name and does not undo the flag', async () => {
+        const s = await seedSeller({ settings: PAUSED });
+        const { emailId } = await queue(s);
+        const log = fakeLog();
+        await sendDueEmails({ db, resend: fakeResend().client, cfg: CFG, now: NOW, log, alert: async () => Promise.reject(new Error('webhook down')) });
+        expect(await rowOf(emailId)).toMatchObject({ status: 'canceled' });
+        expect(await conversationOf(s.conv.id)).toMatchObject({ flagReason: 'unsure' });
+        expect(log.error).toHaveBeenCalled();
+      });
     });
 
     describe('the daily cap', () => {

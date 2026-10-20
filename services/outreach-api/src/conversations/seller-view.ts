@@ -19,7 +19,7 @@ import type { Db } from '@cti/db';
 import { loadConnection } from '../crm/connection-store.js';
 import { addressBlocks, hasApprovedPlan, phonesOf, sellerBlock, switchBlock } from '../email/outbox.js';
 import { SF_ID_CORE } from '../tenancy/record-owner.js';
-import { readTimeline } from './timeline.js';
+import { forPage, readTimeline } from './timeline.js';
 
 const rows = <T>(r: unknown): T[] => (r as { rows: T[] }).rows;
 /** Enough of an address to hand to Resend: one @, something either side, a dot in the domain, no spaces. */
@@ -168,6 +168,6 @@ export async function conversationView(
     emailBlock,
     mayEmail: i.isAdmin && emailBlock === null,
     mayChangeHandler: i.mayChangeHandler,
-    items,
+    items: forPage(items),
   };
 }

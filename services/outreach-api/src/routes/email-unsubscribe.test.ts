@@ -212,11 +212,62 @@ describe('POST /api/email/unsubscribe/:token', () => {
     store.stopSeller.mockRejectedValue(Object.assign(new Error('boom: seller@example.com'), { code: '40001', detail: 'Key (address)=(seller@example.com)' }));
     await build();
     const res = await post(URL_PATH, { 'content-type': 'application/x-www-form-urlencoded' }, 'List-Unsubscribe=One-Click');
+    // A serialization failure is retried once; failing again, it is the failed page.
+    expect(store.stopSeller).toHaveBeenCalledTimes(2);
     expect(res.statusCode).toBe(500);
     expect(res.headers).toMatchObject(SECURITY_HEADERS);
     expect(textOf(res.body)).toContain('Something went wrong. Please try again in a minute.');
     expect(res.body).not.toContain('seller@example.com');
     expect(res.body).toMatch(/<form method="post">/);
+  });
+});
+
+describe('POST retries a stop that lost a lock race, once (M7)', () => {
+  const lockRace = (code: string) => Object.assign(new Error('boom: seller@example.com'), { code });
+
+  for (const code of ['40P01', '40001']) {
+    it(`a ${code} on the first try runs the stop again and the seller is unsubscribed`, async () => {
+      store.stopSeller.mockRejectedValueOnce(lockRace(code)).mockResolvedValueOnce(true);
+      await build();
+      const res = await post(URL_PATH, { 'content-type': 'application/x-www-form-urlencoded' }, 'List-Unsubscribe=One-Click');
+      expect(store.stopSeller).toHaveBeenCalledTimes(2);
+      expect(store.stopSeller).toHaveBeenLastCalledWith(FAKE_DB, { conversationId: CONVERSATION_ID, reason: 'opted_out', now: NOW, onSharedAddress: expect.any(Function) });
+      expect(res.statusCode).toBe(200);
+      expect(textOf(res.body)).toContain("You're unsubscribed.");
+    });
+  }
+
+  it('any other failure is not retried', async () => {
+    store.stopSeller.mockRejectedValue(lockRace('23505'));
+    await build();
+    const res = await post(URL_PATH, { 'content-type': 'application/x-www-form-urlencoded' }, 'List-Unsubscribe=One-Click');
+    expect(store.stopSeller).toHaveBeenCalledTimes(1);
+    expect(res.statusCode).toBe(500);
+  });
+
+  it('only the attempt that committed raises shared-address alerts (the rolled-back one heard of a sibling too)', async () => {
+    let attempt = 0;
+    store.stopSeller.mockImplementation(async (_db: unknown, i: StopInput) => {
+      attempt += 1;
+      i.onSharedAddress?.({ orgId: 'org-1', conversationId: CONVERSATION_ID, sharedRecordCount: 10 + attempt });
+      if (attempt === 1) throw lockRace('40P01');
+      return true;
+    });
+    await build();
+    const res = await post(URL_PATH, { 'content-type': 'application/x-www-form-urlencoded' }, 'List-Unsubscribe=One-Click');
+    expect(res.statusCode).toBe(200);
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0]!.context).toEqual({ conversationId: CONVERSATION_ID, sharedRecordCount: 12 });
+  });
+
+  it('the retry is logged with the conversation id and the failure code, never its text', async () => {
+    store.stopSeller.mockRejectedValueOnce(lockRace('40P01')).mockResolvedValueOnce(true);
+    await build();
+    await post(URL_PATH, { 'content-type': 'application/x-www-form-urlencoded' }, 'List-Unsubscribe=One-Click');
+    await app.close();
+    const retried = logLines.map((l) => JSON.parse(l) as Record<string, unknown>).find((l) => l.msg === 'unsubscribe retried');
+    expect(retried).toMatchObject({ conversationId: CONVERSATION_ID, errorCode: '40P01' });
+    expect(logLines.join('')).not.toMatch(/boom|seller@/);
   });
 });
 

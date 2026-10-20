@@ -50,6 +50,12 @@ describe('sfTaskForEvent: email', () => {
     expect(f.Description).toBe(`Yes, still for sale.\n\n${LINK}`);
   });
 
+  it('an email from an address other than the seller\'s says so in the Subject (M8)', () => {
+    expect(sfTaskForEvent(event({ otherSender: true }), target()).Subject).toBe('Email from another address: Re: Your home');
+    expect(sfTaskForEvent(event({ otherSender: true, subject: '  ' }), target()).Subject).toBe('Email from another address: (no subject)');
+    expect(sfTaskForEvent(event({ otherSender: false }), target()).Subject).toBe('Email reply from seller: Re: Your home');
+  });
+
   it('an outbound email from Sam says so in the Subject', () => {
     const f = sfTaskForEvent(event({ direction: 'out', actor: 'sam', subject: 'Your home on Oak Street' }), target());
     expect(f.Subject).toBe('Email from Sam (AI): Your home on Oak Street');

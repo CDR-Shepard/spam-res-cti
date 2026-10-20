@@ -13,7 +13,7 @@ import { schema, type Db } from '@cti/db';
 import { createTestDb, pgLane, type TestDb } from '../test/pg.js';
 import { leadId, seedOrg, seedRecord, snapshot } from '../test/outreach-fixtures.js';
 import { seedUser } from '../test/call-plan-seed.js';
-import { ensureConversation, suppressionFor, type SellerConversationRow } from '../conversations/store.js';
+import { ensureConversation, suppressAddress, suppressionFor, type SellerConversationRow } from '../conversations/store.js';
 import type { AlertEvent } from '../alerts.js';
 import { queueEmail } from './outbox.js';
 import { replyAddress, unsubscribeMailto } from './addresses.js';
@@ -508,6 +508,8 @@ describe.skipIf(!pgLane)('replies: receive, decide, answer (real Postgres)', () 
       expect(await handleReceived(d, received(email), NOW)).toBe('done');
       const inbound = (await eventsOf(s.conv.id)).find((e) => e.direction === 'in')!;
       expect(inbound.meta).toEqual({ autoReply: true });
+      // An out-of-office is not logged to Salesforce (M9).
+      expect(inbound).toMatchObject({ sfLogStatus: 'skipped', sfLogNextAt: null });
       expect(writer!.write).not.toHaveBeenCalled();
       expect(await queued(s.conv.id)).toHaveLength(0);
       expect(await conversationRow(s.conv.id)).toMatchObject({ status: 'open', flagReason: null });
@@ -550,6 +552,62 @@ describe.skipIf(!pgLane)('replies: receive, decide, answer (real Postgres)', () 
       expect(event).toMatchObject({ kind: 'seller_needs_person', orgId: s.orgId });
       expect(event.context).toEqual({ conversationId: s.conv.id, emailId: inbound!.id, reason: 'other_sender', sellerUrl: `${APP_URL}/sellers/${s.sfRecordId}` });
       assertNoPii(alert, log, ['someone-else@example.com', 'Someone Else']);
+    });
+
+    it('a sender that is not the seller is stored marked otherSender, still the seller\'s side of the timeline and still logged (M8)', async () => {
+      const s = await seedSeller();
+      const email = reply(s, { from: 'Someone Else <someone-else@example.com>' });
+      await handleReceived(deps({ emails: [email] }).d, received(email), NOW);
+      const inbound = (await eventsOf(s.conv.id)).find((e) => e.kind === 'email' && e.direction === 'in')!;
+      expect(inbound).toMatchObject({ actor: 'seller', meta: { autoReply: false, otherSender: true }, sfLogStatus: 'pending' });
+      // The seller's own reply is not marked.
+      const own = reply(s);
+      await handleReceived(deps({ emails: [own] }).d, received(own), NOW);
+      const mine = (await eventsOf(s.conv.id)).filter((e) => e.kind === 'email' && e.direction === 'in').find((e) => e.id !== inbound.id)!;
+      expect(mine.meta).toEqual({ autoReply: false });
+    });
+
+    it('a practice conversation\'s admin replying is not another sender; the seller\'s address there is (M8)', async () => {
+      const s = await seedSeller();
+      const adminId = await seedUser(db, s.orgId);
+      const practice = await ensureConversation(db, { orgId: s.orgId, crmRecordId: s.crmRecordId, practiceUserId: adminId });
+      const [admin] = await db.select().from(schema.users).where(eq(schema.users.id, adminId));
+      const fromAdmin = reply({ ...s, conv: practice }, { from: `Admin <${admin!.email}>` });
+      await handleReceived(deps({ emails: [fromAdmin] }).d, received(fromAdmin), NOW);
+      expect((await eventsOf(practice.id)).find((e) => e.kind === 'email' && e.direction === 'in')!.meta).toEqual({ autoReply: false });
+    });
+
+    it('a reply from a suppressed address never reaches the writer: flagged unsure with an alert (M4)', async () => {
+      const s = await seedSeller();
+      // A stop that did not reach this record's conversation (an address shared by many records, for one).
+      await suppressAddress(db, { orgId: s.orgId, address: ADDRESS.toUpperCase(), reason: 'opted_out', conversationId: null });
+      const email = reply(s);
+      const { d, writer, alert, log } = deps({ emails: [email] });
+      expect(await handleReceived(d, received(email), NOW)).toBe('done');
+      expect(writer!.write).not.toHaveBeenCalled();
+      expect(await queued(s.conv.id)).toHaveLength(0);
+      expect(await conversationRow(s.conv.id)).toMatchObject({ status: 'open', flagReason: 'unsure' });
+      expect(alert).toHaveBeenCalledTimes(1);
+      expect(alert.mock.calls[0]![0]).toMatchObject({ kind: 'seller_needs_person', context: { reason: 'unsure' } });
+      assertNoPii(alert, log);
+    });
+
+    it('a reply from an address Salesforce opted out on ANOTHER record never reaches the writer: flagged unsure (M4, I2b)', async () => {
+      const s = await seedSeller();
+      await seedRecord(db, s.orgId, snapshot({ sfRecordId: leadId(800_000 + (seq += 1)), email: ` ${ADDRESS} ` }), { sfEmailOptOut: true });
+      const email = reply(s);
+      const { d, writer } = deps({ emails: [email] });
+      await handleReceived(d, received(email), NOW);
+      expect(writer!.write).not.toHaveBeenCalled();
+      expect((await conversationRow(s.conv.id)).flagReason).toBe('unsure');
+    });
+
+    it('an opt-out from a suppressed address is still an opt-out (the blocked-address rule comes after it)', async () => {
+      const s = await seedSeller();
+      await suppressAddress(db, { orgId: s.orgId, address: ADDRESS, reason: 'opted_out', conversationId: null });
+      const email = reply(s, { subject: 'unsubscribe', text: '' });
+      await handleReceived(deps({ emails: [email] }).d, received(email), NOW);
+      expect(await conversationRow(s.conv.id)).toMatchObject({ status: 'stopped', stopReason: 'opted_out', flagReason: null });
     });
 
     it('a stopped conversation records the reply only', async () => {

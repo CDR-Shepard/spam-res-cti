@@ -22,15 +22,24 @@
  *    A tick that dies after Resend accepted an email leaves the row `sending`; after 5 minutes the reaper
  *    puts it back and the next claim re-sends it under the same key, so the seller gets one copy.
  *
+ * A seller's ANSWER (a `reply` or a `holding` email) canceled because Sam's email is off or paused for the tenant, or
+ * because of the daily cap, is not the seller's choice: the seller wrote and is waiting. The conversation is flagged
+ * `unsure` in the cancel's own transaction, and once it has committed a seller_needs_person alert (ids only) asks a
+ * person to answer, so a seller's reply is never dropped silently. A first email (nobody is waiting on it) and an
+ * email on a practice conversation (it goes to the admin) are canceled as before; an already flagged conversation
+ * keeps its reason and raises no second alert.
+ *
  * Logs carry ids, block codes and counts only: never an address, a name, a subject or any text.
  */
 import { sql, type SQL } from 'drizzle-orm';
 import type { Db } from '@cti/db';
+import { dispatchAlert, type AlertEvent } from '../alerts.js';
 import type { AppConfig } from '../config.js';
+import { flagConversation } from '../conversations/store.js';
 import type { RunnerLogger } from '../jobs/boss.js';
 import { replyAddress } from './addresses.js';
 import { describeError } from './errors.js';
-import { emailSendAt, evaluateSend } from './outbox.js';
+import { emailSendAt, evaluateSend, type SendBlock, type SendEvaluation } from './outbox.js';
 import { renderEmail } from './render.js';
 import type { ResendClient, ResendSendResult } from './resend-client.js';
 
@@ -50,7 +59,14 @@ export interface SendDeps {
   now: Date;
   log: RunnerLogger;
   batch?: number;
+  /** Where a seller_needs_person alert goes (an answer canceled for the switch or the cap); the shared dispatcher when absent. */
+  alert?: (event: AlertEvent) => Promise<void>;
 }
+
+/** Blocks that are about the tenant or the cap, not the seller: a seller's answer canceled for one of them needs a person. */
+const NEEDS_PERSON_BLOCKS: ReadonlySet<SendBlock> = new Set<SendBlock>(['paused', 'disabled', 'daily_cap']);
+/** Emails that answer a seller who wrote: Sam's reply, or the thank-you of a flag. */
+const ANSWER_PURPOSES: ReadonlySet<string> = new Set(['reply', 'holding']);
 
 export interface SendCounts {
   sent: number;
@@ -240,15 +256,49 @@ async function wait(deps: SendDeps, c: Claim, opening: Date): Promise<Outcome> {
   return moved ? 'deferred' : 'lost';
 }
 
+/** Sent after the cancel committed; a failing alert is logged by name and never fails the tick. */
+async function raiseUnanswered(deps: SendDeps, c: Claim, e: SendEvaluation, block: SendBlock): Promise<void> {
+  const alert = deps.alert ?? ((event: AlertEvent) => dispatchAlert(deps.log, event));
+  try {
+    await alert({
+      kind: 'seller_needs_person',
+      severity: 'warning',
+      orgId: c.orgId,
+      message: `Sam's answer to a seller was not sent (${block}); a person needs to answer them.`,
+      context: { conversationId: e.conversationId, emailId: c.id, reason: 'unsure', block },
+    });
+  } catch (err) {
+    deps.log.error({ alert: 'seller_needs_person', emailId: c.id, ...describeError(err) }, 'seller_needs_person alert failed');
+  }
+}
+
+/**
+ * Cancels a row this claim holds, with the block as `last_error`. A seller's answer canceled for the switch or the cap
+ * also flags the conversation `unsure` in the same transaction, and alerts once that has committed (see the module comment).
+ */
+async function cancel(deps: SendDeps, c: Claim, e: SendEvaluation, block: SendBlock): Promise<Outcome> {
+  const { db, now, log } = deps;
+  log.info({ emailId: c.id, block }, 'email canceled');
+  const canceled = sql`status = 'canceled', last_error = ${block}`;
+  if (!(NEEDS_PERSON_BLOCKS.has(block) && ANSWER_PURPOSES.has(e.purpose) && !e.practice)) {
+    return (await settle(db, c, now, canceled)) ? 'canceled' : 'lost';
+  }
+  const result = await db.transaction(async (tx) => {
+    const t = tx as unknown as Db;
+    if (!(await settle(t, c, now, canceled))) return 'lost' as const;
+    return (await flagConversation(t, { conversationId: e.conversationId, reason: 'unsure', now })) ? ('flagged' as const) : ('canceled' as const);
+  });
+  if (result === 'lost') return 'lost';
+  if (result === 'flagged') await raiseUnanswered(deps, c, e, block);
+  return 'canceled';
+}
+
 /** Gate one claimed row, then send it. */
 async function work(deps: SendDeps, c: Claim): Promise<Outcome> {
-  const { db, now, log } = deps;
-  const { block, phones } = await evaluateSend(db, c.id, now);
-  if (block === 'outside_window') return wait(deps, c, emailSendAt(phones, now));
-  if (block !== null) {
-    log.info({ emailId: c.id, block }, 'email canceled');
-    return (await settle(db, c, now, sql`status = 'canceled', last_error = ${block}`)) ? 'canceled' : 'lost';
-  }
+  const evaluation = await evaluateSend(deps.db, c.id, deps.now);
+  const { block } = evaluation;
+  if (block === 'outside_window') return wait(deps, c, emailSendAt(evaluation.phones, deps.now));
+  if (block !== null) return cancel(deps, c, evaluation, block);
   return deliver(deps, c);
 }
 

@@ -1,11 +1,13 @@
 /** Real Postgres: the `ai_call.results` tick turns finished calls into hand-offs, exits and next-day retries. */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { and, eq, sql } from 'drizzle-orm';
+import type pg from 'pg';
 import { schema, type Db } from '@cti/db';
 import { enrollmentById, seedAiCall, seedReleasedLead, touchById } from '../test/ai-call-seed.js';
 import { seedAiCallCampaign, seedUser } from '../test/call-plan-seed.js';
 import { createTestDb, pgLane } from '../test/pg.js';
 import type { AlertEvent } from '../alerts.js';
+import { ensureConversation } from '../conversations/store.js';
 import { nextAttemptAt } from './pacing-rules.js';
 import { collectAiCallResults } from './results.js';
 
@@ -24,9 +26,10 @@ const quiet = { info: () => {}, warn: () => {}, error: () => {} };
 
 describe.skipIf(!pgLane)('collectAiCallResults (real Postgres)', () => {
   let db: Db;
+  let pool: pg.Pool;
   let drop: () => Promise<void>;
   beforeAll(async () => {
-    ({ db, drop } = await createTestDb());
+    ({ db, pool, drop } = await createTestDb());
   }, 120_000);
   afterAll(async () => {
     await drop?.();
@@ -293,6 +296,44 @@ describe.skipIf(!pgLane)('collectAiCallResults (real Postgres)', () => {
       expect(own).toMatchObject({ status: 'stopped', stopReason: 'asked_to_stop' });
       for (const other of others) expect(await enrollmentById(db, other.enrollmentId)).toMatchObject({ status: 'active' });
       expect(alerts).toEqual([expect.objectContaining({ kind: 'seller_needs_person', orgId: lead.orgId, context: { conversationId: own!.id, sharedRecordCount: 7 } })]);
+    });
+
+    /** Polls until a backend waits on `holder`'s transaction (filtered by its pid, so another suite's waits never count). */
+    async function untilBlockedBy(holder: pg.PoolClient): Promise<void> {
+      const { rows: pidRows } = await holder.query('select pg_backend_pid() as pid');
+      const pid = (pidRows[0] as { pid: number }).pid;
+      for (let i = 0; i < 400; i += 1) {
+        const { rows } = await pool.query('select count(*)::int as n from pg_stat_activity where $1 = any(pg_blocking_pids(pid))', [pid]);
+        if ((rows[0] as { n: number }).n > 0) return;
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      throw new Error('the results tick never waited on the conversation');
+    }
+
+    it('takes the conversation before the enrollment row, the order stopSeller takes them, so the two cannot deadlock (M7)', async () => {
+      const lead = await placed('completed', 'not_interested');
+      const conversation = await ensureConversation(db, { orgId: lead.orgId, crmRecordId: lead.crmRecordId });
+      const holder = await pool.connect();
+      let collect: Promise<unknown> = Promise.resolve();
+      let probe: unknown = 'not run';
+      try {
+        await holder.query('begin');
+        await holder.query('select id from seller_conversations where id = $1 for update', [conversation.id]);
+        collect = collectAiCallResults(db, NOW, quiet);
+        await untilBlockedBy(holder);
+        // The tick waits on the conversation: it must not hold the enrollment row yet (a stop holding the
+        // conversation goes on to lock that enrollment, and would deadlock with it).
+        probe = await pool.query('select id from campaign_enrollments where id = $1 for no key update nowait', [lead.enrollmentId]).then(
+          () => null,
+          (err: unknown) => (err as { code?: string }).code,
+        );
+      } finally {
+        await holder.query('commit');
+        holder.release();
+        await collect;
+      }
+      expect(probe).toBeNull();
+      expect(await enrollmentById(db, lead.enrollmentId)).toMatchObject({ status: 'exited', exitReason: 'not_interested', touchesDone: 1 });
     });
 
     it('a conversation failure leaves the call uncounted, to be tried again next tick', async () => {

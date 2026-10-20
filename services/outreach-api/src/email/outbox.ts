@@ -286,10 +286,26 @@ async function firstBlock(db: Db, f: SendFacts, emailId: string, now: Date): Pro
   return emailSendAt(f.phones, now).getTime() > now.getTime() ? 'outside_window' : null;
 }
 
-/** The block and the seller's phones it was judged on (the tick needs them again to place an `outside_window` email). */
-export async function evaluateSend(db: Db, emailId: string, now: Date): Promise<{ block: SendBlock | null; phones: Array<{ e164: string }> }> {
+/** What the send tick learns about one due email: the block, and the facts it acts on afterwards. */
+export interface SendEvaluation {
+  block: SendBlock | null;
+  /** The seller's phones the block was judged on (to place an `outside_window` email). */
+  phones: Array<{ e164: string }>;
+  conversationId: string;
+  purpose: string;
+  /** The email is on an admin's practice conversation. */
+  practice: boolean;
+}
+
+export async function evaluateSend(db: Db, emailId: string, now: Date): Promise<SendEvaluation> {
   const facts = await loadFacts(db, emailId);
-  return { block: await firstBlock(db, facts, emailId, now), phones: facts.phones };
+  return {
+    block: await firstBlock(db, facts, emailId, now),
+    phones: facts.phones,
+    conversationId: facts.conversationId,
+    purpose: facts.purpose,
+    practice: facts.practiceUserId !== null,
+  };
 }
 
 /**
