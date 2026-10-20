@@ -6,8 +6,9 @@
  * the campaign to be an active ai_call campaign, the enrollment active and `queued`, the
  * touch's plan to be the enrollment's approved plan, consent read as exactly `yes` by that
  * plan's own research, no do-not-contact flag pending on the record and none on the plan that
- * nobody dismissed, and the lead still ticked in the campaign's lead picker. The enrollment
- * row is locked FOR SHARE first, in its own statement, so the claim's snapshot is taken after
+ * nobody dismissed, the lead still ticked in the campaign's lead picker, and the seller's real conversation
+ * not `stopped` (an opt-out, a complaint or a "not interested" on any channel ends every call to the seller).
+ * The enrollment row is locked FOR SHARE first, in its own statement, so the claim's snapshot is taken after
  * any writer holding it (an approval, a hold, an exit) has committed.
  */
 import { and, eq, sql } from 'drizzle-orm';
@@ -115,7 +116,8 @@ const claimable = sql`
   and (not p.dnc_flagged or p.dnc_dismissed_at is not null)
   and cr.id = p.research_id and cr.snapshot ->> 'consent' = 'yes'
   and not ${DNC_PENDING_SQL}
-  and exists (select 1 from campaign_selections cs where cs.campaign_id = e.campaign_id and cs.org_id = e.org_id and cs.sf_record_id = r.sf_record_id)`;
+  and exists (select 1 from campaign_selections cs where cs.campaign_id = e.campaign_id and cs.org_id = e.org_id and cs.sf_record_id = r.sf_record_id)
+  and not exists (select 1 from seller_conversations sc where sc.org_id = e.org_id and sc.crm_record_id = e.crm_record_id and sc.practice_user_id is null and sc.status = 'stopped')`;
 
 /**
  * `planned → dialing`: one more attempt, and the key kept from a retry that may still be in cti-api, or a new one:

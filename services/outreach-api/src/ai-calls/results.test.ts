@@ -1,6 +1,6 @@
 /** Real Postgres: the `ai_call.results` tick turns finished calls into hand-offs, exits and next-day retries. */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { and, eq } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 import { schema, type Db } from '@cti/db';
 import { enrollmentById, seedAiCall, seedReleasedLead, touchById } from '../test/ai-call-seed.js';
 import { seedAiCallCampaign, seedUser } from '../test/call-plan-seed.js';
@@ -227,6 +227,74 @@ describe.skipIf(!pgLane)('collectAiCallResults (real Postgres)', () => {
     expect(await touchById(db, lead.touchId)).toMatchObject({ outcome: 'voicemail', countedAt: NOW });
     expect((await touchesOf(lead.enrollmentId)).map((t) => t.seq)).toEqual([1]);
     expect(res.retried).toBe(0);
+  });
+
+  describe("the seller's conversation follows the counted call", () => {
+    const conversationsOf = (orgId: string, crmRecordId: string) =>
+      db
+        .select()
+        .from(schema.sellerConversations)
+        .where(and(eq(schema.sellerConversations.orgId, orgId), eq(schema.sellerConversations.crmRecordId, crmRecordId)));
+    const statusEventsOf = (conversationId: string) =>
+      db.select().from(schema.conversationEvents).where(and(eq(schema.conversationEvents.conversationId, conversationId), eq(schema.conversationEvents.kind, 'status')));
+
+    it("counting an appointment_set call leaves the record's conversation booked", async () => {
+      const lead = await placed('completed', 'appointment_set');
+      await collectAiCallResults(db, NOW, quiet);
+      expect(await conversationsOf(lead.orgId, lead.crmRecordId)).toMatchObject([{ status: 'booked', stopReason: null, practiceUserId: null }]);
+      expect(await enrollmentById(db, lead.enrollmentId)).toMatchObject({ status: 'handed_off' });
+    });
+
+    it('a not_interested call stops the conversation with that reason, and the results tick still exits the enrollment', async () => {
+      const lead = await placed('completed', 'not_interested');
+      await collectAiCallResults(db, NOW, quiet);
+      expect(await conversationsOf(lead.orgId, lead.crmRecordId)).toMatchObject([{ status: 'stopped', stopReason: 'not_interested' }]);
+      expect(await enrollmentById(db, lead.enrollmentId)).toMatchObject({ status: 'exited', exitReason: 'not_interested', touchesDone: 1 });
+    });
+
+    it('an outcome that does not move the conversation leaves none behind', async () => {
+      const lead = await placed('completed', 'voicemail');
+      await collectAiCallResults(db, NOW, quiet);
+      expect(await conversationsOf(lead.orgId, lead.crmRecordId)).toEqual([]);
+    });
+
+    it('a seller who has already booked stays booked on another appointment_set, with one status event', async () => {
+      const lead = await placed('completed', 'appointment_set');
+      await collectAiCallResults(db, NOW, quiet);
+      await db.update(schema.touches).set({ countedAt: null }).where(eq(schema.touches.id, lead.touchId));
+      await collectAiCallResults(db, new Date(NOW.getTime() + 60_000), quiet);
+      const [conversation] = await conversationsOf(lead.orgId, lead.crmRecordId);
+      expect(conversation).toMatchObject({ status: 'booked' });
+      expect(await statusEventsOf(conversation!.id)).toHaveLength(1);
+    });
+
+    it('an enrollment held in needs_review does not keep a not_interested seller from being stopped', async () => {
+      const lead = await placed('completed', 'not_interested', { enrollment: 'needs_review' });
+      await collectAiCallResults(db, NOW, quiet);
+      expect(await conversationsOf(lead.orgId, lead.crmRecordId)).toMatchObject([{ status: 'stopped', stopReason: 'not_interested' }]);
+    });
+
+    it('a call that is not counted (a practice call) touches no conversation', async () => {
+      const lead = await placed('completed', 'appointment_set');
+      await db.update(schema.aiCalls).set({ isTest: true, practice: true }).where(eq(schema.aiCalls.id, lead.aiCallId));
+      await collectAiCallResults(db, NOW, quiet);
+      expect(await conversationsOf(lead.orgId, lead.crmRecordId)).toEqual([]);
+    });
+
+    it('a conversation failure leaves the call uncounted, to be tried again next tick', async () => {
+      const lead = await placed('completed', 'appointment_set');
+      // The conversation's status event cannot be written, so the whole step (the count included) rolls back.
+      await db.execute(sql`alter table conversation_events add constraint conversation_events_test_fail check (kind <> 'status') not valid`);
+      try {
+        await collectAiCallResults(db, NOW, quiet);
+        expect(await touchById(db, lead.touchId)).toMatchObject({ outcome: null, countedAt: null });
+        expect(await enrollmentById(db, lead.enrollmentId)).toMatchObject({ status: 'active', touchesDone: 0 });
+      } finally {
+        await db.execute(sql`alter table conversation_events drop constraint conversation_events_test_fail`);
+      }
+      await collectAiCallResults(db, NOW, quiet);
+      expect(await touchById(db, lead.touchId)).toMatchObject({ outcome: 'appointment_set', countedAt: NOW });
+    });
   });
 
   it('A2: a plan approved for another enrollment never carries a retry', async () => {

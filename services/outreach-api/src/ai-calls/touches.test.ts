@@ -1,4 +1,5 @@
 /** Real Postgres: the AI call touch claims, counts and settles behind the `ai_call.place` tick. */
+import { randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { eq, sql } from 'drizzle-orm';
 import { schema, type Db } from '@cti/db';
@@ -163,6 +164,53 @@ describe.skipIf(!pgLane)('AI call touches (real Postgres)', () => {
       const lead = await seedReleasedLead(db, base);
       await db.update(schema.callPlans).set({ dncFlagged: true, dncDismissedAt: NOW }).where(eq(schema.callPlans.id, lead.planId!));
       expect(await claimAiTouch(db, lead.touchId, NOW)).not.toBeNull();
+    });
+
+    describe("the seller's conversation (a stopped one is never called)", () => {
+      const conversationFor = (lead: { orgId: string; crmRecordId: string }, status: string, practiceUserId: string | null = null) =>
+        db.insert(schema.sellerConversations).values({
+          orgId: lead.orgId,
+          crmRecordId: lead.crmRecordId,
+          practiceUserId,
+          token: randomUUID().replaceAll('-', ''),
+          status: status as 'open' | 'booked' | 'stopped',
+        });
+
+      it("refuses a touch whose record's conversation is stopped", async () => {
+        const base = await seedAiCallCampaign(db, 'active');
+        const lead = await seedReleasedLead(db, base);
+        await conversationFor(lead, 'stopped');
+        expect(await claimAiTouch(db, lead.touchId, NOW)).toBeNull();
+        expect((await touchById(db, lead.touchId)).status).toBe('planned');
+      });
+
+      it("claims a touch whose record's conversation is open or booked", async () => {
+        const base = await seedAiCallCampaign(db, 'active');
+        const open = await seedReleasedLead(db, base);
+        const booked = await seedReleasedLead(db, base);
+        await conversationFor(open, 'open');
+        await conversationFor(booked, 'booked');
+        expect(await claimAiTouch(db, open.touchId, NOW)).not.toBeNull();
+        expect(await claimAiTouch(db, booked.touchId, NOW)).not.toBeNull();
+      });
+
+      it('claims a touch whose record has no conversation, or only a stopped PRACTICE conversation', async () => {
+        const base = await seedAiCallCampaign(db, 'active');
+        const none = await seedReleasedLead(db, base);
+        const practiced = await seedReleasedLead(db, base);
+        const admin = await seedUser(db, base.orgId);
+        await conversationFor(practiced, 'stopped', admin);
+        expect(await claimAiTouch(db, none.touchId, NOW)).not.toBeNull();
+        expect(await claimAiTouch(db, practiced.touchId, NOW)).not.toBeNull();
+      });
+
+      it("is not stopped by another record's conversation", async () => {
+        const base = await seedAiCallCampaign(db, 'active');
+        const lead = await seedReleasedLead(db, base);
+        const other = await seedReleasedLead(db, base);
+        await conversationFor(other, 'stopped');
+        expect(await claimAiTouch(db, lead.touchId, NOW)).not.toBeNull();
+      });
     });
 
     it('CF-3: a touch carrying a plan from before a reactivation (superseded) is never claimed', async () => {

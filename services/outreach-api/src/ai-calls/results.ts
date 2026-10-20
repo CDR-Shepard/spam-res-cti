@@ -6,13 +6,17 @@
  * Each call is counted once: `touches.counted_at` is set by a compare-and-swap, in the same
  * transaction as the step, so a second run (or a second tick running at once) changes nothing.
  * The step itself applies only to an enrollment still `active`: one held in Needs Review
- * meanwhile keeps its hold, and only the touch's outcome is recorded.
+ * meanwhile keeps its hold, and only the touch's outcome is recorded. What the call says about
+ * the SELLER (an appointment books the seller's conversation, a not-interested or do-not-call
+ * stops it) is recorded in that same transaction whatever the enrollment's state: the seller said
+ * it, held or not.
  */
 import { inArray, sql } from 'drizzle-orm';
 import { AiCallOutcome } from '@cti/contracts';
 import { schema, type Db } from '@cti/db';
 import type { RunnerLogger } from '../jobs/boss.js';
 import { outreachSettings, type OutreachSettings } from '../settings.js';
+import { setStatusFromCall } from '../conversations/store.js';
 import { enqueueWritebackSql } from '../writeback/store.js';
 import { nextStepFor, TERMINAL_AI_CALL_STATUSES, type NextStep } from './outcomes.js';
 import { nextAttemptAt } from './pacing-rules.js';
@@ -34,6 +38,7 @@ interface Finished {
   call_plan_id: string | null;
   requested_by: string | null;
   org_id: string;
+  crm_record_id: string;
   outcome: string | null;
   phones: Array<{ field: string; e164: string }>;
   answered: number;
@@ -45,7 +50,7 @@ const errName = (err: unknown): string => (err instanceof Error ? err.name : typ
 
 async function finishedCalls(db: Db): Promise<Finished[]> {
   const result = await db.execute(sql`
-    select t.id as touch_id, t.ai_call_id, t.enrollment_id, t.call_plan_id, t.requested_by, t.org_id, a.outcome, r.phones,
+    select t.id as touch_id, t.ai_call_id, t.enrollment_id, t.call_plan_id, t.requested_by, t.org_id, r.id as crm_record_id, a.outcome, r.phones,
            (select count(*)::int from touches x where x.enrollment_id = t.enrollment_id and x.channel = 'ai_call' and x.status = 'sent') as answered
     from touches t
     join ai_calls a on a.id = t.ai_call_id and a.org_id = t.org_id and a.is_test = false
@@ -105,7 +110,9 @@ async function applyStep(tx: Db, f: Finished, step: NextStep, now: Date): Promis
 
 /**
  * One finished call in one transaction: counted once, its Salesforce write-back enqueued (plan 1D; one row per call, ever),
- * then the step. Returns what happened to the enrollment, if anything.
+ * the seller's conversation updated from the outcome, then the step. Returns what happened to the enrollment, if anything.
+ * `finishedCalls` returns real calls only (`is_test = false`), so a test or practice call never reaches the conversation.
+ * The conversation's stop leaves this call's own enrollment to the step (it exits it itself) and sweeps the seller's others.
  */
 async function collectOne(db: Db, f: Finished, settings: OutreachSettings, now: Date): Promise<keyof ResultCounts | null> {
   const outcome = AiCallOutcome.safeParse(f.outcome);
@@ -117,7 +124,9 @@ async function collectOne(db: Db, f: Finished, settings: OutreachSettings, now: 
     await tx.execute(sql`
       update campaign_enrollments set touches_done = touches_done + 1, updated_at = ${iso(now)} where id = ${f.enrollment_id}::uuid`);
     await tx.execute(enqueueWritebackSql({ touchId: f.touch_id, now, writebackOn: settings.aiCallWriteback }));
-    const step = nextStepFor(outcome.success ? outcome.data : null, f.answered, settings.aiCallMaxAttempts);
+    const callOutcome = outcome.success ? outcome.data : null;
+    await setStatusFromCall(tx as unknown as Db, { orgId: f.org_id, crmRecordId: f.crm_record_id, outcome: callOutcome, now });
+    const step = nextStepFor(callOutcome, f.answered, settings.aiCallMaxAttempts);
     return applyStep(tx as unknown as Db, f, step, now);
   });
 }
