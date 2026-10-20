@@ -3,8 +3,8 @@
  * that make an unsubscribe one click.
  *
  * Every message ends with the same footer (Sam's name, who she works for, a postal address, and a
- * working unsubscribe link; owner, 2026-10-20: no "AI assistant" line). It is what keeps the channel honest and what CAN-SPAM and the mailbox
- * providers expect, so it is built here, once, and never by the draft. The footer's fixed lines are
+ * working unsubscribe link; owner, 2026-10-20: no "AI assistant" line). It is what CAN-SPAM and the
+ * mailbox providers expect, so it is built here, once, and never by the draft. The footer's fixed lines are
  * exported so reply parsing (inbound-text.ts) strips exactly what this file writes: a quoted copy of
  * our own "unsubscribe here" line must never read as the seller asking to stop. The HTML has no
  * images, no tracking pixel and one link, so there is nothing to block or to scrub.

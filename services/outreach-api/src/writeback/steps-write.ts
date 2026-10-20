@@ -58,7 +58,7 @@ export async function appointmentStep(run: RowRun, plan: WritePlan): Promise<{ r
       ...(owner ? { ownerTimeZone: owner.timeZone } : {}),
       now: run.deps.now,
       maps: run.deps.maps,
-      officeAddress: regionStartAddress(bookingRouting(booking), a.booked.region),
+      startAddress: regionStartAddress(bookingRouting(booking), a.booked.region),
       log: run.deps.log,
     });
     const eventId = result.kind === 'created' || result.kind === 'existing' ? result.eventId : undefined;

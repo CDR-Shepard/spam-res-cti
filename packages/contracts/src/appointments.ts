@@ -281,7 +281,8 @@ export const RoutingReadiness = z.object({
       key: RegionKey,
       counties: z.array(z.string()),
       startTimes: z.array(z.string()),
-      startAddress: z.string(),
+      /** Optional only so an outreach-api older than the region starts still parses; the card then shows `officeAddress`. */
+      startAddress: z.string().optional(),
       reps: z.array(SalesforceUserOption),
     }),
   ),

@@ -144,6 +144,16 @@ export async function ownAddress(db: Db, userId: string): Promise<string | null>
 }
 
 /**
+ * The block the page shows: the send block, except that behind the tenant's switch a seller block (which stops the
+ * draft too) is the one shown, so the page offers a preview only when the draft would be written.
+ */
+async function pageEmailBlock(db: Db, setup: EmailSetup, i: { orgId: string; record: SellerRecord; conversation: ConversationState | null }): Promise<EmailBlock | null> {
+  const block = await sellerEmailBlock(db, setup, i);
+  if (block !== 'disabled' && block !== 'paused') return block;
+  return (await sellerEmailBlock(db, setup, i, 'draft')) ?? block;
+}
+
+/**
  * The seller's page. `isAdmin` decides `mayEmail` (only admins send); `mayChangeHandler` is the caller's (the route
  * has already refused anyone who is neither the record's owner nor an admin).
  */
@@ -155,7 +165,7 @@ export async function conversationView(
   const { record } = i;
   const conversation = await realConversation(db, i.orgId, record.id);
   const [emailBlock, items, connection] = await Promise.all([
-    sellerEmailBlock(db, setup, { orgId: i.orgId, record, conversation }),
+    pageEmailBlock(db, setup, { orgId: i.orgId, record, conversation }),
     readTimeline(db, { orgId: i.orgId, crmRecordId: record.id, conversationId: conversation?.id ?? null }),
     loadConnection(db, i.orgId),
   ]);

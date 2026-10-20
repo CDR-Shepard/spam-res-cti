@@ -56,7 +56,7 @@ export function RegionsSection({ routing }: { routing: RoutingReadiness }) {
         </Table>
       </div>
       {unstaffed.map((r) => <p key={r.key} className="text-sm font-medium text-destructive">{noActiveRepWords(r.key)}</p>)}
-      {routing.regions.map((r) => <p key={r.key} className="text-xs text-muted-foreground">{`${r.key} reps start from ${r.startAddress}.`}</p>)}
+      {routing.regions.map((r) => <p key={r.key} className="text-xs text-muted-foreground">{`${r.key} reps start from ${r.startAddress ?? routing.officeAddress}.`}</p>)}
       {!routing.mapsConfigured && <p className="text-sm font-medium text-destructive">{MAPS_MISSING}</p>}
     </section>
   );

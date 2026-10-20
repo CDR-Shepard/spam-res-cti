@@ -9,8 +9,8 @@
  * fence, so no `<` or `>` of any form (full-width, split by a zero-width character) survives in seller text and no
  * tag of any spelling can open or close a fence.
  *
- * "GG Homes'" is the owner's wording for a company ending in s (possessive() in render.ts, also used by the
- * footer), so the model's own sentence and the footer's say the same thing.
+ * "GG Homes'" is the owner's wording for a company ending in s (possessive() in render.ts): rule 1 uses it for the
+ * answer Sam gives when a seller asks whether she is an AI.
  */
 import { neutraliseSellerText } from '@cti/contracts';
 import { possessive } from './render.js';

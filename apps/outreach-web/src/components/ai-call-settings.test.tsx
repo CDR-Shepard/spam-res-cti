@@ -160,13 +160,15 @@ describe('AiCallSettingsCard', () => {
         regions: [
           ROUTING.regions[0]!,
           { ...ROUTING.regions[1]!, reps: [{ ...seth, isActive: false }, { ...thomas, isActive: false }] },
-          { key: 'IE', counties: ['Invented'], startTimes: ['10:00'], startAddress: OFFICE, reps: [] },
+          { key: 'IE', counties: ['Invented'], startTimes: ['10:00'], reps: [] },
         ],
       };
       stubApi({ 'GET /api/settings/ai-calls': settings(), [idsUrl([GRANT])]: [grant], [READINESS]: { ...READY, routing } });
       renderWithProviders(<AiCallSettingsCard />, { isAdmin: true });
       expect(await screen.findByText('No active rep: no SD times are offered.')).toHaveClass('text-destructive');
       expect(screen.getByText('No active rep: no IE times are offered.')).toHaveClass('text-destructive');
+      // An outreach-api older than the region starts sends none: the region reads as starting from the office.
+      expect(screen.getByText(`IE reps start from ${OFFICE}.`)).toBeInTheDocument();
       expect(screen.queryByText('No active rep: no LA times are offered.')).not.toBeInTheDocument();
       const table = screen.getByRole('table', { name: 'Booking regions' });
       expect(table.compareDocumentPosition(screen.getByText('No active rep: no SD times are offered.')) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();

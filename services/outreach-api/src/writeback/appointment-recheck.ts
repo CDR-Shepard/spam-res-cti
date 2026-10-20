@@ -38,7 +38,8 @@ export interface RecheckInput {
   bufferMinutes: number;
   ownerTimeZone?: string;
   maps: MapsClient | null;
-  officeAddress: string;
+  /** Where the booked rep starts their day: the booked region's start (regionStartAddress). */
+  startAddress: string;
   log: RecheckLog;
 }
 
@@ -67,7 +68,7 @@ async function bufferedCheck(client: SalesforceClient, i: RecheckInput, w: Windo
  * A fresh timer per booking: one whose Routes failed stays on straight lines for its life.
  */
 async function driveConflict(i: RecheckInput & { maps: MapsClient; location: string }, busy: readonly Busy[], start: Date): Promise<CalendarConflict | null> {
-  const office: Place = { address: i.officeAddress };
+  const office: Place = { address: i.startAddress };
   try {
     const reaches = await repCanReach({ busy, start, slackMinutes: DRIVE_SLACK_MINUTES, property: { address: i.location }, office, drive: driveTimer(i.maps, office, i.log) });
     return reaches ? null : { kind: 'conflict', reason: 'drive' };

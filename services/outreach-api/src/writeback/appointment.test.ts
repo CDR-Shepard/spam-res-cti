@@ -37,7 +37,7 @@ function org(routes: WriteQueryRoute[] = []) {
   return fakeSfWrites({ queries: [...routes, [EXISTING_EVENT, []], [HOLD_LOOKUP, []], [BUSY, []], [TASK_LOOKUP, []]] });
 }
 const book = (f: ReturnType<typeof org>, booked = PHONE, bufferMinutes = 30) =>
-  bookOpportunity(f.client, { oppId: OPP, booked, location: ADDRESS, aiCallId: AI_CALL, sellerTimeZone: 'America/Chicago', bufferMinutes, maps: null, officeAddress: OFFICE, log: quiet });
+  bookOpportunity(f.client, { oppId: OPP, booked, location: ADDRESS, aiCallId: AI_CALL, sellerTimeZone: 'America/Chicago', bufferMinutes, maps: null, startAddress: OFFICE, log: quiet });
 
 describe('bookingPassed (sweep D-25 N4: passed once its START has come)', () => {
   it.each<[string, boolean]>([
@@ -50,7 +50,7 @@ describe('bookingPassed (sweep D-25 N4: passed once its START has come)', () => 
   });
   it('a call already under way is not put on the calendar', async () => {
     const f = org();
-    expect(await bookOpportunity(f.client, { oppId: OPP, booked: PHONE, location: null, aiCallId: AI_CALL, sellerTimeZone: null, bufferMinutes: 0, maps: null, officeAddress: OFFICE, log: quiet, now: new Date('2026-10-07T18:05:00.000Z') })).toEqual({ kind: 'expired' });
+    expect(await bookOpportunity(f.client, { oppId: OPP, booked: PHONE, location: null, aiCallId: AI_CALL, sellerTimeZone: null, bufferMinutes: 0, maps: null, startAddress: OFFICE, log: quiet, now: new Date('2026-10-07T18:05:00.000Z') })).toEqual({ kind: 'expired' });
     expect(f.creates).toEqual([]);
   });
 });
@@ -59,9 +59,9 @@ describe('bookOpportunity', () => {
   it('I-1: the booked time has passed: an Event an earlier attempt made is still found; otherwise expired, no calendar read, no create', async () => {
     const late = new Date('2026-10-07T19:00:00.000Z');
     const f = org([[EXISTING_EVENT, [{ Id: '00U8X00000Evnt1QAA' }]]]);
-    expect(await bookOpportunity(f.client, { oppId: OPP, booked: PHONE, location: null, aiCallId: AI_CALL, sellerTimeZone: null, bufferMinutes: 0, maps: null, officeAddress: OFFICE, log: quiet, now: late })).toEqual({ kind: 'existing', eventId: '00U8X00000Evnt1QAA' });
+    expect(await bookOpportunity(f.client, { oppId: OPP, booked: PHONE, location: null, aiCallId: AI_CALL, sellerTimeZone: null, bufferMinutes: 0, maps: null, startAddress: OFFICE, log: quiet, now: late })).toEqual({ kind: 'existing', eventId: '00U8X00000Evnt1QAA' });
     const g = org();
-    expect(await bookOpportunity(g.client, { oppId: OPP, booked: PHONE, location: null, aiCallId: AI_CALL, sellerTimeZone: null, bufferMinutes: 0, maps: null, officeAddress: OFFICE, log: quiet, now: late })).toEqual({ kind: 'expired' });
+    expect(await bookOpportunity(g.client, { oppId: OPP, booked: PHONE, location: null, aiCallId: AI_CALL, sellerTimeZone: null, bufferMinutes: 0, maps: null, startAddress: OFFICE, log: quiet, now: late })).toEqual({ kind: 'expired' });
     expect(g.soql.some((q) => BUSY.test(q))).toBe(false);
     expect(g.creates).toEqual([]);
   });
@@ -167,7 +167,7 @@ describe('bookOpportunity', () => {
 
   it('refuses a malformed id before any Salesforce call', async () => {
     const f = org();
-    await expect(bookOpportunity(f.client, { oppId: "006'; x", booked: PHONE, location: null, aiCallId: AI_CALL, sellerTimeZone: null, bufferMinutes: 0, maps: null, officeAddress: OFFICE, log: quiet })).rejects.toThrow(RangeError);
+    await expect(bookOpportunity(f.client, { oppId: "006'; x", booked: PHONE, location: null, aiCallId: AI_CALL, sellerTimeZone: null, bufferMinutes: 0, maps: null, startAddress: OFFICE, log: quiet })).rejects.toThrow(RangeError);
     expect(f.log).toEqual([]);
   });
 });
@@ -254,7 +254,7 @@ const recorder = () => {
   return { warns, log: { warn: (o: Record<string, unknown>, m: string) => void warns.push([o, m]) } };
 };
 const bookRouted = (f: ReturnType<typeof org>, booked: BookedAppointment, maps: MapsClient | null, log: { warn(o: Record<string, unknown>, m: string): void } = quiet) =>
-  bookOpportunity(f.client, { oppId: OPP, booked, location: ADDRESS, aiCallId: AI_CALL, sellerTimeZone: null, bufferMinutes: 30, maps, officeAddress: OFFICE, log });
+  bookOpportunity(f.client, { oppId: OPP, booked, location: ADDRESS, aiCallId: AI_CALL, sellerTimeZone: null, bufferMinutes: 30, maps, startAddress: OFFICE, log });
 const busyReads = (f: ReturnType<typeof org>) => f.soql.filter((q) => BUSY.test(q));
 
 describe('bookOpportunity: high priority', () => {
@@ -333,7 +333,7 @@ describe('bookOpportunity: a routed booking (overlap with no buffer, then the dr
     const phone = { ...ROUTED, kind: 'phone' as const, slotId: 'p1' };
     expect((await bookRouted(org([[BUSY, [EARLIER]]]), phone, g.maps)).kind).toBe('created');
     const f = org([[BUSY, [EARLIER]]]);
-    expect((await bookOpportunity(f.client, { oppId: OPP, booked: ROUTED, location: '  ', aiCallId: AI_CALL, sellerTimeZone: null, bufferMinutes: 30, maps: g.maps, officeAddress: OFFICE, log: quiet })).kind).toBe('created');
+    expect((await bookOpportunity(f.client, { oppId: OPP, booked: ROUTED, location: '  ', aiCallId: AI_CALL, sellerTimeZone: null, bufferMinutes: 30, maps: g.maps, startAddress: OFFICE, log: quiet })).kind).toBe('created');
     expect(g.calls).toEqual([]);
   });
 

@@ -197,13 +197,13 @@ const firstCode = (r: CompositeResult): string => r.errors[0]?.statusCode ?? 'UN
 /**
  * The Event on the Opportunity: an existing one of ours, else (the time still ahead, the calendar still free) a new one. A
  * passed time, a conflict or a refusal creates nothing; the caller moves the stage to Followup and gives the owner a Task.
- * `maps` (null: no key) and `officeAddress` time the drive re-check of a routed booking; `log` gets ids and codes only.
+ * `maps` (null: no key) and `startAddress` (the rep's start for the day) time the drive re-check of a routed booking; `log` gets ids and codes only.
  */
 export async function bookOpportunity(
   client: SalesforceClient,
   i: {
     oppId: string; booked: BookedAppointment; location: string | null; aiCallId: string; sellerTimeZone: string | null; bufferMinutes: number;
-    ownerTimeZone?: string; now?: Date; maps: MapsClient | null; officeAddress: string; log: RecheckLog;
+    ownerTimeZone?: string; now?: Date; maps: MapsClient | null; startAddress: string; log: RecheckLog;
   },
 ): Promise<AppointmentResult> {
   const opp = checkId(i.oppId, 'oppId');
@@ -218,7 +218,7 @@ export async function bookOpportunity(
 
   const conflict = await recheckCalendar(client, {
     oppId: opp, aiCallId: i.aiCallId, owner, booked: i.booked, location: eventLocation(i.booked, i.location), bufferMinutes: i.bufferMinutes,
-    ...(i.ownerTimeZone === undefined ? {} : { ownerTimeZone: i.ownerTimeZone }), maps: i.maps, officeAddress: i.officeAddress, log: i.log,
+    ...(i.ownerTimeZone === undefined ? {} : { ownerTimeZone: i.ownerTimeZone }), maps: i.maps, startAddress: i.startAddress, log: i.log,
   });
   if (conflict !== null) return conflict;
 

@@ -210,6 +210,18 @@ describe.skipIf(!pgLane)('seller conversation routes (real Postgres)', () => {
       expect(await blocked({ recordOver: { sfEmailOptOut: true } })).toBe('sf_opt_out');
     });
 
+    it('with only the switch off the page says disabled; a seller block behind it, which stops the draft too, is the one shown', async () => {
+      const blocked = async (o: Parameters<typeof seedSeller>[0]) => {
+        const s = await seedSeller(o);
+        sessionFor(s.orgId, s.admin.id, true);
+        return (await get(s.sfRecordId)).json().emailBlock;
+      };
+      expect(await blocked({ settings: {} })).toBe('disabled');
+      expect(await blocked({ settings: {}, planStatus: 'proposed' })).toBe('not_approved');
+      expect(await blocked({ settings: {}, recordOver: { email: null } })).toBe('no_address');
+      expect(await blocked({ settings: { samEmail: { enabled: true, pausedAt: NOW.toISOString(), pausedReason: 'complaint' } }, recordOver: { sfEmailOptOut: true } })).toBe('sf_opt_out');
+    });
+
     it('Salesforce Email Opt Out on ANOTHER record with the same address (any case) blocks the email too: sf_opt_out (I2b)', async () => {
       const s = await seedSeller();
       await seedRecord(t.db, s.orgId, snapshot({ sfRecordId: leadId(880_000 + (sellerSeq += 1)), email: ` ${SELLER_EMAIL.toUpperCase()} ` }), { sfEmailOptOut: true });
@@ -354,6 +366,15 @@ describe.skipIf(!pgLane)('seller conversation routes (real Postgres)', () => {
         }
         expect(await conversationsOf(s.crmRecordId)).toEqual([]);
       }
+    });
+
+    it('with the switch off, a spent AI budget still refuses the draft (429 AI_BUDGET) and the model is never asked', async () => {
+      const s = await seedSeller({ settings: { aiDailyBudgetUsd: 0 } });
+      sessionFor(s.orgId, s.admin.id, true);
+      const res = await draft(s.sfRecordId);
+      expect(res.statusCode).toBe(429);
+      expect(res.json().code).toBe('AI_BUDGET');
+      expect(write).not.toHaveBeenCalled();
     });
 
     it('with the switch off, a seller block still refuses the real draft', async () => {

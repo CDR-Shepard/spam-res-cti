@@ -376,6 +376,9 @@ describe('optOutScanText', () => {
       'footer URL alone': `Sounds good\n\n${URL}`,
       'footer footnote URL alone': `Sounds good\n\n[1] ${URL}`,
       'HTML footer flattened': `Sounds good\n\n${htmlToText(ours.html)}`,
+      'an older footer with the AI assistant line': `Sounds good\n\n${olderText}`,
+      'an older footer, "GG Homes\'s" wording': `Sounds good\n\n${olderText.replace("GG Homes' AI", "GG Homes's AI")}`,
+      'an older footer reflowed onto one line': `Sounds good\n\n${olderText.split('\n').filter(Boolean).join(' ')}`,
     };
     for (const [name, body] of Object.entries(shapes)) {
       expect(read(body), name).toBe(false);
@@ -410,7 +413,8 @@ describe('optOutScanText', () => {
     expect(read(`Sounds good\n\n${ourText}`)).toBe(false);
     expect(read(`Sounds good\n\n${ourText.split('\n').slice(1).join('\n')}`)).toBe(false);
     expect(read(`Yes\nTo stop hearing from Sam, unsubscribe here: ${URL}`)).toBe(false);
-    expect(read(`Sounds good\n\n${ourText.replace("GG Homes' AI", "GG Homes's AI")}`)).toBe(false);
+    expect(read(`Sounds good\n\n${olderText}`)).toBe(false);
+    expect(read(`Sounds good\n\n${olderText.replace("GG Homes' AI", "GG Homes's AI")}`)).toBe(false);
   });
 
   it('handles CRLF and returns an empty string for nothing', () => {
