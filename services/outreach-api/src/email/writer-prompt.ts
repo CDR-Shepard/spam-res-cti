@@ -3,15 +3,16 @@
  *
  * The rules are fixed text with the company's name filled in; nothing the seller wrote ever reaches the system
  * prompt. Everything about the seller (their first name, the approved call plan, the history digest, and the
- * email being answered) goes in the user message inside three fences, and rule 7 tells the model those fences
- * are data. A fence only means something if the data cannot close it: every `<` or `</` followed by one of the
- * three tag names is rewritten to square brackets before it is placed, in any letter case and with whitespace
- * anywhere inside the tag (`< / Seller_Email >`), in every field that is placed (an unclosed `</seller_email`
- * and a full-width `＜/seller_email＞` included).
+ * email being answered, its subject included) goes in the user message inside three fences, and rule 7 tells the
+ * model those fences are data. A fence only means something if the data cannot close it: every field is placed
+ * through neutraliseSellerText (@cti/contracts), the same neutraliser cti-api uses on the call agent's history
+ * fence, so no `<` or `>` of any form (full-width, split by a zero-width character) survives in seller text and no
+ * tag of any spelling can open or close a fence.
  *
  * "GG Homes'" is the owner's wording for a company ending in s (possessive() in render.ts, also used by the
  * footer), so the model's own sentence and the footer's say the same thing.
  */
+import { neutraliseSellerText } from '@cti/contracts';
 import { possessive } from './render.js';
 
 export interface WriterInput {
@@ -30,13 +31,8 @@ export interface WriterInput {
   localTime: string;
 }
 
-/** `<` or `</` (or the full-width forms) + a fence's name, with whatever sits inside the tag on that line up to its `>`. */
-const FENCE_TAG = /[<＜]\s*(\/?)\s*(conversation_history|call_plan|seller_email)(?![\w-])([^<>＜＞\r\n]*)[>＞]?/gi;
-
-/** `text` with every fence tag turned into square brackets, so seller-written data cannot open or close a fence. */
-function neutralised(text: string): string {
-  return text.replace(FENCE_TAG, (_tag, slash: string, name: string, inside: string) => `[${slash}${name}${inside}]`);
-}
+/** `text` as a fence may carry it: seller-written data that cannot open or close a fence (see the module comment). */
+const neutralised = (text: string): string => neutraliseSellerText(text);
 
 /** All whitespace runs (newlines included) become one space: for a value that sits on one line. */
 const oneLine = (text: string): string => text.replace(/\s+/g, ' ').trim();

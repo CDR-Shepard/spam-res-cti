@@ -25,7 +25,7 @@
  * call (the details are filled in from the transcript afterwards) and to ignore the prompt's spoken-JSON ending. When
  * the caller's number is known, one more fixed line tells the agent what it is.
  */
-import { HISTORY_TEXT_MAX, type AgentPromptKind, type AppointmentSlot } from '@cti/contracts';
+import { HISTORY_TEXT_MAX, neutraliseSellerText, type AgentPromptKind, type AppointmentSlot } from '@cti/contracts';
 import { phoneForms } from './prompt-context.js';
 import { PLAN_PROMPT_MAX, neutraliseFences } from './prompt-plan.js';
 import { DEFAULT_TEMPLATES, renderMaxChars, renderPrompt } from './prompt-template.js';
@@ -104,15 +104,16 @@ const HISTORY_SECTION_RULE = 'Use this so you never repeat yourself or ask what 
 
 /**
  * The history as the fence carries it, or null for none (absent, blank, or nothing left). It is seller-written text and the
- * digest has no legitimate markup, so before anything else: NFKC folds look-alike forms (full-width ＜ ／ ＞) to ASCII, every
- * format character (zero-width space, soft hyphen, ...) is dropped so it cannot split a tag name, and every remaining angle
- * bracket becomes a square one. No tag of any spelling (attributes, self-closing, a lookalike letter) is left to close or open
- * the fence. neutraliseFences stays as a backstop. At most HISTORY_TEXT_MAX characters stay, keeping the newest (the tail:
- * the digest lists oldest first), as the notes do. The plan and notes fences keep their own handling (prompt-context.ts).
+ * digest has no legitimate markup, so before anything else it goes through neutraliseSellerText (@cti/contracts), the one
+ * neutraliser Sam's email writer uses too: NFKC folds look-alike forms (full-width ＜ ／ ＞) to ASCII, every format character
+ * (zero-width space, soft hyphen, ...) is dropped so it cannot split a tag name, and every remaining angle bracket becomes a
+ * square one. No tag of any spelling (attributes, self-closing, a lookalike letter) is left to close or open the fence.
+ * neutraliseFences stays as a backstop. At most HISTORY_TEXT_MAX characters stay, keeping the newest (the tail: the digest
+ * lists oldest first), as the notes do. The plan and notes fences keep their own handling (prompt-context.ts).
  */
 function historyFenceText(raw: string | null | undefined): string | null {
   if (typeof raw !== 'string' || raw.trim() === '') return null;
-  const plain = raw.normalize('NFKC').replace(/\p{Cf}/gu, '').replace(/</g, '[').replace(/>/g, ']');
+  const plain = neutraliseSellerText(raw);
   const body = neutraliseFences(plain).trim();
   const kept = body.length <= HISTORY_TEXT_MAX ? body : `…${body.slice(body.length - (HISTORY_TEXT_MAX - 1)).trimStart()}`;
   return kept === '' ? null : kept;
