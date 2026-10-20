@@ -197,7 +197,8 @@ describe('routedOffer', () => {
   it('logs one info line: ids and counts only, never the address', async () => {
     const { offer, log } = await offerFor(SD_PROPERTY);
     expect(log.info).toHaveBeenCalledTimes(1);
-    expect(log.info).toHaveBeenCalledWith({ orgId: ORG, region: 'SD', slots: offer.slots.length, priority: true, routeElements: 0 }, 'appointments: routed offer');
+    // Six in-person times, each the first in its half-day: one office drive each (the reps start there at 8:00).
+    expect(log.info).toHaveBeenCalledWith({ orgId: ORG, region: 'SD', slots: offer.slots.length, priority: true, routeElements: 6 }, 'appointments: routed offer');
     expect(logged(log)).not.toContain('Palm');
   });
 

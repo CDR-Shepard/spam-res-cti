@@ -4,9 +4,10 @@
  * lasts CONSULTATION_MINUTES. Per local day the first morning (hour < 12) and the first afternoon that someone can take are
  * offered.
  *
- * In person, a free rep fits when the drive in (from its earlier item's place, or the office) arrives by the start and the
- * drive out arrives by its later item's start. The shortest drive in wins, then fewer consultations that ISO week, then
- * region order. By phone there is no drive: fewer consultations that day, then region order.
+ * In person, a free rep fits when the drive in arrives by the start and the drive out arrives by its later item's start. The
+ * drive in is from its earlier item's place that day (or the office, at that item's end); with nothing earlier that day the
+ * rep starts at the office at REP_DAY_START_HOUR (8:00 AM Pacific). The shortest drive in wins, then fewer consultations
+ * that ISO week, then region order. By phone there is no drive: fewer consultations that day, then region order.
  * Seller addresses and Event Locations are PII: nothing here logs.
  */
 import { CONSULTATION_MINUTES, ROUTING_ZONE, type AiCallBookingSettings, type AppointmentKind, type AppointmentSlot, type BookingRegion } from '@cti/contracts';
@@ -19,6 +20,11 @@ import { addLocalDays, zonedInstant, zonedParts, type LocalDay } from './zoned.j
 
 /** Route elements one offer may spend; checked before each in-person candidate. */
 export const MAX_ROUTE_ELEMENTS_PER_OFFER = 60;
+/**
+ * Every rep starts the day at the office at this hour, in ROUTING_ZONE: the drive in to the day's first visit leaves the
+ * office then, so it must fit between 8:00 AM and that visit's start (the offer and the write-back's re-check alike).
+ */
+export const REP_DAY_START_HOUR = 8;
 
 export interface RepCalendar {
   rep: OwnerUser;
@@ -41,10 +47,12 @@ const MIN = 60_000;
 /** The drive in is timed as leaving this long before the start. */
 const DRIVE_IN_LEAD_MINUTES = 60;
 
-/** A rep's timed items on a window's local day, with the last to end by its start and the first to start from its end. */
+/**
+ * Around a window: the rep's last item that day to end by its start (or, with none, the day's start at the office: see
+ * dayStartAtOffice), and the first to start from its end.
+ */
 interface Around {
-  day: Busy[];
-  earlier: Busy | null;
+  earlier: Busy;
   later: Busy | null;
 }
 interface Pick {
@@ -78,13 +86,30 @@ const consultationsStarting = (busy: readonly Busy[], span: Window): number =>
 const endsLater = (a: Busy | null, b: Busy): Busy => (a && a.end.getTime() >= b.end.getTime() ? a : b);
 const startsSooner = (a: Busy | null, b: Busy): Busy => (a && a.start.getTime() <= b.start.getTime() ? a : b);
 
-/** Shared by both kinds and the write-back's re-check: the rep's timed items on `w`'s local day, and its earlier and later item. */
-function around(busy: readonly Busy[], w: Window): Around {
+/** REP_DAY_START_HOUR:00 on `at`'s local day in ROUTING_ZONE (zonedInstant: right on both sides of daylight saving). */
+export function repDayStart(at: Date): Date {
+  const d = addLocalDays(at, 0, ROUTING_ZONE);
+  return zonedInstant(ROUTING_ZONE, d.year, d.month, d.day, REP_DAY_START_HOUR, 0);
+}
+
+/** With nothing earlier that day the rep is at the office from REP_DAY_START_HOUR: an item with no Location that ends then. */
+function dayStartAtOffice(w: Window): Busy {
+  const at = repDayStart(w.start);
+  return { start: at, end: at, allDay: false, location: null };
+}
+
+/** The rep's timed items on `w`'s local day. */
+function dayItems(busy: readonly Busy[], w: Window): Busy[] {
   const span = localSpan(w.start, 0, 1);
-  const day = busy.filter((b) => !b.allDay && b.start.getTime() < span.end.getTime() && b.end.getTime() > span.start.getTime());
+  return busy.filter((b) => !b.allDay && b.start.getTime() < span.end.getTime() && b.end.getTime() > span.start.getTime());
+}
+
+/** Shared by the offer and the write-back's re-check: the rep's earlier and later item around `w` (see Around). */
+function around(busy: readonly Busy[], w: Window): Around {
+  const day = dayItems(busy, w);
   const earlier = day.filter((b) => b.end.getTime() <= w.start.getTime()).reduce<Busy | null>(endsLater, null);
   const later = day.filter((b) => b.start.getTime() >= w.end.getTime()).reduce<Busy | null>(startsSooner, null);
-  return { day, earlier, later };
+  return { earlier: earlier ?? dayStartAtOffice(w), later };
 }
 
 /** Where a rep is next to an item: its Location when that is a drivable address, else the office (and with no item). */
@@ -115,12 +140,13 @@ async function legMinutes(d: Drives, places: readonly Place[], leg: 'in' | 'out'
 }
 
 /**
- * Both drives fit, each allowed `slackMs`: the drive in from the earlier item arrives by the start, and the drive out arrives
- * by the later item's start. A side with no item needs no drive (undefined: not looked up); a drive with no route (null) never fits.
+ * Both drives fit, each allowed `slackMs`: the drive in from the earlier item (or the office at REP_DAY_START_HOUR) arrives
+ * by the start, and the drive out arrives by the later item's start. With no later item the drive out needs nothing
+ * (undefined: not looked up); a drive with no route (null) never fits.
  */
 function drivesFit(a: Around, w: Window, driveIn: number | null | undefined, driveOut: number | null | undefined, slackMs: number): boolean {
   if (driveIn === null || driveOut === null) return false;
-  const inFits = a.earlier === null || (driveIn !== undefined && a.earlier.end.getTime() + driveIn * MIN <= w.start.getTime() + slackMs);
+  const inFits = driveIn !== undefined && a.earlier.end.getTime() + driveIn * MIN <= w.start.getTime() + slackMs;
   const outFits = a.later === null || (driveOut !== undefined && w.end.getTime() + driveOut * MIN <= a.later.start.getTime() + slackMs);
   return inFits && outFits;
 }
@@ -134,20 +160,20 @@ function best(ranked: readonly Ranked[]): OwnerUser | null {
 /** The rep who takes `w` in person, or null when no free rep can make both drives. */
 async function inPersonWinner(i: RoutingInput & Drives, w: Window): Promise<OwnerUser | null> {
   const free = i.reps.flatMap((r, order) => (isFree(r.busy, w) ? [{ ...r, order, ...around(r.busy, w) }] : []));
+  if (free.length === 0) return null;
   const fromOf = (a: Around): Place => placeOf(a.earlier, i.office);
   const toOf = (a: Around): Place => placeOf(a.later, i.office);
-  // A rep with an earlier item needs its drive in, and then every free rep's is timed to compare them (one element per
-  // distinct place). With no earlier items every rep starts from the office, so nothing differs and nothing is asked.
-  const needIn = free.some((c) => c.earlier !== null);
+  // Every free rep's drive in is timed, one element per distinct place: a rep with nothing earlier that day leaves the
+  // office at REP_DAY_START_HOUR, and that drive must fit too.
   const withLater = free.filter((c) => c.later !== null);
   const [ins, outs] = await Promise.all([
-    needIn ? legMinutes(i, free.map(fromOf), 'in', driveInDeparture(w)) : null,
+    legMinutes(i, free.map(fromOf), 'in', driveInDeparture(w)),
     withLater.length > 0 ? legMinutes(i, withLater.map(toOf), 'out', w.end) : null,
   ]);
   const week = isoWeekOf(w.start);
   return best(
     free.flatMap((c) => {
-      const driveIn = ins?.get(placeKey(fromOf(c)));
+      const driveIn = ins.get(placeKey(fromOf(c)));
       const driveOut = c.later ? outs?.get(placeKey(toOf(c))) : undefined;
       if (!drivesFit(c, w, driveIn, driveOut, 0)) return [];
       return [{ rep: c.rep, order: c.order, driveIn: driveIn ?? 0, load: consultationsStarting(c.busy, week) }];
@@ -159,7 +185,7 @@ async function inPersonWinner(i: RoutingInput & Drives, w: Window): Promise<Owne
 function phoneWinner(reps: readonly RepCalendar[], w: Window): OwnerUser | null {
   return best(
     reps.flatMap((r, order) =>
-      isFree(r.busy, w) ? [{ rep: r.rep, order, driveIn: 0, load: around(r.busy, w).day.filter((b) => b.consultation).length }] : [],
+      isFree(r.busy, w) ? [{ rep: r.rep, order, driveIn: 0, load: dayItems(r.busy, w).filter((b) => b.consultation).length }] : [],
     ),
   );
 }
@@ -231,8 +257,8 @@ export function phoneSlots(i: RoutingInput): AppointmentSlot[] {
 }
 
 /**
- * The write-back's re-check of one booked rep (Task 8): both drives fit, each allowed `slackMinutes`.
- * Rejects when `drive.matrix` does (MapsUnavailableError): the caller handles it.
+ * The write-back's re-check of one booked rep (Task 8): both drives fit, each allowed `slackMinutes`, the day's first visit
+ * from the office at REP_DAY_START_HOUR. Rejects when `drive.matrix` does (MapsUnavailableError): the caller handles it.
  */
 export async function repCanReach(i: { busy: readonly Busy[]; start: Date; slackMinutes: number } & Drives): Promise<boolean> {
   const w = windowAt(i.start);
@@ -240,8 +266,8 @@ export async function repCanReach(i: { busy: readonly Busy[]; start: Date; slack
   const from = placeOf(a.earlier, i.office);
   const to = placeOf(a.later, i.office);
   const [ins, outs] = await Promise.all([
-    a.earlier ? legMinutes(i, [from], 'in', driveInDeparture(w)) : null,
+    legMinutes(i, [from], 'in', driveInDeparture(w)),
     a.later ? legMinutes(i, [to], 'out', w.end) : null,
   ]);
-  return drivesFit(a, w, ins?.get(placeKey(from)), outs?.get(placeKey(to)), i.slackMinutes * MIN);
+  return drivesFit(a, w, ins.get(placeKey(from)), outs?.get(placeKey(to)), i.slackMinutes * MIN);
 }

@@ -4,7 +4,9 @@ import { DEFAULT_AI_CALL_BOOKING, DEFAULT_BOOKING_ROUTING } from '../settings.js
 import type { OwnerUser } from './calendar.js';
 import type { DriveTimer } from './drive.js';
 import { MapsUnavailableError, type Place } from './maps.js';
-import { MAX_ROUTE_ELEMENTS_PER_OFFER, inPersonSlots, phoneSlots, repCanReach, type RepCalendar, type RoutingInput } from './routing.js';
+import {
+  MAX_ROUTE_ELEMENTS_PER_OFFER, REP_DAY_START_HOUR, inPersonSlots, phoneSlots, repCanReach, repDayStart, type RepCalendar, type RoutingInput,
+} from './routing.js';
 import type { Busy } from './slots.js';
 import { zonedInstant } from './zoned.js';
 
@@ -84,7 +86,7 @@ const repAt = (slots: ReadonlyArray<{ start: string; specialistSfUserId: string 
   slots.find((s) => s.start === start)?.specialistSfUserId;
 
 describe('inPersonSlots', () => {
-  it('both reps free from the office: no route lookup; fewer consultations that week wins', async () => {
+  it('both reps free from the office: one office lookup per time (the 8:00 start); fewer consultations that week wins', async () => {
     const { drive, calls } = fakeDrive();
     const chance = cal(CHANCE, [consultation(19, 10), consultation(19, 12), consultation(19, 14)]);
     const slots = await inPerson([chance, cal(BLAKE, [consultation(19, 11)])], drive);
@@ -94,7 +96,71 @@ describe('inPersonSlots', () => {
       { id: 'w2', start: TUE_13, end: '2026-10-20T21:00:00.000Z', ...blake },
     ]);
     expect(AppointmentSlots.safeParse(slots).success).toBe(true);
-    expect(calls).toEqual([]);
+    // Both start at the office, so it is asked once per time, departing an hour before the start.
+    expect(calls).toEqual([
+      { origins: [OFFICE], destinations: [PROPERTY], departure: new Date('2026-10-20T15:00:00.000Z') },
+      { origins: [OFFICE], destinations: [PROPERTY], departure: new Date('2026-10-20T19:00:00.000Z') },
+    ]);
+  });
+
+  describe('the day starts at the office at 8:00 AM Pacific', () => {
+    it('REP_DAY_START_HOUR is 8', () => {
+      expect(REP_DAY_START_HOUR).toBe(8);
+    });
+
+    it('a 9:00 time with a 75-minute drive from the office is not offered; the rep\'s next time that fits is', async () => {
+      const { drive } = fakeDrive({ [`${OFFICE_ADDRESS}>property`]: 75 });
+      const slots = await inPerson([cal(CHANCE)], drive);
+      // 08:00 + 75 = 09:15 misses 09:00; 11:00 is Tuesday's next morning start.
+      expect(slots.map((s) => [s.start, s.specialistSfUserId])).toEqual([
+        ['2026-10-20T18:00:00.000Z', CHANCE.sfUserId],
+        [TUE_13, CHANCE.sfUserId],
+      ]);
+    });
+
+    it('a 9:00 time with a 50-minute drive from the office is offered', async () => {
+      const { drive } = fakeDrive({ [`${OFFICE_ADDRESS}>property`]: 50 });
+      const slots = await inPerson([cal(CHANCE), cal(BLAKE)], drive);
+      expect(slots.map((s) => s.start)).toEqual([TUE_9, TUE_13]);
+    });
+
+    it('a rep with an earlier Event that day drives from it, whatever the office drive', async () => {
+      const { drive } = fakeDrive({ [`${ANAHEIM}>property`]: 20, [`${OFFICE_ADDRESS}>property`]: 75 });
+      // Chance is in Anaheim until 07:30: 07:30 + 20 makes 09:00. Blake starts at the office at 08:00 and cannot.
+      const chance = cal(CHANCE, [item(pt(20, 7), pt(20, 7, 30), { location: ANAHEIM })]);
+      const slots = await inPerson([chance, cal(BLAKE)], drive);
+      expect(repAt(slots, TUE_9)).toBe(CHANCE.sfUserId);
+    });
+
+    it('a time before 8:00 cannot be reached from the office', async () => {
+      const early: BookingRegion = { ...LA, startTimes: ['07:30', '09:00'] };
+      const slots = await inPerson([cal(CHANCE)], fakeDrive({ [`${OFFICE_ADDRESS}>property`]: 1 }).drive, { region: early });
+      expect(slots.map((s) => s.start)).toEqual([TUE_9]);
+    });
+
+    it('8:00 is Pacific on both sides of daylight saving', () => {
+      // Fri Oct 30 is still PDT (UTC-7); Mon Nov 2 is PST (UTC-8); Mon Mar 15 2027 is PDT again.
+      expect(repDayStart(new Date('2026-10-30T18:00:00Z')).toISOString()).toBe('2026-10-30T15:00:00.000Z');
+      expect(repDayStart(new Date('2026-11-02T17:00:00Z')).toISOString()).toBe('2026-11-02T16:00:00.000Z');
+      expect(repDayStart(new Date('2027-03-15T16:00:00Z')).toISOString()).toBe('2027-03-15T15:00:00.000Z');
+    });
+
+    it('on the Monday after daylight saving ends, 9:00 PST needs the drive to fit from 8:00 PST', async () => {
+      const after = { now: new Date('2026-10-30T16:00:00Z') };
+      // 08:00 PST is 16:00Z: 61 minutes misses 09:00 PST (17:00Z), so 11:00 PST (19:00Z) is the morning time.
+      const tooFar = await inPerson([cal(CHANCE)], fakeDrive({ [`${OFFICE_ADDRESS}>property`]: 61 }).drive, after);
+      expect(tooFar[0]?.start).toBe('2026-11-02T19:00:00.000Z');
+      const fits = await inPerson([cal(CHANCE)], fakeDrive({ [`${OFFICE_ADDRESS}>property`]: 60 }).drive, after);
+      expect(fits[0]?.start).toBe('2026-11-02T17:00:00.000Z');
+    });
+
+    it('phone times are unchanged: no drive', () => {
+      const { drive, calls } = fakeDrive({ [`${OFFICE_ADDRESS}>property`]: 500 });
+      const routed = { region: LA, reps: [cal(CHANCE)], booking: BOOKING, now: NOW, property: PROPERTY, office: OFFICE, drive };
+      const slots = phoneSlots(routed);
+      expect(repAt(slots, TUE_9)).toBe(CHANCE.sfUserId);
+      expect(calls).toEqual([]);
+    });
   });
 
   it('only consultations that start in the candidate\'s ISO week count', async () => {
@@ -125,8 +191,11 @@ describe('inPersonSlots', () => {
     const later = item(pt(20, 10, 15), pt(20, 11), { location: FULLERTON });
     const tooFar = fakeDrive({ [`property>${FULLERTON}`]: 30 });
     expect(repAt(await inPerson([cal(CHANCE, [later]), cal(BLAKE)], tooFar.drive), TUE_9)).toBe(BLAKE.sfUserId);
-    // The drive out leaves at the end, 10:00 PDT; with no earlier items nothing is looked up for the drive in.
-    expect(tooFar.calls[0]).toEqual({ origins: [PROPERTY], destinations: [{ address: FULLERTON }], departure: new Date('2026-10-20T17:00:00.000Z') });
+    // The drive in from the office (both start there at 8:00), then the drive out, leaving at the end, 10:00 PDT.
+    expect(tooFar.calls.slice(0, 2)).toEqual([
+      { origins: [OFFICE], destinations: [PROPERTY], departure: new Date('2026-10-20T15:00:00.000Z') },
+      { origins: [PROPERTY], destinations: [{ address: FULLERTON }], departure: new Date('2026-10-20T17:00:00.000Z') },
+    ]);
     const closeEnough = fakeDrive({ [`property>${FULLERTON}`]: 15 });
     expect(repAt(await inPerson([cal(CHANCE, [later]), cal(BLAKE)], closeEnough.drive), TUE_9)).toBe(CHANCE.sfUserId);
   });
@@ -270,9 +339,25 @@ describe('repCanReach', () => {
     expect(await reach([later], { [`property>${FULLERTON}`]: 40 }).ok).toBe(false);
   });
 
-  it('nothing around the start: true with no lookup', async () => {
-    const r = reach([item(pt(19, 9), pt(19, 10))], {});
+  it('nothing earlier that day: the drive in from the office at 8:00, with the slack', async () => {
+    // An item the day before does not count. 08:00 + 70 = 09:10, inside 09:00 + 15; 08:00 + 90 = 09:30 is not.
+    const yesterday = [item(pt(19, 9), pt(19, 10))];
+    const fits = reach(yesterday, { [`${OFFICE_ADDRESS}>property`]: 70 });
+    expect(await fits.ok).toBe(true);
+    expect(fits.calls).toEqual([{ origins: [OFFICE], destinations: [PROPERTY], departure: new Date('2026-10-20T15:00:00.000Z') }]);
+    expect(await reach(yesterday, { [`${OFFICE_ADDRESS}>property`]: 75 }).ok).toBe(true);
+    expect(await reach(yesterday, { [`${OFFICE_ADDRESS}>property`]: 76 }).ok).toBe(false);
+    expect(await reach([], { [`${OFFICE_ADDRESS}>property`]: 90 }).ok).toBe(false);
+  });
+
+  it('an earlier Event that day: the office start does not apply', async () => {
+    const earlier = item(pt(20, 7, 45), pt(20, 8, 45), { location: ANAHEIM });
+    const r = reach([earlier], { [`${ANAHEIM}>property`]: 20, [`${OFFICE_ADDRESS}>property`]: 500 });
     expect(await r.ok).toBe(true);
-    expect(r.calls).toEqual([]);
+    expect(r.calls.map((c) => c.origins)).toEqual([[{ address: ANAHEIM }]]);
+  });
+
+  it('no route from the office: false', async () => {
+    expect(await reach([], { [`${OFFICE_ADDRESS}>property`]: null }).ok).toBe(false);
   });
 });

@@ -2,8 +2,9 @@
  * Task 8: the write-time re-check of an Opportunity booking's calendar (D-11), by how the booking was made.
  * - High priority: none. Grant takes it whatever his calendar says, so nothing is read.
  * - Routed (it has a region): nothing on the rep's Pacific day overlaps it (no buffer: the drive check replaces it); then,
- *   for a visit with an address while Google is configured, both drives must still fit, with DRIVE_SLACK_MINUTES each. A
- *   drive check that fails (Google down, an office it cannot place, anything else) leaves the overlap check's answer.
+ *   for a visit with an address while Google is configured, both drives must still fit, with DRIVE_SLACK_MINUTES each (the
+ *   day's first visit from the office at 8:00 AM: REP_DAY_START_HOUR). A drive check that fails (Google down, an office it
+ *   cannot place, anything else) leaves the overlap check's answer.
  * - Booked before routing (no region): today's check, the walkthrough buffer included.
  * Addresses and Event Locations are seller data: only ids and error codes are logged.
  */

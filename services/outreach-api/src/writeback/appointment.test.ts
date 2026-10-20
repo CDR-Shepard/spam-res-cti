@@ -289,6 +289,23 @@ describe('bookOpportunity: a routed booking (overlap with no buffer, then the dr
     expect(f.creates[0]!.fields).toMatchObject({ Subject: 'Property Consultation', OwnerId: BLAKE, Location: ADDRESS });
   });
 
+  it('the day\'s first visit: the drive in from the office at 8:00 AM must fit, with the slack', async () => {
+    // Nothing earlier that Wednesday: 08:00 + 90 = 09:30 misses 09:00 + 15; 08:00 + 70 = 09:10 makes it.
+    const far = org();
+    expect(await bookRouted(far, ROUTED, fakeMaps({ minutes: 90 }).maps)).toEqual({ kind: 'conflict', reason: 'drive' });
+    expect(far.creates).toEqual([]);
+    const near = org();
+    expect(await bookRouted(near, ROUTED, fakeMaps({ minutes: 70 }).maps)).toEqual({ kind: 'created', eventId: expect.stringMatching(/^00U/) });
+  });
+
+  it('the day\'s first visit with Google down: the overlap check stands, a warn with codes and ids only', async () => {
+    const f = org();
+    const r = recorder();
+    expect(await bookRouted(f, ROUTED, fakeMaps({ fail: new MapsUnavailableError('timeout') }).maps, r.log)).toEqual({ kind: 'created', eventId: expect.stringMatching(/^00U/) });
+    expect(r.warns.some(([o]) => o.oppId === OPP && o.code === 'timeout')).toBe(true);
+    expect(JSON.stringify(r.warns)).not.toContain('MacArthur');
+  });
+
   it('final review C1: an earlier Event on a directional street is driven from there, not from the office', async () => {
     const pico = '4500 W Pico Blvd, Los Angeles, CA 90019';
     const origins: string[] = [];
