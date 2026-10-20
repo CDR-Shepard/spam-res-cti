@@ -23,10 +23,12 @@ function fakeFetch(respond: () => Response) {
 
 const answer = (status: number, type: string, body: string | Buffer) => () =>
   new Response(body, { status, headers: { 'content-type': type } });
+/** 4 s of 16 kHz silence: long enough for TEXT (77 characters sent × 50 ms). */
+const FOUR_SECONDS = Buffer.alloc(32 * 4_000);
 
 describe('renderElevenLabsVoicemail — one voicemail in Siren, as phone audio', () => {
   it('asks ElevenLabs text-to-speech for 16 kHz PCM in Siren on v4 Turbo, with numbers said digit by digit', async () => {
-    const f = fakeFetch(answer(200, 'audio/pcm', Buffer.alloc(32_000)));
+    const f = fakeFetch(answer(200, 'audio/pcm', FOUR_SECONDS));
     await renderElevenLabsVoicemail(SETTINGS, f.fetchImpl)(TEXT);
     expect(f.sent).toHaveLength(1);
     const { url, init } = f.sent[0]!;
@@ -43,10 +45,10 @@ describe('renderElevenLabsVoicemail — one voicemail in Siren, as phone audio',
     expect(init.signal).toBeInstanceOf(AbortSignal);
   });
 
-  it('resolves to a phone WAV: 1 s of PCM is 8,000 μ-law bytes after the 58-byte header', async () => {
-    const f = fakeFetch(answer(200, 'audio/pcm', Buffer.alloc(32_000)));
+  it('resolves to a phone WAV: 4 s of PCM is 32,000 μ-law bytes after the 58-byte header', async () => {
+    const f = fakeFetch(answer(200, 'audio/pcm', FOUR_SECONDS));
     const wav = await renderElevenLabsVoicemail(SETTINGS, f.fetchImpl)(TEXT);
-    expect(wav.length).toBe(8_058);
+    expect(wav.length).toBe(32_058);
     expect(wav.toString('ascii', 0, 4)).toBe('RIFF');
     expect(wav.readUInt16LE(20)).toBe(7);
     expect(new Set(wav.subarray(58))).toEqual(new Set([0xff]));
@@ -69,9 +71,28 @@ describe('renderElevenLabsVoicemail — one voicemail in Siren, as phone audio',
     expect(String(err)).not.toContain('Jane');
   });
 
-  it('accepts exactly half a second of audio (the shortest voicemail it takes)', async () => {
+  it('rejects a clip far too short for its words (a render that stopped well short), so the call reads it with Polly', async () => {
+    // The text sent is 77 characters (the number said digit by digit): at least 77 × 50 ms = 3.85 s of speech.
+    const short = fakeFetch(answer(200, 'audio/pcm', Buffer.alloc(32 * 3_840)));
+    const err = await renderElevenLabsVoicemail(SETTINGS, short.fetchImpl)(TEXT).then(
+      () => null,
+      (e: unknown) => e,
+    );
+    expect(String(err)).toMatch(/ElevenLabs voicemail: too short for its text/);
+    expect(String(err)).not.toContain('Jane');
+    const enough = fakeFetch(answer(200, 'audio/pcm', Buffer.alloc(32 * 3_850)));
+    expect((await renderElevenLabsVoicemail(SETTINGS, enough.fetchImpl)('Hi Jane. You can reach us at 619-555-0142.')).length).toBe(58 + 8 * 3_850);
+  });
+
+  it('counts words, not layout: blank lines and indentation in a saved template do not make a clip look short', async () => {
+    const laidOut = `Hi Jane.\n\n\n        ${' '.repeat(200)}You can reach us at 619-555-0142.`;
+    const f = fakeFetch(answer(200, 'audio/pcm', FOUR_SECONDS));
+    expect((await renderElevenLabsVoicemail(SETTINGS, f.fetchImpl)(laidOut)).length).toBe(32_058);
+  });
+
+  it('accepts exactly half a second of audio for a short text (the shortest voicemail it takes)', async () => {
     const f = fakeFetch(answer(200, 'audio/pcm', Buffer.alloc(16_000)));
-    expect((await renderElevenLabsVoicemail(SETTINGS, f.fetchImpl)(TEXT)).length).toBe(58 + 4_000);
+    expect((await renderElevenLabsVoicemail(SETTINGS, f.fetchImpl)('Call us.')).length).toBe(58 + 4_000);
   });
 
   it('keeps only a plain status code from an error body (no message, nothing odd)', async () => {
@@ -140,7 +161,7 @@ describe('voicemailVoiceFor — the config picks the voicemail voice', () => {
   });
 
   it("'elevenlabs' with a key: a renderer that calls the configured key, voice and model", async () => {
-    const f = fakeFetch(answer(200, 'audio/pcm', Buffer.alloc(32_000)));
+    const f = fakeFetch(answer(200, 'audio/pcm', FOUR_SECONDS));
     const cfg = { ELEVENLABS_API_KEY: 'k-other', AI_VOICE_ELEVENLABS_VOICE: 'voiceB', AI_VOICE_ELEVENLABS_MODEL: 'eleven_flash_v2_5', AI_VOICE_VOICEMAIL_TTS: 'elevenlabs' as const };
     const render = voicemailVoiceFor(cfg, silentLog, f.fetchImpl);
     expect(render).not.toBeNull();

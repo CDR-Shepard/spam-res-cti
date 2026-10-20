@@ -19,6 +19,14 @@ export const ELEVENLABS_HTTP = 'https://api.elevenlabs.io/v1';
 export const VOICEMAIL_RENDER_TIMEOUT_MS = 15_000;
 /** Half a second of 16 kHz PCM: anything shorter is not a voicemail. */
 export const MIN_VOICEMAIL_PCM_BYTES = 16_000;
+/**
+ * Siren reads a voicemail at 65–78 ms a character (measured 2026-10-19). A clip under 50 ms a character of what was sent
+ * stopped well short, and may have lost the callback number TCPA requires (47 CFR 64.1200(b)(2)), so the call reads it
+ * with Polly. A coarse tripwire: a clip missing only its last few words still passes.
+ */
+export const MIN_VOICEMAIL_MS_PER_CHAR = 50;
+/** 16 kHz, 16-bit mono. */
+const PCM_BYTES_PER_MS = 32;
 /** What ElevenLabs sends: 16 kHz PCM, made phone audio here. */
 const SOURCE_FORMAT = 'pcm_16000';
 /** As the live voice (elevenlabs-dialogue.ts). */
@@ -77,17 +85,23 @@ async function fetchPcm(url: string, init: RequestInit, fetchImpl: typeof fetch)
 export function renderElevenLabsVoicemail(s: ElevenLabsSettings, fetchImpl: typeof fetch = fetch): RenderVoicemail {
   const url = `${ELEVENLABS_HTTP}/text-to-speech/${encodeURIComponent(s.voiceId)}?output_format=${SOURCE_FORMAT}`;
   return async (text) => {
+    const spoken = spokenPhoneNumbers(text);
     const pcm = await fetchPcm(
       url,
       {
         method: 'POST',
         headers: { 'xi-api-key': s.apiKey, 'content-type': 'application/json' },
-        body: JSON.stringify({ text: spokenPhoneNumbers(text), model_id: s.modelId, voice_settings: VOICE_SETTINGS }),
+        body: JSON.stringify({ text: spoken, model_id: s.modelId, voice_settings: VOICE_SETTINGS }),
         signal: AbortSignal.timeout(VOICEMAIL_RENDER_TIMEOUT_MS),
       },
       fetchImpl,
     );
     if (pcm.length < MIN_VOICEMAIL_PCM_BYTES) throw new Error(`ElevenLabs voicemail: too short (${pcm.length} bytes)`);
+    const ms = Math.floor(pcm.length / PCM_BYTES_PER_MS);
+    const chars = spoken.replace(/\s+/g, ' ').trim().length; // words, not a saved template's blank lines and indentation
+    if (ms < chars * MIN_VOICEMAIL_MS_PER_CHAR) {
+      throw new Error(`ElevenLabs voicemail: too short for its text (${ms} ms for ${chars} characters)`);
+    }
     return muLawWav(await phoneAudio(pcm));
   };
 }
