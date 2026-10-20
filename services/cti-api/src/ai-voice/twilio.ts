@@ -21,6 +21,8 @@ export const STREAM_PATH = `${AI_VOICE_TWILIO_PREFIX}/stream`;
 export const AMD_PATH = `${AI_VOICE_TWILIO_PREFIX}/amd`;
 export const STATUS_PATH = `${AI_VOICE_TWILIO_PREFIX}/status`;
 export const TRANSFER_RESULT_PATH = `${AI_VOICE_TWILIO_PREFIX}/transfer-result`;
+/** `GET <path>/<token>`: a call's voicemail audio in Sam's voice, fetched by Twilio's `<Play>` (voicemail-audio.ts). */
+export const VOICEMAIL_AUDIO_PATH = `${AI_VOICE_TWILIO_PREFIX}/voicemail`;
 
 /** How long a transfer rings the rep's softphone before the caller hears NO_REP_TEXT. */
 export const TRANSFER_RING_SECONDS = 25;
