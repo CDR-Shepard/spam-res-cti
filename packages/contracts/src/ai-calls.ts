@@ -126,6 +126,8 @@ export const AiCallOutcome = z.enum([
   'failed', 'wrong_number', 'hung_up', 'transfer_failed', 'blocked', 'other',
   /** Plan 1D: the agent booked one of the offered slots (a stored ai_calls.appointment). */
   'appointment_set',
+  /** The seller already has a consultation: the agent confirmed it instead of booking another. Completes the touch; no booking stands. */
+  'already_booked',
 ]);
 export type AiCallOutcome = z.infer<typeof AiCallOutcome>;
 

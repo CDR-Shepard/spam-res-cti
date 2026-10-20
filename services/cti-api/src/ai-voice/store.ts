@@ -57,7 +57,9 @@ export type AiCallOutcome =
   | 'blocked'
   | 'other'
   /** Plan 1D: the agent booked an offered slot (ai_calls.appointment). */
-  | 'appointment_set';
+  | 'appointment_set'
+  /** The seller already has a consultation: the agent confirmed it instead of booking another (no ai_calls.appointment). */
+  | 'already_booked';
 
 export interface TranscriptEntry {
   role: 'agent' | 'caller' | 'system';

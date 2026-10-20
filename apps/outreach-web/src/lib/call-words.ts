@@ -84,6 +84,7 @@ export const OUTCOME_WORDS: Record<AiCallOutcome, string> = {
   blocked: 'Blocked',
   other: 'Other',
   appointment_set: 'Appointment set',
+  already_booked: 'Already booked',
 };
 
 /** What a call still needs to learn (plan 1D `stillToLearn`). */

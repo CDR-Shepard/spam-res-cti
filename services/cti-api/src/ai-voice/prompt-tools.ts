@@ -41,8 +41,14 @@ export type ToolName = (typeof TOOL_NAMES)[number];
 export const TRANSFER_REASONS = ['interested', 'wants_offer', 'wants_human', 'legal_or_complex', 'question'] as const;
 /** The end_call outcomes on every call. */
 const BASE_END_CALL_OUTCOMES = ['not_interested', 'do_not_call', 'wrong_number', 'qualified_callback', 'hung_up', 'other'] as const;
-/** Every outcome end_call accepts; `appointment_set` is offered to the model only with slots. */
-export const END_CALL_OUTCOMES = [...BASE_END_CALL_OUTCOMES, 'appointment_set'] as const;
+/** What end_call offers the model on a call with slots: the base outcomes plus `appointment_set`. */
+const SLOT_END_CALL_OUTCOMES = [...BASE_END_CALL_OUTCOMES, 'appointment_set'] as const;
+/**
+ * Every outcome end_call ACCEPTS. `appointment_set` is offered to the model only with slots, and `already_booked`
+ * is not offered yet (it will be only on a call with an upcoming consultation): the accepted list is wider than any
+ * offered one, so a model that names a valid outcome is never folded into 'other'.
+ */
+export const END_CALL_OUTCOMES = [...SLOT_END_CALL_OUTCOMES, 'already_booked'] as const;
 export const QUALIFICATION_FIELDS = [
   'motivation',
   'timeline',
@@ -177,7 +183,7 @@ export function bookAppointmentTool(slotIds: readonly string[]): RealtimeFunctio
 export function toolsFor(slots: readonly AppointmentSlot[]): RealtimeFunctionTool[] {
   if (slots.length === 0) return AI_CALL_TOOLS;
   return [
-    ...AI_CALL_TOOLS.map((tool) => (tool.name === 'end_call' ? endCallTool(END_CALL_OUTCOMES) : tool)),
+    ...AI_CALL_TOOLS.map((tool) => (tool.name === 'end_call' ? endCallTool(SLOT_END_CALL_OUTCOMES) : tool)),
     bookAppointmentTool(slots.map((s) => s.id)),
   ];
 }

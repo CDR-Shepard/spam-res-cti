@@ -72,6 +72,14 @@ describe('end_call', () => {
     expect(store.rows.get(ID)).toMatchObject({ outcome: 'not_interested', summary: 'Not selling.' });
   });
 
+  it('already_booked is accepted and stored as already_booked, not folded into "other"', async () => {
+    const res = await run('end_call', { outcome: 'already_booked', summary: 'Confirmed the consultation she already has.' });
+    expect(res.then).toBe('hangup');
+    await settle();
+    expect(store.rows.get(ID)).toMatchObject({ outcome: 'already_booked', summary: 'Confirmed the consultation she already has.' });
+    expect(twilio.hangups).toEqual([CALL_SID]);
+  });
+
   it('an unknown outcome still ends the call (as "other")', async () => {
     const res = await run('end_call', { outcome: 'banana' });
     expect(res.then).toBe('hangup');

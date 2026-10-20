@@ -224,6 +224,11 @@ describe('plan 1D: context, slots, practice calls, appointment_set', () => {
     expect(AiCallOutcome.options).toContain('appointment_set');
   });
 
+  it("'already_booked' is an outcome: a seller who already has a consultation, confirmed instead of booked twice", () => {
+    expect(AiCallOutcome.safeParse('already_booked').success).toBe(true);
+    expect(AiCallOutcome.options).toContain('already_booked');
+  });
+
   it('a result row carries the appointment and the write-back summary', () => {
     const row = {
       touchId: TOUCH, enrollmentId: TOUCH, name: 'Pat', sfObject: 'Lead', sfRecordId: '00Q000000000001AAA', recordUrl: null,

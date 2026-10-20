@@ -8,6 +8,7 @@ describe('nextStepFor (decision 9)', () => {
     ['qualified_callback', { kind: 'hand_off' }],
     ['appointment_set', { kind: 'hand_off' }],
     ['transfer_failed', { kind: 'hand_off' }],
+    ['already_booked', { kind: 'complete', reason: 'already_booked' }],
     ['not_interested', { kind: 'exit', reason: 'not_interested' }],
     ['do_not_call', { kind: 'exit', reason: 'do_not_call' }],
     ['wrong_number', { kind: 'exit', reason: 'wrong_number' }],

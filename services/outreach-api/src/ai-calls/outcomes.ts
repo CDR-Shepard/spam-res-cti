@@ -14,6 +14,8 @@ const UNANSWERED: ReadonlySet<string> = new Set(['no_answer', 'busy', 'voicemail
 export function nextStepFor(outcome: AiCallOutcome | null, answeredAttempts: number, maxAttempts: number): NextStep {
   if (outcome && HAND_OFF.has(outcome)) return { kind: 'hand_off' };
   if (outcome && EXIT.has(outcome)) return { kind: 'exit', reason: outcome };
+  // The seller already has a consultation and Sam confirmed it: the touch is done, and no second booking is made.
+  if (outcome === 'already_booked') return { kind: 'complete', reason: 'already_booked' };
   if (outcome === null || UNANSWERED.has(outcome)) {
     return answeredAttempts < maxAttempts ? { kind: 'retry' } : { kind: 'complete', reason: 'ai_call_no_answer' };
   }

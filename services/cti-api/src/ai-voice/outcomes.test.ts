@@ -18,6 +18,7 @@ describe('OUTCOME_WORDS', () => {
       blocked: 'Blocked',
       other: 'Other',
       appointment_set: 'Appointment set',
+      already_booked: 'Already booked',
     });
   });
 
@@ -37,6 +38,7 @@ describe('ctiDisposition', () => {
     ['transfer_failed', 'Connected'],
     ['other', 'Connected'],
     ['appointment_set', 'Connected'],
+    ['already_booked', 'Connected'],
     ['voicemail', 'Left voicemail'],
     ['no_answer', 'No answer'],
     ['busy', 'Busy'],

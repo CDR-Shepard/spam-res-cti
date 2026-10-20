@@ -9,7 +9,7 @@ import {
   type PromptInput,
   type RealtimeFunctionTool,
 } from './prompt.js';
-import { OUTBOUND_TOOL_NAMES } from './prompt-tools.js';
+import { END_CALL_OUTCOMES, OUTBOUND_TOOL_NAMES } from './prompt-tools.js';
 
 const FENCE_OPEN = '<crm_notes>';
 const FENCE_CLOSE = '</crm_notes>';
@@ -415,6 +415,18 @@ describe('AI_CALL_TOOLS', () => {
     });
     const end = tools.find((t) => t.name === 'end_call')!.parameters as { properties: Record<string, { enum?: string[] }> };
     expect(end.properties.outcome?.enum).toEqual(['not_interested', 'do_not_call', 'wrong_number', 'qualified_callback', 'hung_up', 'other', 'appointment_set']);
+  });
+
+  // Task 9: end_call ACCEPTS already_booked; Task 10's toolsFor decides when it is OFFERED. Until then no call is offered it.
+  it('end_call accepts already_booked but does not offer it: not on a call without slots, not on one with slots', () => {
+    expect([...END_CALL_OUTCOMES]).toContain('already_booked');
+    const offered = (tools: RealtimeFunctionTool[]) =>
+      (tools.find((t) => t.name === 'end_call')!.parameters as { properties: Record<string, { enum?: string[] }> }).properties.outcome?.enum;
+    expect(offered(AI_CALL_TOOLS)).not.toContain('already_booked');
+    expect(offered(toolsFor(SLOTS))).not.toContain('already_booked');
+    expect(offered(toolsFor(SLOTS))).toContain('appointment_set');
+    // Everything offered is accepted (an offered outcome the parser dropped would end as 'other').
+    for (const outcome of [...(offered(AI_CALL_TOOLS) ?? []), ...(offered(toolsFor(SLOTS)) ?? [])]) expect([...END_CALL_OUTCOMES]).toContain(outcome);
   });
 
   it('every tool is a strict function schema with a description', () => {

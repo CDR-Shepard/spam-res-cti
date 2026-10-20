@@ -78,6 +78,7 @@ describe('AI call result words', () => {
     expect(OUTCOME_WORDS.qualified_transferred).toBe('Transferred to a person');
     expect(CALL_STATUS_WORDS.completed).toBe('Completed');
     expect(OUTCOME_WORDS.appointment_set).toBe('Appointment set');
+    expect(OUTCOME_WORDS.already_booked).toBe('Already booked');
   });
 
   it.each([

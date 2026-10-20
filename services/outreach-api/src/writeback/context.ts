@@ -25,6 +25,7 @@ export const OUTCOME_WORDS: Readonly<Record<string, string>> = {
   blocked: 'Blocked',
   other: 'Other',
   appointment_set: 'Appointment set',
+  already_booked: 'Already booked',
 };
 
 export interface WritebackCall {
