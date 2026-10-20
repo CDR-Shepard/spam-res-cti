@@ -18,13 +18,16 @@ import { blockedTargets } from '../dialer/consent-check.js';
 import { withinCallingHours, type Db } from '../dialer/pick-did.js';
 import type { BridgeLog } from './bridge.js';
 import { gateAiCall, type AiGateBlock, type AiGateInput, type AiGateResult, type GateDeps } from './gate.js';
+import { localTimeFor } from './local-time.js';
 import { peekAiCallerId, pickAiDid } from './number-pool.js';
-import { loadAgentPrompts } from './prompt-saved.js';
+import { voicemailText } from './prompt.js';
+import { loadAgentPrompts, logTemplateError } from './prompt-saved.js';
 import { testPhoneNumbers } from './test-phones.js';
 import type { AiCallObject, AiCallRecord } from './record.js';
-import { dropActiveCall, registerActiveCall, updateActiveCall } from './registry.js';
+import { dropActiveCall, registerActiveCall, updateActiveCall, type ActiveAiCall } from './registry.js';
 import { gateTarget, handoffUser, loadTarget, rowTarget, targetKind, typedNumber, type StartTarget } from './service-target.js';
 import type { AiCallStore } from './store.js';
+import type { VoicemailAudio } from './voicemail-audio.js';
 import {
   AMD_PATH,
   STATUS_PATH,
@@ -54,6 +57,8 @@ export interface StartDeps {
   gate: (db: Db, input: AiGateInput, deps?: GateDeps) => Promise<AiGateResult>;
   now: () => Date;
   log: BridgeLog;
+  /** Sam's voicemail (voicemail-audio.ts): its render starts once Twilio has the call; null = `<Say>` only. */
+  voicemail: Pick<VoicemailAudio, 'prepare'> | null;
 }
 
 export interface StartInput {
@@ -134,6 +139,19 @@ function sellerNumber(i: StartInput, record: AiCallRecord | null, to: string): s
   return phone && timezoneForNumber(phone) ? phone : to;
 }
 
+/**
+ * Start rendering the voicemail the beep would leave (the same text onAmd builds) while the phone rings: a full one
+ * takes ~3 s, too long to start at the beep. Never fails the call; the beep falls back to `<Say>`.
+ */
+function prepareVoicemail(deps: StartDeps, aiCallId: string, prompt: ActiveAiCall['prompt'], to: string): void {
+  if (!deps.voicemail) return;
+  try {
+    deps.voicemail.prepare(aiCallId, voicemailText({ ...prompt, localTime: localTimeFor(to, deps.now()) }, logTemplateError(deps.log)));
+  } catch (e) {
+    deps.log.warn({ aiCallId, err: errText(e) }, 'ai-voice: the voicemail render could not start — the beep will use <Say>');
+  }
+}
+
 async function blockedRow(i: StartInput, reason: StartBlock, to: string): Promise<StartResult> {
   const row = await i.deps.store.insert({
     orgId: i.session.orgId,
@@ -203,6 +221,18 @@ export async function startAiCall(i: StartInput): Promise<StartResult> {
   // The registry's isTest (no Salesforce Task, no results) holds for test AND practice calls; the prompt's isTest (the
   // "this is a test call" line) only for a test call: a practice call lets the admin hear exactly what the seller would.
   const isTest = kind !== 'record';
+  const prompt: ActiveAiCall['prompt'] = {
+    agentName: cfg.AI_VOICE_AGENT_NAME,
+    companyName: company,
+    firstName: record?.firstName ?? null,
+    address: record?.address ?? null,
+    notes: record?.notes ?? '',
+    isTest: kind === 'test',
+    callbackNumber: gate.fromE164,
+    templates,
+    ...(i.plan ? { approvedPlan: i.plan } : {}),
+    ...bookingPrompt(i, record, gate.toE164),
+  };
   registerActiveCall(
     {
       aiCallId,
@@ -216,18 +246,7 @@ export async function startAiCall(i: StartInput): Promise<StartResult> {
       direction: 'outbound',
       ...(isPractice(i) ? { localTimeE164: sellerNumber(i, record, gate.toE164) } : {}),
       record,
-      prompt: {
-        agentName: cfg.AI_VOICE_AGENT_NAME,
-        companyName: company,
-        firstName: record?.firstName ?? null,
-        address: record?.address ?? null,
-        notes: record?.notes ?? '',
-        isTest: kind === 'test',
-        callbackNumber: gate.fromE164,
-        templates,
-        ...(i.plan ? { approvedPlan: i.plan } : {}),
-        ...bookingPrompt(i, record, gate.toE164),
-      },
+      prompt,
       bridge: null,
       transcript: null,
       closing: false,
@@ -265,6 +284,8 @@ export async function startAiCall(i: StartInput): Promise<StartResult> {
   }
 
   updateActiveCall(aiCallId, { callSid });
+  // A browser leg has no answering-machine detection, so it never leaves a voicemail.
+  if (kind !== 'practice_browser') prepareVoicemail(deps, aiCallId, prompt, gate.toE164);
   await recordPlaced(deps, aiCallId, callSid);
   deps.log.info({ aiCallId, isTest }, 'ai-voice: call placed');
   return { ok: true, aiCallId, status: 'ringing' };

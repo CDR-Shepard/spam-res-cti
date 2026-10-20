@@ -11,6 +11,7 @@ import {
   testTransferOffTwiml,
   transferTwiml,
   verifyStreamToken,
+  voicemailPlayTwiml,
   voicemailTwiml,
   NO_REP_TEXT,
   TEST_TRANSFER_OFF_TEXT,
@@ -107,6 +108,13 @@ describe('fixed TwiML', () => {
   it('voicemailTwiml pauses, says the escaped text, and hangs up', () => {
     expect(voicemailTwiml('Hi <Jane> & co')).toBe(
       '<?xml version="1.0" encoding="UTF-8"?><Response><Pause length="1"/><Say voice="Polly.Joanna-Neural">Hi &lt;Jane&gt; &amp; co</Say><Hangup/></Response>',
+    );
+  });
+
+  it("voicemailPlayTwiml pauses, plays Sam's recorded voicemail, and hangs up", () => {
+    const url = `https://api.test/telephony/twilio/ai-voice/voicemail/${'a'.repeat(64)}`;
+    expect(voicemailPlayTwiml(url)).toBe(
+      `<?xml version="1.0" encoding="UTF-8"?><Response><Pause length="1"/><Play>${url}</Play><Hangup/></Response>`,
     );
   });
 });

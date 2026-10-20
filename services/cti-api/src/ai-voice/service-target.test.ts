@@ -35,7 +35,7 @@ function input(target: StartTarget, loaded: AiCallRecord | null = record): Start
   store.handoff.set('005OWNER0000001', 'owner-user-id');
   return {
     db: {} as never, cfg: {} as never, session, target,
-    deps: { store, twilio: {} as never, gate: vi.fn() as never, loadRecord: vi.fn(async () => loaded), now: () => new Date(), log: silentLog },
+    deps: { store, twilio: {} as never, gate: vi.fn() as never, loadRecord: vi.fn(async () => loaded), now: () => new Date(), log: silentLog, voicemail: null },
   };
 }
 

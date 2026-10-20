@@ -5,6 +5,7 @@
  *   GET  /internal/ai-calls/availability is AI calling on; test numbers (signed)
  *   POST /internal/ai-calls/prompt-check check an agent prompt template and preview it (signed)
  *   POST /telephony/twilio/ai-voice/{amd,status,transfer-result}   (routes-webhooks.ts)
+ *   GET  /telephony/twilio/ai-voice/voicemail/:token   Sam's recorded voicemail for <Play> (voicemail-audio.ts)
  *   GET  /telephony/twilio/ai-voice/stream  (WebSocket, routes-stream.ts)
  *
  * Dependencies are injectable (`overrides`) so tests never touch Twilio,
@@ -17,6 +18,7 @@ import type { Db } from '../dialer/pick-did.js';
 import type { BridgeLog } from './bridge.js';
 import type { CallerDetailsDeps } from './caller-details.js';
 import { externalVoiceFor } from './elevenlabs-tts.js';
+import { voicemailVoiceFor } from './elevenlabs-voicemail.js';
 import { gateAiCall } from './gate.js';
 import { internalSession } from './internal-auth.js';
 import { loadIntegrationRecord } from './integration-record.js';
@@ -25,13 +27,14 @@ import { drizzleAiCallRequestStore, type AiCallRequestStore } from './request-st
 import { registerInternalAiCallRoutes } from './routes-internal.js';
 import { registerAiVoiceStreamRoute } from './routes-stream.js';
 import { registerAiVoiceWebhooks } from './routes-webhooks.js';
-import { startAiCall, type StartDeps } from './service.js';
+import { REGISTRY_MARGIN_SECONDS, startAiCall, type StartDeps } from './service.js';
 import { liveAfterCall, type AfterCall } from './service-finalize.js';
 import { withSalesforceEffects } from './sf-logging.js';
 import { defaultToolEffects, type ToolEffects } from './service-tools.js';
 import { drizzleAiCallStore, type AiCallStore } from './store.js';
 import type { StreamSessionDeps } from './stream-session.js';
 import { createAiVoiceTwilio, type AiVoiceTwilio } from './twilio.js';
+import { createVoicemailAudio, registerVoicemailAudioRoute, type VoicemailAudio } from './voicemail-audio.js';
 import { openRealtime } from './ws-adapter.js';
 
 export interface AiVoiceDeps {
@@ -50,6 +53,8 @@ export interface AiVoiceDeps {
   details?: CallerDetailsDeps;
   /** Idempotency store of the internal trigger; tests override it (default: ai_call_requests). */
   requests?: AiCallRequestStore;
+  /** Sam's recorded voicemail (AI_VOICE_VOICEMAIL_TTS); null = the stock `<Say>` voice. */
+  voicemail: VoicemailAudio | null;
 }
 
 /** Live wiring; the Salesforce/summary pieces are built on the store and clock actually in use. */
@@ -58,6 +63,9 @@ function defaultDeps(overrides: Partial<AiVoiceDeps>, log: BridgeLog): AiVoiceDe
   const store = overrides.store ?? drizzleAiCallStore(getDb());
   const now = overrides.now ?? (() => new Date());
   const { afterCall, sf, summary } = liveAfterCall(cfg, store, log, now);
+  const render = voicemailVoiceFor(cfg, log);
+  // Held as long as a call can be live, like the registry entry (service.ts).
+  const ttlMs = (cfg.AI_VOICE_MAX_CALL_SECONDS + REGISTRY_MARGIN_SECONDS) * 1000;
   return {
     store,
     twilio: createAiVoiceTwilio(cfg),
@@ -69,6 +77,7 @@ function defaultDeps(overrides: Partial<AiVoiceDeps>, log: BridgeLog): AiVoiceDe
     now,
     afterCall,
     details: summary,
+    voicemail: render ? createVoicemailAudio({ render, apiPublicUrl: cfg.API_PUBLIC_URL, ttlMs, log }) : null,
   };
 }
 
@@ -76,7 +85,16 @@ export async function registerAiVoiceRoutes(app: FastifyInstance, overrides: Par
   const log = app.log;
   const deps: AiVoiceDeps = { ...defaultDeps(overrides, log), ...overrides };
 
-  registerAiVoiceWebhooks(app, { store: deps.store, twilio: deps.twilio, effects: deps.effects, now: deps.now, log, afterCall: deps.afterCall });
+  registerAiVoiceWebhooks(app, {
+    store: deps.store,
+    twilio: deps.twilio,
+    effects: deps.effects,
+    now: deps.now,
+    log,
+    afterCall: deps.afterCall,
+    voicemail: deps.voicemail,
+  });
+  if (deps.voicemail) registerVoicemailAudioRoute(app, deps.voicemail);
 
   await registerAiVoiceStreamRoute(app, (req) => {
     const cfg = loadConfig();
@@ -102,7 +120,7 @@ export async function registerAiVoiceRoutes(app: FastifyInstance, overrides: Par
     session: internalSession,
     loadIntegrationRecord: (db, orgId, objectType, recordId) => loadIntegrationRecord(db, loadConfig(), orgId, objectType, recordId),
     start: startAiCall,
-    startDeps: { store: deps.store, twilio: deps.twilio, gate: deps.gate, now: deps.now, log },
+    startDeps: { store: deps.store, twilio: deps.twilio, gate: deps.gate, now: deps.now, log, voicemail: deps.voicemail },
     log,
   });
 }

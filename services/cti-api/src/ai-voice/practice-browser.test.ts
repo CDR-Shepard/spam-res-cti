@@ -58,7 +58,7 @@ beforeEach(() => {
     peekAiCallerId: vi.fn(async () => FROM),
   };
   deps = {
-    store, twilio, loadRecord: vi.fn(async () => record), now: () => NOW, log: silentLog,
+    store, twilio, loadRecord: vi.fn(async () => record), now: () => NOW, log: silentLog, voicemail: null,
     gate: vi.fn((d, input) => gateAiCall(d, input, gateDeps)),
   };
 });

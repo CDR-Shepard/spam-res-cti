@@ -134,6 +134,15 @@ export function voicemailTwiml(text: string): string {
   return res.toString();
 }
 
+/** Sam's voicemail, recorded in her voice (voicemail-audio.ts), after the beep, then hang up. */
+export function voicemailPlayTwiml(audioUrl: string): string {
+  const res = new twilio.twiml.VoiceResponse();
+  res.pause({ length: 1 });
+  res.play(audioUrl);
+  res.hangup();
+  return res.toString();
+}
+
 /** The slice of the twilio REST client this module uses (a fake in tests). */
 export interface AiVoiceTwilioClient {
   calls: ((callSid: string) => {

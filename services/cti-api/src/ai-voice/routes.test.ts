@@ -36,9 +36,12 @@ vi.mock('@cti/db', async (importOriginal) => ({
   getDb: () => ({}),
 }));
 
-import { registerAiVoiceRoutes } from './routes.js';
+import { registerAiVoiceRoutes, type AiVoiceDeps } from './routes.js';
+import { onAmd, onStatus, type WebhookDeps } from './routes-webhooks.js';
+import { voicemailText } from './prompt.js';
+import { createVoicemailAudio, type VoicemailAudio } from './voicemail-audio.js';
 import { claimClose, clearActiveCalls, getActiveCall, registerActiveCall } from './registry.js';
-import { activeEntry, CALL_SID, fakeStore, fakeTwilio, type FakeStore, type FakeTwilio } from './testing.js';
+import { activeEntry, CALL_SID, fakeStore, fakeTwilio, silentLog, type FakeStore, type FakeTwilio } from './testing.js';
 import type { AiGateResult } from './gate.js';
 import { defaultToolEffects, type ToolCtx } from './service-tools.js';
 
@@ -58,7 +61,7 @@ let afterCall: ReturnType<typeof vi.fn>;
 let transferFailed: ReturnType<typeof vi.fn>;
 let bridge: { start: ReturnType<typeof vi.fn>; silence: ReturnType<typeof vi.fn>; waitForPlayback: ReturnType<typeof vi.fn>; stop: ReturnType<typeof vi.fn> };
 
-async function build(withRateLimit = false) {
+async function build(withRateLimit = false, extra: Partial<AiVoiceDeps> = {}) {
   app = Fastify();
   app.addContentTypeParser('application/x-www-form-urlencoded', { parseAs: 'string' }, (req, body, done) => {
     (req as unknown as { rawBody?: string }).rawBody = body as string;
@@ -88,6 +91,7 @@ async function build(withRateLimit = false) {
     now: () => NOW,
     afterCall: (row) => afterCall(row),
     effects: { ...defaultToolEffects, transferFailed: (ctx, info) => transferFailed(ctx, info) },
+    ...extra,
   });
   await app.ready();
 }
@@ -371,5 +375,118 @@ describe('POST /telephony/twilio/ai-voice/transfer-result', () => {
     const res = await signedPost(path, { CallSid: CALL_SID, DialCallStatus: 'no-answer' });
     expect(res.statusCode).toBe(200);
     expect(res.body).toContain('<Hangup/>');
+  });
+});
+
+describe("AMD voicemail in Sam's voice (plan 2026-10-19)", () => {
+  const amd = `/telephony/twilio/ai-voice/amd?aiCallId=${ID}`;
+  const status = `/telephony/twilio/ai-voice/status?aiCallId=${ID}`;
+  const WAV = Buffer.from('RIFF-sams-voicemail');
+  let render: ReturnType<typeof vi.fn<(text: string) => Promise<Buffer>>>;
+  let voicemail: VoicemailAudio;
+
+  beforeEach(async () => {
+    await app.close();
+    render = vi.fn<(text: string) => Promise<Buffer>>();
+    voicemail = createVoicemailAudio({ render, apiPublicUrl: API, ttlMs: 60_000, log: silentLog });
+    await build(false, { voicemail });
+  });
+
+  /** A live call whose voicemail render was started, as placing it does (service.ts). */
+  async function liveCallPrepared(): Promise<void> {
+    await liveCall();
+    voicemail.prepare(ID, voicemailText({ ...getActiveCall(ID)!.prompt, localTime: 'any' }));
+  }
+
+  const playedPath = (twiml: string): string => new URL(/<Play>([^<]+)<\/Play>/.exec(twiml)![1]!).pathname;
+
+  it('the audio is ready at the beep: the call plays it (no <Say>), and Twilio can fetch the WAV', async () => {
+    render.mockResolvedValueOnce(WAV);
+    await liveCallPrepared();
+    const res = await signedPost(amd, { CallSid: CALL_SID, AnsweredBy: 'machine_end_beep' });
+    expect(res.statusCode).toBe(200);
+    expect(bridge.silence).toHaveBeenCalled();
+    expect(tw.redirects).toHaveLength(1);
+    const twiml = tw.redirects[0]!.twiml;
+    expect(twiml).toMatch(/<Pause length="1"\/><Play>https:\/\/api\.test\/telephony\/twilio\/ai-voice\/voicemail\/[0-9a-f]{64}<\/Play><Hangup\/>/);
+    expect(twiml).not.toContain('<Say');
+    expect(store.rows.get(ID)).toMatchObject({ answeredBy: 'machine_end_beep', outcome: 'voicemail' });
+    const audio = await app.inject({ method: 'GET', url: playedPath(twiml) });
+    expect(audio.statusCode).toBe(200);
+    expect(audio.headers['content-type']).toBe('audio/wav');
+    expect(audio.rawPayload).toEqual(WAV);
+  });
+
+  it('the render failed: the stock voice reads the same message, as before', async () => {
+    render.mockRejectedValueOnce(new Error('ElevenLabs voicemail 401 quota_exceeded'));
+    await liveCallPrepared();
+    await signedPost(amd, { CallSid: CALL_SID, AnsweredBy: 'machine_end_beep' });
+    expect(tw.redirects[0]!.twiml).toContain(
+      '<Pause length="1"/><Say voice="Polly.Joanna-Neural">Hi Jane, this is Alex, an AI assistant calling for GG Homes',
+    );
+    expect(store.rows.get(ID)?.outcome).toBe('voicemail');
+  });
+
+  it('a status while the call is still going keeps the audio for the beep', async () => {
+    render.mockResolvedValueOnce(WAV);
+    await liveCallPrepared();
+    await signedPost(status, { CallSid: CALL_SID, CallStatus: 'in-progress' });
+    await signedPost(amd, { CallSid: CALL_SID, AnsweredBy: 'machine_end_beep' });
+    expect(tw.redirects[0]!.twiml).toContain('<Play>');
+  });
+
+  it('a render still running at the beep is waited for (up to 1.5 s), then played', async () => {
+    render.mockImplementationOnce(() => new Promise((resolve) => setTimeout(() => resolve(WAV), 300)));
+    await liveCallPrepared();
+    await signedPost(amd, { CallSid: CALL_SID, AnsweredBy: 'machine_end_beep' });
+    expect(tw.redirects[0]!.twiml).toContain('<Play>');
+  });
+
+  it('once the call has ended its audio is gone (the link only works while the voicemail plays)', async () => {
+    render.mockResolvedValueOnce(WAV);
+    await liveCallPrepared();
+    await signedPost(amd, { CallSid: CALL_SID, AnsweredBy: 'machine_end_beep' });
+    const path = playedPath(tw.redirects[0]!.twiml);
+    await signedPost(status, { CallSid: CALL_SID, CallStatus: 'completed', CallDuration: '31', AnsweredBy: 'machine_end_beep' });
+    expect((await app.inject({ method: 'GET', url: path })).statusCode).toBe(404);
+  });
+});
+
+describe("voicemail audio that misbehaves never costs the call (plan 2026-10-19)", () => {
+  const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+  const webhookDeps = (voicemail: WebhookDeps['voicemail']): WebhookDeps => ({
+    store,
+    twilio: tw,
+    effects: defaultToolEffects,
+    now: () => NOW,
+    log,
+    voicemail,
+  });
+
+  beforeEach(() => {
+    log.info.mockClear();
+    log.warn.mockClear();
+    log.error.mockClear();
+  });
+
+  it('a failing audio lookup at the beep: the stock voice reads it, and the failure is logged', async () => {
+    await liveCall();
+    const voicemail = { playUrl: vi.fn(async () => Promise.reject(new Error('lookup broke'))), forget: vi.fn() };
+    await onAmd((await store.get(ID))!, 'machine_end_beep', webhookDeps(voicemail));
+    expect(tw.redirects[0]!.twiml).toContain('<Say voice="Polly.Joanna-Neural">Hi Jane');
+    expect(log.warn).toHaveBeenCalledWith({ aiCallId: ID, err: 'lookup broke' }, expect.any(String));
+  });
+
+  it('a failing forget at the end of the call: the call is still finalized', async () => {
+    await liveCall();
+    const voicemail = {
+      playUrl: vi.fn(async () => null),
+      forget: vi.fn(() => {
+        throw new Error('forget broke');
+      }),
+    };
+    await onStatus((await store.get(ID))!, { CallSid: CALL_SID, CallStatus: 'completed', CallDuration: '12' }, webhookDeps(voicemail));
+    expect(store.rows.get(ID)).toMatchObject({ status: 'completed' });
+    expect(log.error).toHaveBeenCalledWith({ aiCallId: ID, err: 'forget broke' }, expect.any(String));
   });
 });

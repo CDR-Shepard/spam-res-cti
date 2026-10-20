@@ -24,7 +24,7 @@ beforeEach(async () => {
   twilio = fakeTwilio();
   warn = vi.fn();
   bridge = { start: vi.fn(), silence: vi.fn(), waitForPlayback: vi.fn(async () => {}), stop: vi.fn() };
-  deps = { store, twilio, effects: defaultToolEffects, now: () => NOW, log: { info: vi.fn(), warn, error: vi.fn() } };
+  deps = { store, twilio, effects: defaultToolEffects, now: () => NOW, log: { info: vi.fn(), warn, error: vi.fn() }, voicemail: null };
   await store.insert({ id: ID, orgId: 'o1', startedBy: 'u1', toE164: '+16195550100', fromE164: '+16195550000', status: 'in_progress', callSid: CALL_SID });
 });
 afterEach(() => clearActiveCalls());

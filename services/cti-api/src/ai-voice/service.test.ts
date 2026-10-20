@@ -62,6 +62,7 @@ beforeEach(() => {
     gate: vi.fn(async () => gateResult),
     now: () => NOW,
     log: silentLog,
+    voicemail: null,
   };
 });
 afterEach(() => clearActiveCalls());
@@ -446,5 +447,64 @@ describe('startAiCall — the org\'s saved agent prompts', () => {
     const withNone = buildInstructions({ ...entry.prompt, localTime: 'Monday 11:00 AM' });
     expect(withNone).toBe(buildInstructions({ ...entry.prompt, templates: undefined, localTime: 'Monday 11:00 AM' }));
     expect(withNone).toContain('an AI assistant calling for GG Homes on a recorded line');
+  });
+});
+
+describe("startAiCall — Sam's voicemail starts rendering while the phone rings", () => {
+  let prepare: ReturnType<typeof vi.fn>;
+  /** What was true when prepare ran: was the call placed, and registered? */
+  let seen: Array<{ placed: number; registered: boolean }>;
+
+  beforeEach(() => {
+    seen = [];
+    prepare = vi.fn((aiCallId: string) => seen.push({ placed: twilio.placed.length, registered: getActiveCall(aiCallId) !== null }));
+    deps.voicemail = { prepare };
+  });
+
+  it('starts once Twilio has the call, with the exact voicemail text the beep will leave', async () => {
+    const res = await start({ objectType: 'Lead', recordId: '00Q5e00000AbCdEFGH' });
+    if (!res.ok) throw new Error('unreachable');
+    expect(prepare).toHaveBeenCalledTimes(1);
+    const [id, text] = prepare.mock.calls[0]! as [string, string];
+    expect(id).toBe(res.aiCallId);
+    expect(text).toBe(voicemailText({ ...getActiveCall(res.aiCallId)!.prompt, localTime: 'any' }));
+    expect(text).toContain('Hi Jane, this is Alex, an AI assistant calling for GG Homes');
+    expect(text).toContain('619-555-0000');
+    expect(seen).toEqual([{ placed: 1, registered: true }]);
+  });
+
+  it.each([
+    ['a phone practice call (the owner hears what the seller would)', { practice: { objectType: 'Lead' as const, recordId: '00Q5e00000AbCdEFGH', to: '+15125550100' } }],
+    ['a test call', { testTo: '+16195550199' }],
+  ])('renders for %s too', async (_kind, target) => {
+    const res = await start(target);
+    if (!res.ok) throw new Error('unreachable');
+    expect(prepare).toHaveBeenCalledTimes(1);
+    expect(prepare.mock.calls[0]![0]).toBe(res.aiCallId);
+  });
+
+  it('no render for a browser practice call (no answering-machine detection, so never a voicemail)', async () => {
+    const res = await start({ practiceBrowser: { objectType: 'Lead', recordId: '00Q5e00000AbCdEFGH', identity: 'admin-1' } });
+    expect(res).toMatchObject({ ok: true });
+    expect(prepare).not.toHaveBeenCalled();
+  });
+
+  it('no render when Twilio refuses the call', async () => {
+    twilio.failPlace = true;
+    expect(await start({ objectType: 'Lead', recordId: '00Q5e00000AbCdEFGH' })).toMatchObject({ ok: false, reason: 'twilio_error' });
+    expect(prepare).not.toHaveBeenCalled();
+  });
+
+  it('no render for a call the gate blocks', async () => {
+    gateResult = { ok: false, reason: 'no_consent' };
+    await start({ objectType: 'Lead', recordId: '00Q5e00000AbCdEFGH' });
+    expect(prepare).not.toHaveBeenCalled();
+  });
+
+  it('a prepare that throws does not fail the call', async () => {
+    prepare.mockImplementation(() => {
+      throw new Error('boom');
+    });
+    expect(await start({ objectType: 'Lead', recordId: '00Q5e00000AbCdEFGH' })).toMatchObject({ ok: true, status: 'ringing' });
   });
 });

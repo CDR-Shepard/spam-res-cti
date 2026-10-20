@@ -107,7 +107,7 @@ describe('finalize and AMD on a test or practice call', () => {
 
   it('a fax answer on the admin\'s test number is hung up and recorded, but not opted out', async () => {
     registerActiveCall(activeEntry({ aiCallId: ID, orgId: ORG, callSid: CALL_SID, toE164: TO, isTest: true }));
-    const deps = { store, twilio, effects: defaultToolEffects, now: () => NOW, log: silentLog };
+    const deps = { store, twilio, effects: defaultToolEffects, now: () => NOW, log: silentLog, voicemail: null };
     await onAmd(store.rows.get(ID)!, 'fax', deps);
     expect(twilio.hangups).toEqual([CALL_SID]);
     expect(store.rows.get(ID)?.outcome).toBe('wrong_number');

@@ -109,7 +109,7 @@ beforeEach(async () => {
     session: vi.fn(async () => session),
     loadIntegrationRecord: vi.fn(async () => null),
     start: vi.fn(async () => startResult),
-    startDeps: { store: {} as never, twilio: {} as never, gate: vi.fn() as never, now: () => NOW, log },
+    startDeps: { store: {} as never, twilio: {} as never, gate: vi.fn() as never, now: () => NOW, log, voicemail: null },
     log,
   };
   app = await build();

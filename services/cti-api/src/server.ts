@@ -81,6 +81,9 @@ async function main(): Promise<void> {
       // Twilio + NumberVerifier webhooks are secret-validated (and reject
       // unauthenticated requests before any work) and can legitimately burst —
       // never rate-limit them. The auth'd /telephony/token route is NOT exempt.
+      // The AI voicemail audio Twilio <Play>s (ai-voice/voicemail-audio.ts) is
+      // keyed by an unguessable 256-bit token instead: an O(1) lookup that
+      // writes no request log, gone when its call ends.
       if (typeof req.url === 'string' &&
         (req.url.startsWith('/telephony/twilio/') || req.url.startsWith('/integrations/numberverifier/'))) {
         return true;

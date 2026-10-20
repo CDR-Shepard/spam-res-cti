@@ -3,10 +3,12 @@
  * (query string included — telephony/webhooks.ts) and keyed by `?aiCallId=`:
  *
  *   amd              async AMD: a machine after the beep gets the voicemail
- *                    (silence the agent, redirect to <Say>); a fax is opted
+ *                    (silence the agent, redirect to <Play> of Sam's recorded
+ *                    voicemail when it is ready, else <Say>); a fax is opted
  *                    out (source ai_call, note 'fax') and hung up.
  *   status           call progress; a terminal status finalizes (idempotent;
- *                    the summary / Salesforce work runs after the reply).
+ *                    the summary / Salesforce work runs after the reply) and
+ *                    drops the call's voicemail audio.
  *   transfer-result  the transfer's <Dial action>: rep answered → status
  *                    `transferred` (the ONLY place that sets it, even after
  *                    finalize), hang up when done; otherwise outcome
@@ -28,7 +30,8 @@ import { localTimeFor } from './local-time.js';
 import { finalizeAiCall, isTerminalCallStatus, mapCallStatus, type AfterCall } from './service-finalize.js';
 import type { ToolCtx, ToolEffects } from './service-tools.js';
 import type { AiCallRow, AiCallStore } from './store.js';
-import { AMD_PATH, STATUS_PATH, TRANSFER_RESULT_PATH, noRepTwiml, voicemailTwiml, type AiVoiceTwilio } from './twilio.js';
+import { AMD_PATH, STATUS_PATH, TRANSFER_RESULT_PATH, noRepTwiml, voicemailPlayTwiml, voicemailTwiml, type AiVoiceTwilio } from './twilio.js';
+import { VOICEMAIL_READY_WAIT_MS, type VoicemailAudio } from './voicemail-audio.js';
 
 export interface WebhookDeps {
   store: AiCallStore;
@@ -38,6 +41,8 @@ export interface WebhookDeps {
   log: BridgeLog;
   /** Summary + Salesforce after finalize (detached). */
   afterCall?: AfterCall;
+  /** Sam's recorded voicemail (voicemail-audio.ts); null = always `<Say>`. */
+  voicemail: Pick<VoicemailAudio, 'playUrl' | 'forget'> | null;
 }
 
 const EMPTY_TWIML = '<?xml version="1.0" encoding="UTF-8"?><Response/>';
@@ -86,6 +91,17 @@ async function hangUp(callSid: string, deps: WebhookDeps, aiCallId: string): Pro
   await deps.twilio.hangup(callSid).catch((e: unknown) => deps.log.error({ aiCallId, err: errText(e) }, 'ai-voice: hangup failed'));
 }
 
+/** Sam's recorded voicemail for this text when it is ready (voicemail-audio.ts), else null: the call gets `<Say>`. */
+async function voicemailAudioUrl(aiCallId: string, text: string, deps: WebhookDeps): Promise<string | null> {
+  if (!deps.voicemail) return null;
+  try {
+    return await deps.voicemail.playUrl(aiCallId, text, VOICEMAIL_READY_WAIT_MS);
+  } catch (e) {
+    deps.log.warn({ aiCallId, err: errText(e) }, 'ai-voice: voicemail audio lookup failed — using <Say>');
+    return null;
+  }
+}
+
 /** Async AMD. Voicemail only for a call this process placed (registry) and that passed the gate. */
 export async function onAmd(row: AiCallRow, answeredBy: string, deps: WebhookDeps): Promise<void> {
   if (!answeredBy) return;
@@ -115,10 +131,11 @@ export async function onAmd(row: AiCallRow, answeredBy: string, deps: WebhookDep
   if (!entry || !claimClose(row.id)) return; // a tool (or a failure) already owns the end of the call
   entry.bridge?.silence();
   const text = voicemailText({ ...entry.prompt, localTime: localTimeFor(entry.toE164, deps.now()) }, logTemplateError(deps.log));
+  const audioUrl = await voicemailAudioUrl(row.id, text, deps);
   try {
-    await deps.twilio.redirect(callSid, voicemailTwiml(text));
+    await deps.twilio.redirect(callSid, audioUrl ? voicemailPlayTwiml(audioUrl) : voicemailTwiml(text));
     await deps.store.setOutcome(row.id, 'voicemail', null);
-    deps.log.info({ aiCallId: row.id }, 'ai-voice: voicemail left');
+    deps.log.info({ aiCallId: row.id, voice: audioUrl ? 'elevenlabs' : 'say' }, 'ai-voice: voicemail left');
   } catch (e) {
     deps.log.error({ aiCallId: row.id, err: errText(e) }, 'ai-voice: voicemail redirect failed, hanging up');
     await hangUp(callSid, deps, row.id);
@@ -129,6 +146,12 @@ export async function onStatus(row: AiCallRow, body: unknown, deps: WebhookDeps)
   const callStatus = field(body, 'CallStatus');
   const callSid = field(body, 'CallSid') || null;
   if (isTerminalCallStatus(callStatus)) {
+    // The call is over, so its voicemail has played (or never will): the audio and its link go now.
+    try {
+      deps.voicemail?.forget(row.id);
+    } catch (e) {
+      deps.log.error({ aiCallId: row.id, err: errText(e) }, 'ai-voice: voicemail audio could not be dropped (it expires on its own)');
+    }
     const seconds = Number.parseInt(field(body, 'CallDuration'), 10);
     const fin = { store: deps.store, log: deps.log, ...(deps.afterCall ? { afterCall: deps.afterCall } : {}) };
     await finalizeAiCall(fin, row.id, {
