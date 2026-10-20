@@ -19,25 +19,34 @@ const settingsObject = sql`case when jsonb_typeof(settings) = 'object' then sett
 /** The `samEmail` key as an object, whatever it holds now. */
 const samEmailObject = sql`case when jsonb_typeof(settings -> 'samEmail') = 'object' then settings -> 'samEmail' else '{}'::jsonb end`;
 
-/** Pause Sam's email for the tenant: when and why, `enabled` left as it was. A second pause replaces the first. */
+/** An update that touched no tenant is an error: a pause that did not land must not look as if it did. */
+function requireUpdated(result: unknown, orgId: string): void {
+  if ((result as { rows: unknown[] }).rows.length === 0) throw new Error(`organization ${orgId} not found`);
+}
+
+/** Pause Sam's email for the tenant: when and why, `enabled` left as it was. A second pause replaces the first. Throws for an unknown tenant. */
 export async function pauseSamEmail(db: Db, i: { orgId: string; reason: string; now: Date }): Promise<void> {
-  await db.execute(sql`
+  const result = await db.execute(sql`
     update organizations
     set settings = jsonb_set(
       ${settingsObject},
       '{samEmail}',
       ${samEmailObject} || jsonb_build_object('pausedAt', ${i.now.toISOString()}::text, 'pausedReason', ${i.reason}::text),
       true)
-    where id = ${i.orgId}::uuid`);
+    where id = ${i.orgId}::uuid
+    returning id`);
+  requireUpdated(result, i.orgId);
 }
 
-/** Turn Sam's email on or off for the tenant. Turning it on clears a pause (an admin has looked into it); turning it off keeps one. */
+/** Turn Sam's email on or off for the tenant. Turning it on clears a pause (an admin has looked into it); turning it off keeps one. Throws for an unknown tenant. */
 export async function setSamEmailEnabled(db: Db, i: { orgId: string; enabled: boolean }): Promise<void> {
   const next = i.enabled
     ? sql`(${samEmailObject} - 'pausedAt' - 'pausedReason') || jsonb_build_object('enabled', true)`
     : sql`${samEmailObject} || jsonb_build_object('enabled', false)`;
-  await db.execute(sql`
+  const result = await db.execute(sql`
     update organizations
     set settings = jsonb_set(${settingsObject}, '{samEmail}', ${next}, true)
-    where id = ${i.orgId}::uuid`);
+    where id = ${i.orgId}::uuid
+    returning id`);
+  requireUpdated(result, i.orgId);
 }

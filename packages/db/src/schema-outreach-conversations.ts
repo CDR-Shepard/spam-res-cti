@@ -136,6 +136,8 @@ export const emailMessages = pgTable(
     sendAfter: timestamp('send_after', { withTimezone: true }),
     attempts: integer('attempts').default(0).notNull(),
     claimedAt: timestamp('claimed_at', { withTimezone: true }),
+    /** When the tick first handed this email to Resend; NULL = never. Resend forgets the idempotency key 24 hours later. */
+    firstAttemptAt: timestamp('first_attempt_at', { withTimezone: true }),
     /** The last send error; for a canceled email, why it was not sent. */
     lastError: text('last_error'),
     /** When the inbound tick finished deciding on a reply. */
@@ -147,6 +149,7 @@ export const emailMessages = pgTable(
     updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
   },
   (t) => ({
+    eventUnique: uniqueIndex('email_messages_event_unique').on(t.eventId),
     resendUnique: uniqueIndex('email_messages_resend_unique')
       .on(t.direction, t.resendId)
       .where(sql`resend_id IS NOT NULL`),

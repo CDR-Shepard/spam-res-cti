@@ -135,11 +135,19 @@ describe.skipIf(!pgLane)('outbox and send tick (real Postgres)', () => {
     return emailId;
   }
 
-  /** A row a dead tick left `sending`: claimed `claimedAgo` before NOW, created `createdAgo` before NOW. */
-  async function strand(emailId: string, claimedAgo: number, createdAgo: number) {
+  /**
+   * A row a dead tick left `sending`: claimed `claimedAgo` before NOW, and first handed to Resend `firstAttemptAgo` before NOW
+   * (null = it never got as far as Resend).
+   */
+  async function strand(emailId: string, claimedAgo: number, firstAttemptAgo: number | null, attempts = 1) {
     await db
       .update(schema.emailMessages)
-      .set({ status: 'sending', attempts: 1, claimedAt: new Date(NOW.getTime() - claimedAgo), createdAt: new Date(NOW.getTime() - createdAgo) })
+      .set({
+        status: 'sending',
+        attempts,
+        claimedAt: new Date(NOW.getTime() - claimedAgo),
+        firstAttemptAt: firstAttemptAgo === null ? null : new Date(NOW.getTime() - firstAttemptAgo),
+      })
       .where(eq(schema.emailMessages.id, emailId));
   }
 
@@ -174,11 +182,34 @@ describe.skipIf(!pgLane)('outbox and send tick (real Postgres)', () => {
       expect(row.requestedBy).not.toBeNull();
     });
 
-    it('keeps exactly one row per event', async () => {
+    it('keeps exactly one row per event: a second row for the same event is refused by the database', async () => {
       const s = await seedSeller();
       const { eventId } = await queue(s);
+      const second = db.insert(schema.emailMessages).values({
+        orgId: s.orgId,
+        conversationId: s.conv.id,
+        eventId,
+        direction: 'out',
+        status: 'queued',
+        purpose: 'reply',
+        toAddress: ADDRESS,
+        fromAddress: CFG.EMAIL_FROM,
+        sendAfter: NOW,
+      });
+      await expect(second).rejects.toMatchObject({ code: '23505', constraint: 'email_messages_event_unique' });
       const rows = await db.select().from(schema.emailMessages).where(eq(schema.emailMessages.eventId, eventId));
       expect(rows).toHaveLength(1);
+    });
+
+    it('a purpose and a conversation that do not fit are refused, writing nothing: practice only on a practice conversation', async () => {
+      const real = await seedSeller();
+      const practice = await seedPracticeSeller();
+      await expect(queue(real, { purpose: 'practice' })).rejects.toThrow('does not fit');
+      for (const purpose of ['first', 'reply', 'holding'] as const) {
+        await expect(queue(practice, { purpose }), purpose).rejects.toThrow('does not fit');
+      }
+      expect(await db.select().from(schema.emailMessages).where(eq(schema.emailMessages.orgId, real.orgId))).toHaveLength(0);
+      expect(await db.select().from(schema.conversationEvents).where(eq(schema.conversationEvents.orgId, real.orgId))).toHaveLength(0);
     });
 
     it('a conversation of another tenant queues nothing: no event, no row', async () => {
@@ -346,7 +377,7 @@ describe.skipIf(!pgLane)('outbox and send tick (real Postgres)', () => {
         expect((await rowOf(emailId)).status).toBe('sent');
       });
 
-      it('three due emails in one tick: the first three go and the rest wait for another day', async () => {
+      it('four due emails in one tick: the first three go and the fourth is canceled daily_cap', async () => {
         const s = await seedSeller();
         const queued = [];
         for (let i = 0; i < 4; i += 1) queued.push(await queue(s, { sendAfter: new Date(NOW.getTime() - (10 - i) * MINUTE) }));
@@ -401,36 +432,59 @@ describe.skipIf(!pgLane)('outbox and send tick (real Postgres)', () => {
     });
 
     describe('a crash after Resend accepted (Review Focus 5)', () => {
-      it('re-sends a row stuck sending 6 minutes, created an hour ago, with the same idempotency key', async () => {
+      it('re-sends a row stuck sending 6 minutes, first handed to Resend an hour ago, with the same idempotency key', async () => {
         const s = await seedSeller();
         const { emailId } = await queue(s);
         await strand(emailId, 6 * MINUTE, HOUR);
         const resend = fakeResend(() => ({ kind: 'sent', id: 're_same' }));
         expect(await tick(resend.client)).toEqual({ sent: 1, retried: 0, canceled: 0, failed: 0 });
         expect(resend.calls.map((c) => c.key)).toEqual([`email:${emailId}`]);
-        expect(await rowOf(emailId)).toMatchObject({ status: 'sent', resendId: 're_same', attempts: 2 });
+        // The key's 24 hours run from the FIRST attempt, which a re-send must not move.
+        expect(await rowOf(emailId)).toMatchObject({ status: 'sent', resendId: 're_same', attempts: 2, firstAttemptAt: new Date(NOW.getTime() - HOUR) });
       });
 
-      it('fails a row stuck sending 6 minutes that was created 24 hours ago, and does not send it', async () => {
+      it('fails a row stuck sending 6 minutes whose first attempt was 24 hours ago, counts it, and does not send it', async () => {
         const s = await seedSeller();
         const { emailId } = await queue(s);
         await strand(emailId, 6 * MINUTE, 24 * HOUR);
         const resend = fakeResend();
-        expect(await tick(resend.client)).toEqual({ sent: 0, retried: 0, canceled: 0, failed: 0 });
+        const log = fakeLog();
+        expect(await tick(resend.client, { log })).toEqual({ sent: 0, retried: 0, canceled: 0, failed: 1 });
         expect(resend.calls).toHaveLength(0);
         expect(await rowOf(emailId)).toMatchObject({ status: 'failed', lastError: 'idempotency_window', resendId: null });
       });
 
-      it('the cut-off is 23 hours since the email was created', async () => {
+      it('the cut-off is 23 hours since the first attempt, not since the email was created', async () => {
         const s = await seedSeller();
         const inside = await queue(s);
         const outside = await queue(s);
         await strand(inside.emailId, 6 * MINUTE, 23 * HOUR - MINUTE);
         await strand(outside.emailId, 6 * MINUTE, 23 * HOUR + MINUTE);
+        // Both were created just now: only the first-attempt time decides.
         const resend = fakeResend();
-        await tick(resend.client);
+        expect(await tick(resend.client)).toEqual({ sent: 1, retried: 0, canceled: 0, failed: 1 });
         expect(resend.calls.map((c) => c.key)).toEqual([`email:${inside.emailId}`]);
         expect((await rowOf(outside.emailId)).lastError).toBe('idempotency_window');
+      });
+
+      it('a row that never reached Resend can be re-queued at any age, and is sent', async () => {
+        const s = await seedSeller();
+        const { emailId } = await queue(s);
+        await db.update(schema.emailMessages).set({ createdAt: new Date(NOW.getTime() - 30 * HOUR) }).where(eq(schema.emailMessages.id, emailId));
+        await strand(emailId, 6 * MINUTE, null);
+        const resend = fakeResend();
+        expect(await tick(resend.client)).toEqual({ sent: 1, retried: 0, canceled: 0, failed: 0 });
+        expect(resend.calls.map((c) => c.key)).toEqual([`email:${emailId}`]);
+        expect((await rowOf(emailId)).firstAttemptAt).toEqual(NOW);
+      });
+
+      it('a row queued 30 hours ago that was never attempted is still sent', async () => {
+        const s = await seedSeller();
+        const { emailId } = await queue(s, { sendAfter: new Date(NOW.getTime() - 30 * HOUR) });
+        await db.update(schema.emailMessages).set({ createdAt: new Date(NOW.getTime() - 30 * HOUR) }).where(eq(schema.emailMessages.id, emailId));
+        const resend = fakeResend();
+        expect(await tick(resend.client)).toEqual({ sent: 1, retried: 0, canceled: 0, failed: 0 });
+        expect((await rowOf(emailId)).status).toBe('sent');
       });
 
       it('leaves a row alone while its claim is under 5 minutes old (another tick is still on it)', async () => {
@@ -453,6 +507,101 @@ describe.skipIf(!pgLane)('outbox and send tick (real Postgres)', () => {
         expect(resend.calls).toHaveLength(0);
         expect(await rowOf(emailId)).toMatchObject({ status: 'canceled', lastError: 'stopped' });
       });
+
+      it('a row stranded after its 5th attempt is failed as stuck, not requeued for another round', async () => {
+        const s = await seedSeller();
+        const { emailId } = await queue(s);
+        await strand(emailId, 6 * MINUTE, HOUR, 5);
+        const resend = fakeResend();
+        expect(await tick(resend.client)).toEqual({ sent: 0, retried: 0, canceled: 0, failed: 1 });
+        expect(resend.calls).toHaveLength(0);
+        expect(await rowOf(emailId)).toMatchObject({ status: 'failed', lastError: 'stuck', attempts: 5 });
+      });
+    });
+
+    describe('Resend forgets the key after 24 hours (Review Focus 5 across a weekend)', () => {
+      /** Maine (207): 09:00 to 17:00 on weekdays only. Friday 23 Oct 2026, 16:59 EDT. */
+      const MAINE = [{ field: 'MobilePhone', e164: '+12075550100' }];
+      const FRIDAY_1659 = new Date('2026-10-23T20:59:00.000Z');
+      const FRIDAY_1700 = new Date('2026-10-23T21:00:00.000Z');
+      const MONDAY_0900 = new Date('2026-10-26T13:00:00.000Z');
+
+      it('a row that timed out at 16:59 Friday is failed when its retry meets the closed window, and Monday does not send it', async () => {
+        const s = await seedSeller({ phones: MAINE });
+        const { emailId } = await queue(s, { sendAfter: FRIDAY_1659 });
+        const resend = fakeResend(() => ({ kind: 'retry', reason: 'timeout' }));
+        expect(await tick(resend.client, { now: FRIDAY_1659 })).toEqual({ sent: 0, retried: 1, canceled: 0, failed: 0 });
+        expect(await rowOf(emailId)).toMatchObject({ status: 'queued', firstAttemptAt: FRIDAY_1659, sendAfter: FRIDAY_1700 });
+
+        // 17:00: the window has shut and does not open again until Monday 09:00, 64 hours after the first attempt.
+        expect(await tick(resend.client, { now: FRIDAY_1700 })).toEqual({ sent: 0, retried: 0, canceled: 0, failed: 1 });
+        expect(await rowOf(emailId)).toMatchObject({ status: 'failed', lastError: 'idempotency_window' });
+
+        expect(await tick(resend.client, { now: MONDAY_0900 })).toEqual({ sent: 0, retried: 0, canceled: 0, failed: 0 });
+        expect(resend.calls).toHaveLength(1);
+      });
+
+      it('and if no tick ran over the weekend, Monday\'s tick fails it instead of sending a second copy', async () => {
+        const s = await seedSeller({ phones: MAINE });
+        const { emailId } = await queue(s, { sendAfter: FRIDAY_1659 });
+        const resend = fakeResend(() => ({ kind: 'retry', reason: 'timeout' }));
+        await tick(resend.client, { now: FRIDAY_1659 });
+        expect(await tick(resend.client, { now: MONDAY_0900 })).toEqual({ sent: 0, retried: 0, canceled: 0, failed: 1 });
+        expect(resend.calls).toHaveLength(1);
+        expect(await rowOf(emailId)).toMatchObject({ status: 'failed', lastError: 'idempotency_window' });
+      });
+
+      it('a row never handed to Resend simply waits for Monday and is sent then', async () => {
+        const s = await seedSeller({ phones: MAINE });
+        const { emailId } = await queue(s, { sendAfter: FRIDAY_1700 });
+        const resend = fakeResend();
+        expect(await tick(resend.client, { now: FRIDAY_1700 })).toEqual({ sent: 0, retried: 0, canceled: 0, failed: 0 });
+        expect(await rowOf(emailId)).toMatchObject({ status: 'queued', sendAfter: MONDAY_0900, firstAttemptAt: null });
+        expect(await tick(resend.client, { now: MONDAY_0900 })).toEqual({ sent: 1, retried: 0, canceled: 0, failed: 0 });
+        expect(resend.calls.map((c) => c.key)).toEqual([`email:${emailId}`]);
+      });
+
+      it('a deferral that still lands inside the 23 hours is allowed, and the later send uses the same key and first-attempt time', async () => {
+        const s = await seedSeller();
+        const retriedAt = new Date('2026-10-20T22:59:00.000Z'); // 17:59 CDT
+        const closed = new Date('2026-10-20T23:00:00.000Z'); // 18:00 CDT: the window has shut
+        const nextMorning = new Date('2026-10-21T13:00:00.000Z'); // 08:00 CDT, 14 hours after the first attempt
+        const { emailId } = await queue(s, { sendAfter: retriedAt });
+        const resend = fakeResend((n) => (n === 1 ? { kind: 'retry', reason: 'timeout' } : { kind: 'sent', id: 're_morning' }));
+        await tick(resend.client, { now: retriedAt });
+        expect(await tick(resend.client, { now: closed })).toEqual({ sent: 0, retried: 0, canceled: 0, failed: 0 });
+        expect(await rowOf(emailId)).toMatchObject({ status: 'queued', sendAfter: nextMorning, attempts: 1, firstAttemptAt: retriedAt, lastError: 'timeout' });
+        expect(await tick(resend.client, { now: nextMorning })).toEqual({ sent: 1, retried: 0, canceled: 0, failed: 0 });
+        expect(resend.calls.map((c) => c.key)).toEqual([`email:${emailId}`, `email:${emailId}`]);
+        expect(await rowOf(emailId)).toMatchObject({ status: 'sent', firstAttemptAt: retriedAt, attempts: 2 });
+      });
+
+      it('first_attempt_at is written before the request leaves, and only for an email that is really sent', async () => {
+        const s = await seedSeller();
+        const { emailId } = await queue(s);
+        let seenByResend: { status: string; firstAttemptAt: Date | null } | null = null;
+        const client: ResendClient = {
+          async send() {
+            const row = await rowOf(emailId);
+            seenByResend = { status: row.status, firstAttemptAt: row.firstAttemptAt };
+            return { kind: 'sent', id: 're_watched' };
+          },
+          async getReceived() {
+            throw new Error('not used');
+          },
+        };
+        await tick(client);
+        expect(seenByResend).toEqual({ status: 'sending', firstAttemptAt: NOW });
+
+        // A canceled email and a deferred one were never handed to Resend.
+        const stopped = await seedSeller();
+        await setConversation(stopped.conv.id, { handler: 'person' });
+        const canceled = await queue(stopped);
+        const evening = await queue(await seedSeller(), { sendAfter: EVENING });
+        await tick(fakeResend().client, { now: EVENING });
+        expect((await rowOf(canceled.emailId)).firstAttemptAt).toBeNull();
+        expect((await rowOf(evening.emailId)).firstAttemptAt).toBeNull();
+      });
     });
 
     describe('Resend answers', () => {
@@ -469,6 +618,8 @@ describe.skipIf(!pgLane)('outbox and send tick (real Postgres)', () => {
             sendAfter: new Date(now.getTime() + minutes * MINUTE),
             lastError: 'HTTP 503',
             claimedAt: null,
+            // The idempotency key's 24 hours run from the first attempt; later attempts never move it.
+            firstAttemptAt: NOW,
           });
           // Not due a minute early.
           expect((await tick(resend.client, { now: new Date(now.getTime() + minutes * MINUTE - MINUTE) })).retried).toBe(0);
@@ -491,6 +642,41 @@ describe.skipIf(!pgLane)('outbox and send tick (real Postgres)', () => {
         await tick(resend.client, { now: new Date(NOW.getTime() + MINUTE) });
         expect(await rowOf(emailId)).toMatchObject({ status: 'sent', resendId: 're_second', attempts: 2, sentAt: new Date(NOW.getTime() + MINUTE) });
         expect((await eventOf(eventId)).sfLogStatus).toBe('pending');
+      });
+
+      it('an answer that arrives after another worker took the row over changes nothing, and is logged', async () => {
+        const s = await seedSeller();
+        const { emailId } = await queue(s);
+        // While the request is out, the row is reaped and re-claimed elsewhere: it is `sending` again, under another claim.
+        const otherClaim = new Date(NOW.getTime() + MINUTE);
+        const client: ResendClient = {
+          async send() {
+            await db.update(schema.emailMessages).set({ claimedAt: otherClaim }).where(eq(schema.emailMessages.id, emailId));
+            return { kind: 'sent', id: 're_late' };
+          },
+          async getReceived() {
+            throw new Error('not used');
+          },
+        };
+        const log = fakeLog();
+        expect(await tick(client, { log })).toEqual({ sent: 0, retried: 0, canceled: 0, failed: 0 });
+        expect(await rowOf(emailId)).toMatchObject({ status: 'sending', claimedAt: otherClaim, resendId: null, sentAt: null });
+        expect(log.warn).toHaveBeenCalledWith(expect.objectContaining({ emailId, outcome: 'lost' }), expect.any(String));
+      });
+
+      it.each([
+        ['no subject', { subject: null, body: BODY }],
+        ['a blank subject', { subject: '  ', body: BODY }],
+        ['no body', { subject: SUBJECT, body: null }],
+        ['a blank body', { subject: SUBJECT, body: '\n \n' }],
+      ])('%s: the row is failed as missing_content and nothing blank is sent', async (_label, content) => {
+        const s = await seedSeller();
+        const { emailId, eventId } = await queue(s);
+        await db.update(schema.conversationEvents).set(content).where(eq(schema.conversationEvents.id, eventId));
+        const resend = fakeResend();
+        expect(await tick(resend.client)).toEqual({ sent: 0, retried: 0, canceled: 0, failed: 1 });
+        expect(resend.calls).toHaveLength(0);
+        expect(await rowOf(emailId)).toMatchObject({ status: 'failed', lastError: 'missing_content', firstAttemptAt: null });
       });
 
       it('rejected: failed at once, with the reason, and never sent again', async () => {

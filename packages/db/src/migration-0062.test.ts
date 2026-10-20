@@ -125,6 +125,7 @@ const EMAIL_LINES = [
   '"send_after" timestamptz',
   '"attempts" integer NOT NULL DEFAULT 0',
   '"claimed_at" timestamptz',
+  '"first_attempt_at" timestamptz',
   '"last_error" text',
   '"handled_at" timestamptz',
   '"touch_id" uuid REFERENCES "touches"("id") ON DELETE SET NULL',
@@ -165,6 +166,7 @@ const INDEXES = [
   'CREATE UNIQUE INDEX IF NOT EXISTS "seller_conversations_practice_unique" ON "seller_conversations" ("org_id", "crm_record_id", "practice_user_id") WHERE "practice_user_id" IS NOT NULL',
   'CREATE INDEX IF NOT EXISTS "conversation_events_conversation_idx" ON "conversation_events" ("conversation_id", "occurred_at")',
   `CREATE INDEX IF NOT EXISTS "conversation_events_sf_log_due_idx" ON "conversation_events" ("sf_log_next_at") WHERE "sf_log_status" = 'pending'`,
+  'CREATE UNIQUE INDEX IF NOT EXISTS "email_messages_event_unique" ON "email_messages" ("event_id")',
   'CREATE UNIQUE INDEX IF NOT EXISTS "email_messages_resend_unique" ON "email_messages" ("direction", "resend_id") WHERE "resend_id" IS NOT NULL',
   'CREATE INDEX IF NOT EXISTS "email_messages_message_id_idx" ON "email_messages" ("message_id") WHERE "message_id" IS NOT NULL',
   `CREATE INDEX IF NOT EXISTS "email_messages_due_idx" ON "email_messages" ("send_after") WHERE "status" = 'queued'`,
@@ -224,6 +226,11 @@ describe('migration 0062_seller_conversations', () => {
     expect(statements).toContain(INDEXES[1]);
   });
 
+  it('one email row per timeline event (UNIQUE on event_id), and first_attempt_at is nullable: NULL means Resend never saw it', () => {
+    expect(statements).toContain(INDEXES[4]);
+    expect(linesOf(createOf('email_messages'))).toContain('"first_attempt_at" timestamptz');
+  });
+
   it('indexes the timeline, the Salesforce-log scan, the Resend id dedupe, the Message-ID lookup, the send scan and the webhook scan', () => {
     for (const index of INDEXES) expect(statements).toContain(index);
   });
@@ -242,9 +249,10 @@ describe('migration 0062_seller_conversations', () => {
       INDEXES[5],
       INDEXES[6],
       INDEXES[7],
+      INDEXES[8],
       expect.stringMatching(/^CREATE TABLE IF NOT EXISTS "email_suppressions"/),
       expect.stringMatching(/^CREATE TABLE IF NOT EXISTS "resend_webhook_events"/),
-      INDEXES[8],
+      INDEXES[9],
     ]);
   });
 
@@ -294,6 +302,7 @@ describe('migration 0062_seller_conversations', () => {
     expect(config.columns.find((c) => c.name === 'attempts')?.default).toBe(0);
     expect(config.foreignKeys).toHaveLength(0);
     expect(indexesOf(emailMessages)).toEqual([
+      { name: 'email_messages_event_unique', unique: true, columns: ['event_id'], where: null },
       { name: 'email_messages_resend_unique', unique: true, columns: ['direction', 'resend_id'], where: 'resend_id IS NOT NULL' },
       { name: 'email_messages_message_id_idx', unique: false, columns: ['message_id'], where: 'message_id IS NOT NULL' },
       { name: 'email_messages_due_idx', unique: false, columns: ['send_after'], where: "status = 'queued'" },

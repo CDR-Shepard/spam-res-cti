@@ -49,6 +49,12 @@
 --   send_after / attempts / claimed_at / last_error   The send tick's schedule,
 --                        claim and retry state (last_error also carries why a
 --                        canceled email was not sent).
+--   first_attempt_at     When the tick first handed this email to Resend (NULL =
+--                        never). Resend remembers the Idempotency-Key for 24
+--                        hours from that moment, so an email whose first attempt
+--                        is older than 23 hours must never be handed over again:
+--                        a repeat would be a second copy. event_id is UNIQUE: one
+--                        row per timeline event.
 --   handled_at           When the inbound tick finished deciding on a reply.
 --   touch_id             The touch that queued the email (the automatic follow-up
 --                        rhythm, a later step); SET NULL if the touch goes.
@@ -140,6 +146,7 @@ CREATE TABLE IF NOT EXISTS "email_messages" (
   "send_after" timestamptz,
   "attempts" integer NOT NULL DEFAULT 0,
   "claimed_at" timestamptz,
+  "first_attempt_at" timestamptz,
   "last_error" text,
   "handled_at" timestamptz,
   "touch_id" uuid REFERENCES "touches"("id") ON DELETE SET NULL,
@@ -151,6 +158,9 @@ CREATE TABLE IF NOT EXISTS "email_messages" (
   CONSTRAINT "email_messages_status_check" CHECK ("status" IN ('queued', 'sending', 'sent', 'delivered', 'bounced', 'complained', 'failed', 'canceled', 'received')),
   CONSTRAINT "email_messages_purpose_check" CHECK ("purpose" IN ('first', 'reply', 'holding', 'practice', 'inbound'))
 );
+
+-- One email row per timeline event (the timeline joins an event to its email, and nothing may add a second).
+CREATE UNIQUE INDEX IF NOT EXISTS "email_messages_event_unique" ON "email_messages" ("event_id");
 
 -- Resend redelivers webhooks and the send tick may retry: one row per (direction, Resend id).
 CREATE UNIQUE INDEX IF NOT EXISTS "email_messages_resend_unique" ON "email_messages" ("direction", "resend_id") WHERE "resend_id" IS NOT NULL;

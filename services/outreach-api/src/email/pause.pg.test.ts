@@ -1,4 +1,5 @@
 /** Real Postgres: the tenant's Sam-email switch and pause are one atomic UPDATE on organizations.settings. */
+import { randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { eq } from 'drizzle-orm';
 import { schema } from '@cti/db';
@@ -74,6 +75,12 @@ describe.skipIf(!pgLane)('pauseSamEmail / setSamEmailEnabled (real Postgres)', (
     const junkSamEmail = await seedOrg(t.db, { keep: 1, samEmail: 'on' });
     await pauseSamEmail(t.db, { orgId: junkSamEmail, reason: 'complaint', now: NOW });
     expect(await settingsOf(junkSamEmail)).toEqual({ keep: 1, samEmail: { pausedAt: NOW.toISOString(), pausedReason: 'complaint' } });
+  });
+
+  it('an unknown tenant is an error, never a silent no-op: a pause that did not land must not look as if it did', async () => {
+    const orgId = randomUUID();
+    await expect(pauseSamEmail(t.db, { orgId, reason: 'complaint', now: NOW })).rejects.toThrow(`organization ${orgId} not found`);
+    await expect(setSamEmailEnabled(t.db, { orgId, enabled: true })).rejects.toThrow(`organization ${orgId} not found`);
   });
 
   it('touches only its own tenant', async () => {

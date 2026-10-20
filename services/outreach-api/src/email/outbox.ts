@@ -9,7 +9,9 @@
  * out, been taken over by a person or been emailed three times since. The order is the order the seller
  * page explains a block in; the first rule that applies wins. A PRACTICE email (an admin's own copy,
  * to their own address) skips the rules that protect the seller (2 to 7) but still obeys the tenant's
- * switch, the daily cap and the hours.
+ * switch, the daily cap and the hours. "Practice" has ONE meaning everywhere: the conversation is a
+ * practice conversation (practice_user_id set). `queueEmail` enforces that the purpose `practice` and a
+ * practice conversation go together, so the purpose can never disagree with the conversation.
  *
  * Logs: none here. The tick logs ids and counts; no address, subject or text reaches a log line.
  */
@@ -53,10 +55,21 @@ export interface QueueEmailInput {
 /**
  * The email and its timeline event, together. The event is Sam's, outbound, and not yet logged to
  * Salesforce (the send turns that on once Resend has accepted it, so a canceled or failed email never
- * leaves a Task). A conversation of another tenant (or none) throws and writes nothing.
+ * leaves a Task). A conversation of another tenant (or none) throws and writes nothing, and so does a
+ * purpose that does not fit the conversation: `practice` only on a practice conversation, every other
+ * purpose only on a real one.
  */
 export async function queueEmail(db: Db, i: QueueEmailInput): Promise<{ emailId: string; eventId: string }> {
   return db.transaction(async (tx) => {
+    const conversation = rows<{ practiceUserId: string | null }>(
+      await tx.execute(sql`
+        select practice_user_id as "practiceUserId" from seller_conversations
+        where id = ${i.conversationId}::uuid and org_id = ${i.orgId}::uuid`),
+    )[0];
+    if (!conversation) throw new Error(`conversation ${i.conversationId} not found`);
+    if ((i.purpose === 'practice') !== (conversation.practiceUserId !== null)) {
+      throw new Error(`purpose ${i.purpose} does not fit conversation ${i.conversationId}`);
+    }
     const eventId = await appendEvent(tx as unknown as Db, {
       orgId: i.orgId,
       conversationId: i.conversationId,
@@ -144,7 +157,7 @@ async function firstBlock(db: Db, f: SendFacts, emailId: string, now: Date): Pro
   const switchSettings = samEmailSettings({ settings: f.settings });
   if (!switchSettings.enabled) return 'disabled';
   if (switchSettings.pausedAt !== null) return 'paused';
-  if (f.purpose !== 'practice' && f.practiceUserId === null) {
+  if (f.practiceUserId === null) {
     const held = conversationBlock(f);
     if (held) return held;
     if ((await suppressionFor(db, f.orgId, f.toAddress)) !== null) return 'suppressed';
