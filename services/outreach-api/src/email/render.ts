@@ -15,17 +15,25 @@ import { unsubscribeMailto, unsubscribeUrl } from './addresses.js';
 
 export const FOOTER_RULE = '—';
 export const FOOTER_SIGNATURE = 'Sam';
+/** The words of the unsubscribe sentence that are a link in the HTML part. */
+const FOOTER_UNSUBSCRIBE_LINK_TEXT = 'unsubscribe here';
+const FOOTER_UNSUBSCRIBE_LEAD = 'To stop hearing from Sam,';
 /**
- * How the unsubscribe sentence opens, in both parts: the text footer continues "unsubscribe here: <url>",
- * the HTML footer "<a>unsubscribe here</a>" (so flattened to text it has no colon and no URL). A quoted
- * copy of either is recognised by this lead, which is why reply parsing matches on it and not on the
- * text part's longer prefix.
+ * The unsubscribe sentence as both parts spell it: the text footer continues ": <url>", the HTML
+ * footer makes "unsubscribe here" a link (so flattened to text it has no colon and no URL). A quoted
+ * copy of either is recognised by this sentence, which is why reply parsing matches on it and not on
+ * the text part's longer line. It is the whole sentence, not just its lead, so a seller who writes
+ * "To stop hearing from Sam, please remove me from your list" is still read.
  */
-export const FOOTER_UNSUBSCRIBE_LEAD = 'To stop hearing from Sam,';
-const FOOTER_UNSUBSCRIBE_PREFIX = `${FOOTER_UNSUBSCRIBE_LEAD} unsubscribe here:`;
+export const FOOTER_UNSUBSCRIBE_SENTENCE = `${FOOTER_UNSUBSCRIBE_LEAD} ${FOOTER_UNSUBSCRIBE_LINK_TEXT}`;
+
+/** "GG Homes'" for a name ending in s or S, "Acme's" otherwise. */
+export function possessive(name: string): string {
+  return /s$/i.test(name) ? `${name}'` : `${name}'s`;
+}
 
 export function assistantFooterLine(company: string): string {
-  return `${company}'s AI assistant`;
+  return `${possessive(company)} AI assistant`;
 }
 
 export const COMPANY_LINE_SEPARATOR = ' · ';
@@ -35,7 +43,7 @@ export function companyFooterLine(company: string, postal: string): string {
 }
 
 export function unsubscribeFooterLine(url: string): string {
-  return `${FOOTER_UNSUBSCRIBE_PREFIX} ${url}`;
+  return `${FOOTER_UNSUBSCRIBE_SENTENCE}: ${url}`;
 }
 
 export interface RenderEmailInput {
@@ -102,7 +110,7 @@ export function renderEmail(i: RenderEmailInput): RenderedEmail {
     bodyToHtml(body),
     `<p>${FOOTER_RULE}<br>${FOOTER_SIGNATURE}<br>${escapeHtml(assistantFooterLine(i.companyName))}</p>`,
     `<p>${escapeHtml(companyFooterLine(i.companyName, i.postalAddress))}<br>` +
-      `${FOOTER_UNSUBSCRIBE_LEAD} <a href="${escapeHtml(url)}">unsubscribe here</a></p>`,
+      `${FOOTER_UNSUBSCRIBE_LEAD} <a href="${escapeHtml(url)}">${FOOTER_UNSUBSCRIBE_LINK_TEXT}</a></p>`,
   ].join('\n');
 
   const headers: Record<string, string> = {

@@ -2,24 +2,35 @@
  * Reading what a seller sent back: the new text without the quoted thread or our footer, HTML
  * flattened to text, auto-replies recognised, and opt-out wording recognised.
  *
- * The one rule that matters most: our own footer says "unsubscribe here", so a seller's reply that
- * quotes it (or a client that flattens the quote and drops the ">" marks) must never read as the
- * seller asking to stop. `stripQuoted` cuts the quoted thread AND removes our footer lines, and it
- * builds those lines from render.ts so the two files cannot drift apart. The footer lines are
- * matched by shape (and, when the caller passes the company name, exactly) because this module does
- * not otherwise know the company; the unsubscribe line by its lead, which the HTML footer shares. A lone "Sam" or "—" the seller wrote is kept: the signature lines
- * only go when they sit directly on top of our assistant line.
+ * The rule that matters most: our own footer says "unsubscribe here", so a reply that quotes it (or
+ * a client that flattens the quote and drops the ">" marks) must never read as the seller asking to
+ * stop. The footer lines are built in render.ts and matched here from the same builders, so the two
+ * files cannot drift apart; they are matched by shape (and exactly when the caller passes the
+ * company name) because this module does not otherwise know the company. A lone "Sam" or "—" the
+ * seller wrote is kept: the signature lines only go when they sit directly on top of our assistant
+ * line.
  *
- * Opt-out and auto-reply detection err toward catching: a missed opt-out is a compliance problem, a
- * false one just pauses a conversation a person then reads.
+ * Two readers of a reply, for two jobs:
+ *  - `stripQuoted` is the seller's new words, for the timeline and for Sam: it cuts at the first
+ *    sign of a quoted thread.
+ *  - `optOutScanText` is what to scan for "stop": the WHOLE reply, because people answer below the
+ *    quote (bottom-posting) or between its lines (inline), minus quoted lines, our footer, URLs and
+ *    our mailboxes. Cutting at the first quote marker would miss "Please unsubscribe me" written
+ *    underneath it; a missed opt-out is a compliance problem.
+ * What keeps a quoted copy of Sam's own words from tripping the scan is the draft check
+ * (draft-guard.ts refuses any draft that reads as an opt-out), so nothing Sam sends can match.
  *
- * Pure: no I/O, no clock, no logging. Input is seller-controlled; nothing here throws on odd text.
+ * Opt-out and auto-reply detection err toward catching: a false positive just pauses a conversation
+ * a person then reads.
+ *
+ * Pure: no I/O, no clock, no logging. Input is seller-controlled; nothing here throws on odd text,
+ * and every pass is linear (no nested quantifiers) so hostile text cannot stall the webhook.
  */
 import {
   COMPANY_LINE_SEPARATOR,
   FOOTER_RULE,
   FOOTER_SIGNATURE,
-  FOOTER_UNSUBSCRIBE_LEAD,
+  FOOTER_UNSUBSCRIBE_SENTENCE,
   assistantFooterLine,
 } from './render.js';
 
@@ -29,12 +40,13 @@ import {
 
 const ATTRIBUTION_LINE = /^On\s.{1,300}?\swrote:$/i;
 const ORIGINAL_MESSAGE = /^-{2,}\s*Original Message\s*-{2,}$/i;
-const UNDERSCORE_RULE = /^_{16,}$/;
+/** Outlook's rule is 32 underscores; a shorter line the seller drew is theirs. */
+const UNDERSCORE_RULE = /^_{30,}$/;
 const FROM_LINE = /^From:/i;
 const SENT_OR_DATE_LINE = /^(Sent|Date):/i;
 const QUOTE_MARK = /^>/;
-/** Our assistant line without knowing the company: "<anything>'s AI assistant". */
-const ASSISTANT_SHAPE = /^.+'s AI assistant$/;
+/** Our assistant line without knowing the company: "<x>'s AI assistant" or "<x>' AI assistant". */
+const ASSISTANT_SHAPE = /^.+'s? AI assistant$/;
 
 export interface StripQuotedOptions {
   /** When given, our company lines are matched exactly instead of by shape. */
@@ -59,19 +71,28 @@ function isCompanyLine(line: string | undefined): boolean {
   return at > 0 && line.length > at + COMPANY_LINE_SEPARATOR.length;
 }
 
-/** Indexes of the lines that are our footer. `lines` are trimmed. */
-function footerLineIndexes(lines: readonly string[], companyName: string | undefined): Set<number> {
+/** The assistant line as sent now ("GG Homes' AI assistant") and as an earlier wording had it ("GG Homes's"). */
+function assistantLinesFor(company: string): ReadonlySet<string> {
+  return new Set([assistantFooterLine(company), `${company}'s AI assistant`]);
+}
+
+/**
+ * Indexes of the lines that are our footer. `lines` are trimmed. The unsubscribe sentence is found at
+ * the start of a line, or (`anywhere`) inside one, as when a client reflows the footer onto one line.
+ */
+function footerLineIndexes(lines: readonly string[], companyName: string | undefined, anywhere: boolean): Set<number> {
   const drop = new Set<number>();
-  const assistantExact = companyName ? assistantFooterLine(companyName) : null;
+  const assistantExact = companyName ? assistantLinesFor(companyName) : null;
   const companyPrefix = companyName ? `${companyName}${COMPANY_LINE_SEPARATOR}` : null;
   lines.forEach((line, i) => {
-    if (line.startsWith(FOOTER_UNSUBSCRIBE_LEAD)) {
+    const hasSentence = anywhere ? line.includes(FOOTER_UNSUBSCRIBE_SENTENCE) : line.startsWith(FOOTER_UNSUBSCRIBE_SENTENCE);
+    if (hasSentence) {
       drop.add(i);
       if (isCompanyLine(lines[i - 1])) drop.add(i - 1);
     }
     if (companyPrefix !== null && line.startsWith(companyPrefix)) drop.add(i);
     const isAssistantLine =
-      assistantExact !== null ? line === assistantExact : ASSISTANT_SHAPE.test(line) && lines[i - 1] === FOOTER_SIGNATURE;
+      assistantExact !== null ? assistantExact.has(line) : ASSISTANT_SHAPE.test(line) && lines[i - 1] === FOOTER_SIGNATURE;
     if (isAssistantLine) {
       drop.add(i);
       if (lines[i - 1] === FOOTER_SIGNATURE) {
@@ -88,7 +109,7 @@ export function stripQuoted(text: string, opts: StripQuotedOptions = {}): string
   const raw = text.replace(/\r\n?/g, '\n').split('\n');
   const trimmed = raw.map((line) => line.trim());
   const cutAt = trimmed.findIndex((_, i) => startsQuote(trimmed, i));
-  const footer = footerLineIndexes(trimmed, opts.companyName);
+  const footer = footerLineIndexes(trimmed, opts.companyName, false);
   const end = cutAt === -1 ? raw.length : cutAt;
   return raw
     .slice(0, end)
@@ -258,8 +279,38 @@ export function isAutoReply(i: { headers: Record<string, string>; from: string; 
 }
 
 // ---------------------------------------------------------------------------------------------
-// isOptOutText
+// optOutScanText / isOptOutText
 // ---------------------------------------------------------------------------------------------
+
+const QUOTED_LINE = /^[>|]/;
+const URL_TEXT = /https?:\/\/\S+/gi;
+/** Our reply and unsubscribe mailboxes (a 26-character base32 token), whatever the domain. */
+const OUR_MAILBOX = /\b(?:sam|unsubscribe)\+[a-z2-7]{26}@[^\s<>"',;)]+/gi;
+/** The unsubscribe sentence wherever a client broke or reflowed it (`\s+` between its words). */
+const FOOTER_SENTENCE_ANYWHERE = new RegExp(FOOTER_UNSUBSCRIBE_SENTENCE.split(' ').map(escapeRegExp).join('\\s+'), 'gi');
+
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * The text to scan for an opt-out: the whole reply, minus lines quoted with `>` or `|`, our footer
+ * (however a client wrapped or reflowed it), every URL, and our own mailboxes. Call
+ * `isOptOutText(optOutScanText(raw))`. Not `stripQuoted`: that stops at the first quote marker, so
+ * an opt-out written below the quote, or between its lines, would never be read.
+ */
+export function optOutScanText(text: string, opts: StripQuotedOptions = {}): string {
+  const raw = text.replace(/\r\n?/g, '\n').split('\n');
+  const trimmed = raw.map((line) => line.trim());
+  const footer = footerLineIndexes(trimmed, opts.companyName, true);
+  return raw
+    .filter((_, i) => !footer.has(i) && !QUOTED_LINE.test(trimmed[i]!))
+    .join('\n')
+    .replace(FOOTER_SENTENCE_ANYWHERE, ' ')
+    .replace(URL_TEXT, ' ')
+    .replace(OUR_MAILBOX, ' ')
+    .trim();
+}
 
 const OPT_OUT_EXACT = new Set(['stop', 'unsubscribe', 'remove', 'remove me', 'opt out', 'optout', 'cancel']);
 const OPT_OUT_PHRASES = [
@@ -277,10 +328,25 @@ const OPT_OUT_PHRASES = [
   'leave me alone',
 ];
 
-/** Does this (already quote-stripped) reply ask us to stop? */
+/** Lowercase, curly apostrophes straight, whitespace runs single. */
+function squash(s: string): string {
+  return s.toLowerCase().replace(/[‘’]/g, "'").replace(/\s+/g, ' ').trim();
+}
+
+/** `squash` without punctuation: "Opt-out." -> "optout". */
+function bare(s: string): string {
+  return squash(s).replace(/[^\p{L}\p{N}\s]/gu, '').replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * Does this reply ask us to stop? A bare opt-out word counts as the whole text or as its first
+ * non-empty line ("STOP" above a "Sent from my iPhone" signature); a phrase counts anywhere. Pass
+ * `optOutScanText(raw)` for a received reply.
+ */
 export function isOptOutText(text: string): boolean {
-  const lowered = text.toLowerCase().replace(/[‘’]/g, "'").replace(/\s+/g, ' ').trim();
-  const bare = lowered.replace(/[^\p{L}\p{N}\s]/gu, '').replace(/\s+/g, ' ').trim();
-  if (OPT_OUT_EXACT.has(bare)) return true;
+  if (OPT_OUT_EXACT.has(bare(text))) return true;
+  const firstLine = text.split('\n').find((line) => line.trim() !== '');
+  if (firstLine !== undefined && OPT_OUT_EXACT.has(bare(firstLine))) return true;
+  const lowered = squash(text);
   return OPT_OUT_PHRASES.some((phrase) => lowered.includes(phrase));
 }

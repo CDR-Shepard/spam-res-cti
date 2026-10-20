@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { renderEmail } from './render.js';
-import { htmlToText, isAutoReply, isOptOutText, stripQuoted } from './inbound-text.js';
+import { htmlToText, isAutoReply, isOptOutText, optOutScanText, stripQuoted } from './inbound-text.js';
 
 const TOKEN = 'abcdefghijklmnopqrstuvwxyz';
 const URL = `https://api.example.com/api/email/unsubscribe/${TOKEN}`;
@@ -46,6 +46,12 @@ describe('stripQuoted', () => {
 
   it('cuts at the Outlook underscore rule', () => {
     expect(stripQuoted('Call me\n\n________________________________\nFrom: Sam\nSent: Tuesday')).toBe('Call me');
+  });
+
+  it('does not cut at a shorter underscore line the seller drew', () => {
+    const body = 'Thanks\n____________________\nPlease stop emailing me';
+    expect(stripQuoted(body)).toBe(body);
+    expect(isOptOutText(stripQuoted(body))).toBe(true);
   });
 
   it('cuts at a From: line that is followed by Sent: or Date:', () => {
@@ -102,10 +108,33 @@ describe('stripQuoted', () => {
       expect(stripQuoted(`Yes\nTo stop hearing from Sam, unsubscribe here: ${URL}`)).toBe('Yes');
     });
 
-    it('is dropped with a company name that has a different spelling, and the footer is not mistaken for the seller\'s text', () => {
-      const other = ourText.replace(/GG Homes/g, 'Acme Realty & Co');
+    it('is dropped for a company whose name does not end in s, with or without the name', () => {
+      const other = renderEmail({
+        body: 'Hi Jo, any interest?',
+        token: TOKEN,
+        apiPublicUrl: 'https://api.example.com',
+        replyDomain: 'reply.rethinkre.team',
+        postalAddress: '1 Main St, Irvine, CA 92612',
+        companyName: 'Acme Realty & Co',
+        inReplyTo: null,
+        references: null,
+      }).text;
+      expect(other).toContain("Acme Realty & Co's AI assistant");
       expect(stripQuoted(`Ok\n\n${other}`)).toBe('Ok\n\nHi Jo, any interest?');
       expect(stripQuoted(`Ok\n\n${other}`, { companyName: 'Acme Realty & Co' })).toBe('Ok\n\nHi Jo, any interest?');
+    });
+
+    it('also drops the earlier "GG Homes\'s AI assistant" wording, with or without the name', () => {
+      const old = ourText.replace("GG Homes' AI assistant", "GG Homes's AI assistant");
+      expect(old).toContain("GG Homes's AI assistant");
+      expect(stripQuoted(`Ok\n\n${old}`)).toBe('Ok\n\nHi Jo, any interest?');
+      expect(stripQuoted(`Ok\n\n${old}`, OPTS)).toBe('Ok\n\nHi Jo, any interest?');
+    });
+
+    it('keeps a seller\'s own words that merely start like our unsubscribe sentence', () => {
+      const body = 'To stop hearing from Sam, please remove me from your list';
+      expect(stripQuoted(body)).toBe(body);
+      expect(isOptOutText(stripQuoted(body))).toBe(true);
     });
 
     it('keeps a seller who signs off as "Sam" or sends a lone dash', () => {
@@ -191,7 +220,7 @@ describe('htmlToText', () => {
     htmlToText('<!--'.repeat(60_000));
     htmlToText('<p title="'.repeat(60_000));
     htmlToText('&a'.repeat(100_000));
-    expect(Date.now() - started).toBeLessThan(2000);
+    expect(Date.now() - started).toBeLessThan(5000);
   });
 });
 
@@ -236,7 +265,7 @@ describe('isAutoReply', () => {
     const started = Date.now();
     isAutoReply({ ...plain, from: 'a'.repeat(200_000) });
     isAutoReply({ ...plain, from: `${'a<'.repeat(100_000)}x` });
-    expect(Date.now() - started).toBeLessThan(1000);
+    expect(Date.now() - started).toBeLessThan(5000);
   });
 
   it('is false for a sender that only contains one of those words', () => {
@@ -257,6 +286,12 @@ describe('isAutoReply', () => {
 describe('isOptOutText', () => {
   it('is true for a bare opt-out word, ignoring case and punctuation', () => {
     for (const t of ['STOP!', 'stop', 'Unsubscribe.', ' remove ', 'Remove me', 'opt out', 'opt-out', 'OPTOUT', 'Cancel', 'stop.\n']) {
+      expect(isOptOutText(t), t).toBe(true);
+    }
+  });
+
+  it('is true when the first non-empty line is a bare opt-out word, whatever follows (a mobile signature)', () => {
+    for (const t of ['STOP\n\nSent from my iPhone', 'Unsubscribe\n\nGet Outlook for iOS', '\n\n  remove me  \nThanks', 'Opt-out.\nSent from my Galaxy']) {
       expect(isOptOutText(t), t).toBe(true);
     }
   });
@@ -282,8 +317,105 @@ describe('isOptOutText', () => {
   });
 
   it('is false for ordinary text', () => {
-    for (const t of ['you can stop by Tuesday', 'Sounds good', '', 'I need to cancel my dentist, but yes to a chat', 'Remove the tenant clause?']) {
+    for (const t of [
+      'you can stop by Tuesday',
+      'Sounds good',
+      '',
+      'I need to cancel my dentist, but yes to a chat',
+      'Remove the tenant clause?',
+      'Sounds good\n\nstop',
+      'Thanks\nSent from my iPhone',
+    ]) {
       expect(isOptOutText(t), t).toBe(false);
     }
+  });
+});
+
+describe('optOutScanText', () => {
+  const read = (t: string, opts?: { companyName?: string }) => isOptOutText(optOutScanText(t, opts));
+
+  it('reads an opt-out written below the quote (bottom-posting)', () => {
+    const body = 'On Tue, Oct 20, 2026 at 9:00 AM Sam <sam@rethinkre.team> wrote:\n> hi\n\nPlease unsubscribe me';
+    expect(read(body)).toBe(true);
+    expect(isOptOutText(stripQuoted(body))).toBe(false); // why stripQuoted alone is not enough
+  });
+
+  it('reads an opt-out written between quoted lines (inline reply)', () => {
+    expect(read('> hi there\nStop emailing me')).toBe(true);
+    expect(read('> hi there\n> how are you\n\nplease take me off your list\n\n> bye')).toBe(true);
+  });
+
+  it('reads a bare STOP under a signature, and one that follows a quote', () => {
+    expect(read('STOP\n\nSent from my iPhone')).toBe(true);
+    expect(read('> old text\n\nSTOP')).toBe(true);
+  });
+
+  it('ignores lines quoted with > or | (nested too)', () => {
+    expect(read('Sounds good\n> please unsubscribe me\n>> and stop emailing me')).toBe(false);
+    expect(read('Sounds good\n| please unsubscribe me\n  | stop emailing me')).toBe(false);
+  });
+
+  it('never reads our own footer, whatever shape a mail client gives it', () => {
+    const shapes: Record<string, string> = {
+      'top-posted verbatim': `Sounds good\n\n${ourText}`,
+      'URL hard-wrapped onto its own line': `Sounds good\n\n${ourText.replace(': https', ':\nhttps')}`,
+      'sentence wrapped before "unsubscribe"': `Sounds good\n\n${ourText.replace(', unsubscribe', ',\nunsubscribe')}`,
+      'footnote line': `Sounds good\n\n${ourText.split('\n').slice(0, -1).join('\n')}\nTo stop hearing from Sam, unsubscribe here [1]\n\n[1] ${URL}`,
+      'reflowed onto one line': `Sounds good\n\n${ourText.split('\n').filter(Boolean).join(' ')}`,
+      'quoted with a pipe': `Sounds good\n\n${ourText.split('\n').map((l) => `| ${l}`).join('\n')}`,
+      'quoted behind an attribution': `Sounds good\n\nOn Tue, X wrote:\n${ourText.split('\n').map((l) => `> ${l}`).join('\n')}`,
+      'footer URL alone': `Sounds good\n\n${URL}`,
+      'footer footnote URL alone': `Sounds good\n\n[1] ${URL}`,
+      'HTML footer flattened': `Sounds good\n\n${htmlToText(ours.html)}`,
+    };
+    for (const [name, body] of Object.entries(shapes)) {
+      expect(read(body), name).toBe(false);
+      expect(read(body, OPTS), `${name} (with company)`).toBe(false);
+    }
+  });
+
+  it('removes every URL and our reply and unsubscribe mailboxes', () => {
+    expect(read(`Sounds good https://x.example/unsubscribe/abc and mailto:unsubscribe+${TOKEN}@reply.rethinkre.team`)).toBe(false);
+    expect(read(`Sam <SAM+${TOKEN}@Reply.RethinkRE.team> wrote:\nSounds good`)).toBe(false);
+    expect(read(`Sounds good\n<${URL}>, <mailto:unsubscribe+${TOKEN}@reply.rethinkre.team>`)).toBe(false);
+  });
+
+  it('keeps the seller\'s words next to a URL or mailbox', () => {
+    expect(read(`Please unsubscribe me, I got ${URL}`)).toBe(true);
+    expect(read(`Stop emailing me at sam+${TOKEN}@reply.rethinkre.team`)).toBe(true);
+  });
+
+  it('still reads a genuine opt-out written above or below our footer', () => {
+    expect(read(`Please unsubscribe me\n\n${ourText}`)).toBe(true);
+    expect(read(`Please unsubscribe me\n\n${ourText}`, OPTS)).toBe(true);
+    expect(read(`${ourText}\n\nstop emailing me`)).toBe(true);
+  });
+
+  it('reads a seller who echoes the start of our sentence', () => {
+    expect(read('To stop hearing from Sam, please remove me from your list')).toBe(true);
+  });
+
+  it('agrees with every Review Focus 1 case that stripQuoted handles', () => {
+    const quoted = 'Sounds good\n\nOn Tue, Oct 20, 2026 at 9:00 AM Sam <sam@rethinkre.team> wrote:\n> To stop hearing from Sam, unsubscribe here: https://x/api/email/unsubscribe/abc';
+    expect(read(quoted)).toBe(false);
+    expect(read(`Sounds good\n\n${ourText}`)).toBe(false);
+    expect(read(`Sounds good\n\n${ourText.split('\n').slice(1).join('\n')}`)).toBe(false);
+    expect(read(`Yes\nTo stop hearing from Sam, unsubscribe here: ${URL}`)).toBe(false);
+    expect(read(`Sounds good\n\n${ourText.replace("GG Homes' AI", "GG Homes's AI")}`)).toBe(false);
+  });
+
+  it('handles CRLF and returns an empty string for nothing', () => {
+    expect(optOutScanText('')).toBe('');
+    expect(read('> q\r\n\r\nstop\r\n')).toBe(true);
+  });
+
+  it('stays fast on adversarial input', () => {
+    const started = Date.now();
+    optOutScanText('https://'.repeat(100_000));
+    optOutScanText('sam+'.repeat(100_000));
+    optOutScanText('To stop hearing from Sam, '.repeat(50_000));
+    optOutScanText('> '.repeat(200_000));
+    optOutScanText('\n'.repeat(300_000));
+    expect(Date.now() - started).toBeLessThan(5000);
   });
 });

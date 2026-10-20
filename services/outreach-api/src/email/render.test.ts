@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { escapeHtml, renderEmail, unsubscribeFooterLine } from './render.js';
+import { escapeHtml, possessive, renderEmail, unsubscribeFooterLine } from './render.js';
 
 const TOKEN = 'abcdefghijklmnopqrstuvwxyz';
 const URL = `https://api.example.com/api/email/unsubscribe/${TOKEN}`;
@@ -17,7 +17,7 @@ const base = {
 const FOOTER = [
   '—',
   'Sam',
-  "GG Homes's AI assistant",
+  "GG Homes' AI assistant",
   '',
   'GG Homes · 18872 MacArthur Blvd #220, Irvine, CA 92612',
   `To stop hearing from Sam, unsubscribe here: ${URL}`,
@@ -64,7 +64,7 @@ describe('renderEmail', () => {
 
   it('carries the footer lines in the HTML too', () => {
     const { html } = renderEmail(base);
-    expect(html).toContain('Sam<br>GG Homes&#39;s AI assistant');
+    expect(html).toContain('Sam<br>GG Homes&#39; AI assistant');
     expect(html).toContain('GG Homes · 18872 MacArthur Blvd #220, Irvine, CA 92612');
     expect(html).toContain('To stop hearing from Sam, <a href=');
   });
@@ -89,6 +89,23 @@ describe('renderEmail', () => {
   it('cannot be made to inject a header line through a threading value', () => {
     const { headers } = renderEmail({ ...base, inReplyTo: '<a@x.example>\r\nBcc: evil@example.com', references: null });
     expect(headers['In-Reply-To']).not.toMatch(/[\r\n]/);
+  });
+});
+
+describe('possessive', () => {
+  it('adds only an apostrophe to a name ending in s or S, otherwise \'s', () => {
+    expect(possessive('GG Homes')).toBe("GG Homes'");
+    expect(possessive('Jones')).toBe("Jones'");
+    expect(possessive('ACME HOMES')).toBe("ACME HOMES'");
+    expect(possessive('Acme')).toBe("Acme's");
+    expect(possessive('Rethink RE')).toBe("Rethink RE's");
+  });
+
+  it('is what the footer\'s assistant line uses, in both parts', () => {
+    const { text, html } = renderEmail({ ...base, companyName: 'Acme' });
+    expect(text).toContain("\nAcme's AI assistant\n");
+    expect(html).toContain('Acme&#39;s AI assistant');
+    expect(renderEmail(base).text).toContain("\nGG Homes' AI assistant\n");
   });
 });
 
