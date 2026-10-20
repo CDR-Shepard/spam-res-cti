@@ -115,7 +115,7 @@ function SettingsForm({ saved }: { saved: AiCallSettings }) {
         label="Convert a Lead that books an appointment"
         checked={draft.booking.convertLeads}
         onChange={(convertLeads) => setBooking({ convertLeads })}
-        hint="Off: every Lead booking is kept on the Lead with a hold and a Task for the appointment owner."
+        hint="Off: every Lead booking is kept on the Lead with a hold and a Task for the booked rep."
       />
       <div className="grid gap-5 md:grid-cols-2">
         {(['phone', 'walkthrough'] as const).map((kind) => (

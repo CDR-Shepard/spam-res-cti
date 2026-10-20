@@ -44,7 +44,7 @@ function settings(over: Partial<AiCallSettings['booking']> = {}, writeback = tru
 }
 const idsUrl = (ids: string[]) => `GET /api/salesforce/users?${new URLSearchParams({ ids: ids.join(',') }).toString()}`;
 const puts = (calls: StubCall[]) => calls.filter((c) => c.method === 'PUT' && c.url === '/api/settings/ai-calls').map((c) => c.body as AiCallSettings);
-const owners = () => within(screen.getByRole('list', { name: 'Appointment owners' })).getAllByRole('listitem');
+const owners = () => within(screen.getByRole('list', { name: 'High-priority appointments go to' })).getAllByRole('listitem');
 const BOOKING_OFF = 'No high-priority bookings: nobody active on the list';
 const OWNER_LINE =
   'Sellers who need to sell fast, or face a foreclosure or auction, are booked with the first active person on this list at the time they ask for, whatever their calendar says. Every other appointment goes to the region\'s reps below.';
@@ -73,6 +73,9 @@ describe('AiCallSettingsCard', () => {
     renderWithProviders(<AiCallSettingsCard />, { isAdmin: true });
     expect(await screen.findByRole('checkbox', { name: 'Book appointments on AI calls' })).toBeChecked();
     expect(screen.getByRole('checkbox', { name: 'Convert a Lead that books an appointment' })).toBeChecked();
+    expect(screen.getByRole('checkbox', { name: 'Convert a Lead that books an appointment' })).toHaveAccessibleDescription(
+      'Off: every Lead booking is kept on the Lead with a hold and a Task for the booked rep.',
+    );
     expect(screen.getByRole('checkbox', { name: 'Write call results back to Salesforce' })).toBeChecked();
     expect(screen.getByRole('heading', { name: 'High-priority appointments go to' })).toBeInTheDocument();
     expect(screen.getByText(OWNER_LINE)).toBeInTheDocument();
@@ -90,12 +93,12 @@ describe('AiCallSettingsCard', () => {
     expect(screen.queryByLabelText(/until \(hour, 24h\)/)).not.toBeInTheDocument();
   });
 
-  it('ruling: a save sends the saved length, from and until (and the routing) unchanged', async () => {
+  // The server ignores the routing a save sends back (the region table is defined in code), so only these are asserted here.
+  it('ruling: a save sends the saved length, from and until unchanged', async () => {
     const base = settings();
     const saved = settings({
       phone: { ...base.booking.phone, durationMinutes: 25, startHour: 8, endHour: 12 },
       walkthrough: { ...base.booking.walkthrough, durationMinutes: 90, startHour: 7, endHour: 21 },
-      routing: { officeAddress: '1 Invented Way, Testville, CA 90000', regions: [{ key: 'SD', counties: ['San Diego'], reps: [seth.id], startTimes: ['10:30'] }] },
     });
     const calls = stubApi({ 'GET /api/settings/ai-calls': saved, [idsUrl([GRANT])]: [grant], 'PUT /api/settings/ai-calls': saved });
     renderWithProviders(<AiCallSettingsCard />, { isAdmin: true });
@@ -113,12 +116,9 @@ describe('AiCallSettingsCard', () => {
 
   describe('the regions (read-only, from the readiness check)', () => {
     const regions = () => screen.findByRole('table', { name: 'Booking regions' });
-    /** The body row whose Region cell is `key`. */
-    const rowOf = async (key: string): Promise<HTMLElement> => {
-      const rows = within(await regions()).getAllByRole('row').filter((tr) => tr.querySelector('td')?.textContent === key);
-      expect(rows).toHaveLength(1);
-      return rows[0]!;
-    };
+    /** The body row whose row header (the Region cell) is `key`. */
+    const rowOf = async (key: string): Promise<HTMLElement> =>
+      within(await regions()).getByRole('rowheader', { name: key }).closest('tr') as HTMLElement;
 
     it('shows each region under the owner list: counties, reps, start times in Pacific, and the office', async () => {
       stubApi({ 'GET /api/settings/ai-calls': settings(), [idsUrl([GRANT])]: [grant], [READINESS]: { ...READY, routing: ROUTING } });
@@ -150,6 +150,24 @@ describe('AiCallSettingsCard', () => {
       expect(la.getByText('Blake Kossuth (inactive)')).toHaveClass('text-destructive');
       expect(la.getByText('Chance Lanier')).not.toHaveClass('text-destructive');
       expect(la.getByText('12 AM, 9:30 AM, 12:15 PM')).toBeInTheDocument();
+    });
+
+    it('a region with no active rep says no times are offered there, in red', async () => {
+      const routing = {
+        ...ROUTING,
+        regions: [
+          ROUTING.regions[0]!,
+          { ...ROUTING.regions[1]!, reps: [{ ...seth, isActive: false }, { ...thomas, isActive: false }] },
+          { key: 'IE', counties: ['Invented'], startTimes: ['10:00'], reps: [] },
+        ],
+      };
+      stubApi({ 'GET /api/settings/ai-calls': settings(), [idsUrl([GRANT])]: [grant], [READINESS]: { ...READY, routing } });
+      renderWithProviders(<AiCallSettingsCard />, { isAdmin: true });
+      expect(await screen.findByText('No active rep: no SD times are offered.')).toHaveClass('text-destructive');
+      expect(screen.getByText('No active rep: no IE times are offered.')).toHaveClass('text-destructive');
+      expect(screen.queryByText('No active rep: no LA times are offered.')).not.toBeInTheDocument();
+      const table = screen.getByRole('table', { name: 'Booking regions' });
+      expect(table.compareDocumentPosition(screen.getByText('No active rep: no SD times are offered.')) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     });
 
     it('without a Google Maps key says so in red', async () => {

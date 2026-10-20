@@ -7,7 +7,7 @@
 import type { FastifyInstance } from 'fastify';
 import { sql } from 'drizzle-orm';
 import { z } from 'zod';
-import { AiCallSettings, type SalesforceUserOption } from '@cti/contracts';
+import { AiCallSettings, BookingRouting, type AiCallBookingSettings, type SalesforceUserOption } from '@cti/contracts';
 import type { Db } from '@cti/db';
 import { soqlEscape } from '@cti/salesforce';
 import type { MapsClient } from '../appointments/maps.js';
@@ -67,6 +67,20 @@ function toOption(r: Row): SalesforceUserOption | null {
 
 /** Salesforce compares ids on their case-sensitive 15-character core. */
 const core = (id: string): string => id.slice(0, 15);
+
+const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v);
+
+/**
+ * The booking a PUT stores. The region table is read-only and defined in code (DEFAULT_BOOKING_ROUTING): the routing the card
+ * sends back is ignored, and the tenant keeps the routing its stored blob already has (normally none, so the defaults apply).
+ * A stored routing that does not parse is not kept: it would turn the whole saved blob back to the defaults, booking off.
+ */
+export function bookingToStore(sent: AiCallBookingSettings, storedSettings: unknown): AiCallBookingSettings {
+  const { routing: _ignored, ...edited } = sent;
+  const stored = isRecord(storedSettings) && isRecord(storedSettings.aiCallBooking) ? storedSettings.aiCallBooking.routing : undefined;
+  const kept = BookingRouting.safeParse(stored);
+  return kept.success ? { ...edited, routing: kept.data } : edited;
+}
 const inAskedOrder = (options: SalesforceUserOption[], ids: readonly string[]): SalesforceUserOption[] =>
   ids.flatMap((id) => options.filter((o) => core(o.id) === core(id)).slice(0, 1));
 
@@ -93,9 +107,10 @@ export async function registerAiCallSettingsRoutes(app: FastifyInstance, deps: A
     // Fix 2: a time offered to a seller must reach Salesforce, so booking can only be on while write-back is on.
     if (body.data.booking.enabled && !body.data.writeback) return sendError(reply, 400, 'BOOKING_NEEDS_WRITEBACK', BOOKING_NEEDS_WRITEBACK_WORDS);
     // organizations has no updated_at column; only these two keys change, every other setting is kept.
+    const booking = bookingToStore(body.data.booking, ctx.tenant.settings);
     const result = await db.execute(sql`
       update organizations
-      set settings = coalesce(settings, '{}'::jsonb) || jsonb_build_object('aiCallBooking', ${JSON.stringify(body.data.booking)}::jsonb, 'aiCallWriteback', ${body.data.writeback}::boolean)
+      set settings = coalesce(settings, '{}'::jsonb) || jsonb_build_object('aiCallBooking', ${JSON.stringify(booking)}::jsonb, 'aiCallWriteback', ${body.data.writeback}::boolean)
       where id = ${ctx.orgId}::uuid
       returning settings`);
     const saved = (result as unknown as { rows: Array<{ settings: unknown }> }).rows[0];

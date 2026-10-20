@@ -39,7 +39,7 @@ export function OwnerList({ ids, known, notFound, onChange }: OwnerListProps) {
   };
   if (ids.length === 0) return <p className="text-sm text-muted-foreground">Nobody yet. Find someone below.</p>;
   return (
-    <ol aria-label="Appointment owners" className="space-y-1">
+    <ol aria-label="High-priority appointments go to" className="space-y-1">
       {ids.map((id, i) => {
         const { name, text, flagged } = ownerLabel(id, known, notFound);
         return (

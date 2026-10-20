@@ -89,7 +89,7 @@ Pick project `endearing-comfort`. Setting a variable on a linked service redeplo
 | `AI_SUMMARY_MODEL` | model for summaries | `claude-haiku-4-5-20251001` |
 | `OUTREACH_KILL_SWITCH` | leave unset (or `off`) | `off`. `on` stops all outreach including AI calls |
 | `OUTREACH_INTERNAL_SECRET` | the same 32+ character secret as on outreach-api (secret) | the internal AI call routes do not exist as far as outreach-api can tell (404 in production, 503 `internal_disabled` elsewhere) and no campaign call or test call can be placed |
-| `GOOGLE_MAPS_API_KEY` (**outreach-api** only, optional) | a Google Cloud API key whose project has the **Routes API** and the **Geocoding API** enabled (secret) | **no appointment times are offered**, and no high-priority offer either: every call notes `maps_unavailable` (§11) and the AI calls card says "Google Maps key missing: no appointment times are offered until GOOGLE_MAPS_API_KEY is set on outreach-api." The calls still go |
+| `GOOGLE_MAPS_API_KEY` (**outreach-api** only, optional) | a Google Cloud API key whose project has the **Routes API** and the **Geocoding API** enabled (secret) | **no appointment times are offered**, and no high-priority offer either: every call with a property address and no consultation already booked notes `maps_unavailable` (§11) and the AI calls card says "Google Maps key missing: no appointment times are offered until GOOGLE_MAPS_API_KEY is set on outreach-api." The calls still go |
 
 `@cti/api` now listens on `::` (IPv4 and IPv6) so outreach-api reaches it over Railway private networking at `http://ctiapi.railway.internal:<API_PORT>` (`http://ctiapi.railway.internal:4000` here). Set that URL as `CTI_INTERNAL_URL` on outreach-api; it must be an origin only (no path).
 
@@ -442,7 +442,7 @@ So about **$0.12 per minute plus $0.0075 per call** ($0.10 + $0.014 + $0.0044 = 
 ## 15. Appointments and `book_appointment` (plan 1D)
 
 - **When it is offered.** Only when the trigger carries appointment times (`target.slots`) or the high-priority offer (`priority`), which outreach-api works out at the moment of the call (§11, "The agent never offers appointment times", lists each reason for none). With neither, the agent has no booking tools, no booking section and no `appointment_set` outcome: it behaves exactly as before 1D. Times are never part of the plan text; cti-api renders them in their own section, after the plan.
-- **Regions and reps.** The property's county (from Google Geocoding) picks the region, and the region's active reps take its times. The table is read-only in this step, defined in code (`DEFAULT_BOOKING_ROUTING` in `services/outreach-api/src/settings.ts`; changing it is a code change and a deploy), and the AI calls card shows it with each rep's name, "(inactive)" when Salesforce says so:
+- **Regions and reps.** The property's county (from Google Geocoding) picks the region, and the region's active reps take its times. The table is read-only in this step, defined in code (`DEFAULT_BOOKING_ROUTING` in `services/outreach-api/src/settings.ts`; changing it is a code change and a deploy), and the AI calls card shows it with each rep's name, "(inactive)" when Salesforce says so, and a line such as "No active rep: no SD times are offered." under it for a region with no active rep. Saving the card never changes the table: outreach-api ignores the routing the card sends back and keeps whatever the tenant's stored settings already have (normally none, so the code default applies):
 
   | Region | Counties | Reps | Starts (Pacific) |
   |---|---|---|---|
