@@ -20,7 +20,7 @@ import { and, eq, isNull, sql } from 'drizzle-orm';
 import type { AiCallOutcome, ConversationHandler, FlagReason, StopReason } from '@cti/contracts';
 import { schema, type Db } from '@cti/db';
 import { finishAiEnrollment } from '../ai-calls/touches.js';
-import { SHARED_ADDRESS_LIMIT, type OnSharedAddress } from './shared-address.js';
+import { SHARED_ADDRESS_LIMIT, STOP_SUPPRESSIONS, type OnSharedAddress } from './shared-address.js';
 
 export type SellerConversationRow = typeof schema.sellerConversations.$inferSelect;
 type EventKind = (typeof schema.CONVERSATION_EVENT_KINDS)[number];
@@ -131,9 +131,11 @@ export async function appendEvent(db: Db, e: ConversationEventInput): Promise<st
 }
 
 /**
- * Who handles the seller. Same handler → false and nothing written. A person taking over records who;
- * giving back to Sam clears the person and the flag (the person dealt with it). The hand-over is on the
- * timeline (`detail` taken_over | given_back) but not logged to Salesforce.
+ * Who handles the seller. Same handler → false and nothing written, except "sam" on a seller Sam still handles
+ * who has a flag: that clears the flag in one step (a flag pauses Sam's calls, ai-calls/touches.ts, and the person
+ * dealt with it without taking over first), written as a give-back. A person taking over records who; giving back
+ * to Sam clears the person and the flag (the person dealt with it). handler_changed_at moves only when the handler
+ * does. The hand-over is on the timeline (`detail` taken_over | given_back) but not logged to Salesforce.
  */
 export async function setHandler(
   db: Db,
@@ -144,9 +146,10 @@ export async function setHandler(
     const t = asDb(tx);
     const result = await t.execute(sql`
       update seller_conversations
-      set handler = ${i.handler}, handler_user_id = ${toSam ? null : i.userId}::uuid, handler_changed_at = ${iso(i.now)}, updated_at = ${iso(i.now)},
+      set handler = ${i.handler}, handler_user_id = ${toSam ? null : i.userId}::uuid,
+          handler_changed_at = case when handler <> ${i.handler} then ${iso(i.now)} else handler_changed_at end, updated_at = ${iso(i.now)},
           flag_reason = ${toSam ? sql`null` : sql`flag_reason`}, flagged_at = ${toSam ? sql`null` : sql`flagged_at`}
-      where id = ${i.conversationId}::uuid and handler <> ${i.handler}
+      where id = ${i.conversationId}::uuid and (handler <> ${i.handler} ${toSam ? sql`or flag_reason is not null` : sql``})
       returning org_id as "orgId"`);
     const changed = rows<{ orgId: string }>(result)[0];
     if (!changed) return false;
@@ -479,7 +482,9 @@ export async function setStatusFromCall(
 
 /**
  * Sam must never email this address again (this tenant). The address is stored trimmed and lowercased, so
- * a send-time check in any case finds it; the first reason on record is kept.
+ * a send-time check in any case finds it. The first reason on record is kept, except that a stop (opted_out,
+ * complained) replaces a `bounced`: the seller's stop must hold their calls, and a bounce alone would not
+ * (the conversation becomes the stop's, unless it names none). The conflict target is the primary key (not partial).
  */
 export async function suppressAddress(
   db: Db,
@@ -489,7 +494,9 @@ export async function suppressAddress(
   await db.execute(sql`
     insert into email_suppressions (org_id, address, reason, conversation_id)
     values (${i.orgId}::uuid, lower(btrim(${i.address}::text)), ${i.reason}, ${i.conversationId}::uuid)
-    on conflict (org_id, address) do nothing`);
+    on conflict (org_id, address) do update
+      set reason = excluded.reason, conversation_id = coalesce(excluded.conversation_id, email_suppressions.conversation_id)
+      where email_suppressions.reason = 'bounced' and excluded.reason in (${sqlList(STOP_SUPPRESSIONS, '')})`);
 }
 
 /** Why this address is suppressed in this tenant (any case), or null when Sam may email it. */

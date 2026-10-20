@@ -25,9 +25,11 @@
  * A seller's ANSWER (a `reply` or a `holding` email) canceled because Sam's email is off or paused for the tenant, or
  * because of the daily cap, is not the seller's choice: the seller wrote and is waiting. The conversation is flagged
  * `unsure` in the cancel's own transaction, and once it has committed a seller_needs_person alert (ids only) asks a
- * person to answer, so a seller's reply is never dropped silently. A first email (nobody is waiting on it) and an
- * email on a practice conversation (it goes to the admin) are canceled as before; an already flagged conversation
- * keeps its reason and raises no second alert.
+ * person to answer, so a seller's reply is never dropped silently. Only when nothing about the SELLER holds the email
+ * too (outbox.ts sellerBlock, read even when the switch blocks first): a seller who is stopped (a complaint stops the
+ * seller AND pauses the tenant), booked, taken over, already flagged, suppressed or opted out in Salesforce is waiting
+ * for nobody. A first email (nobody is waiting on it) and an email on a practice conversation (it goes to the admin)
+ * are canceled as before; an already flagged conversation keeps its reason and raises no second alert.
  *
  * Logs carry ids, block codes and counts only: never an address, a name, a subject or any text.
  */
@@ -280,7 +282,7 @@ async function cancel(deps: SendDeps, c: Claim, e: SendEvaluation, block: SendBl
   const { db, now, log } = deps;
   log.info({ emailId: c.id, block }, 'email canceled');
   const canceled = sql`status = 'canceled', last_error = ${block}`;
-  if (!(NEEDS_PERSON_BLOCKS.has(block) && ANSWER_PURPOSES.has(e.purpose) && !e.practice)) {
+  if (!(NEEDS_PERSON_BLOCKS.has(block) && ANSWER_PURPOSES.has(e.purpose) && !e.practice && e.sellerBlock === null)) {
     return (await settle(db, c, now, canceled)) ? 'canceled' : 'lost';
   }
   const result = await db.transaction(async (tx) => {

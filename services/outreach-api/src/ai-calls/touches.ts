@@ -18,7 +18,7 @@ import { and, eq, sql } from 'drizzle-orm';
 import { schema, type Db } from '@cti/db';
 import { exitEnrollment } from '../campaigns/enroll.js';
 import { DNC_PENDING_SQL } from '../call-plans/dnc-sql.js';
-import { SHARED_ADDRESS_LIMIT } from '../conversations/shared-address.js';
+import { SHARED_ADDRESS_LIMIT, STOP_SUPPRESSIONS } from '../conversations/shared-address.js';
 import { IN_FLIGHT_RETRY_MS } from './pacing-rules.js';
 
 /** A `dialing` touch with no call after this long lost its tick (a crash mid-trigger). */
@@ -56,12 +56,6 @@ export type Settle =
 
 const rows = <T>(r: unknown): T[] => (r as { rows: T[] }).rows;
 const iso = (d: Date) => sql`${d.toISOString()}::timestamptz`;
-
-/**
- * Suppression reasons that are a seller's stop (an unsubscribe, a spam complaint, a do-not-call: the store keeps
- * asked_to_stop as opted_out). A bounce is about the mailbox, not the person, and holds no call.
- */
-const STOP_SUPPRESSIONS = ['opted_out', 'complained'] as const;
 
 /**
  * The seller of enrollment `e` must not be called now:

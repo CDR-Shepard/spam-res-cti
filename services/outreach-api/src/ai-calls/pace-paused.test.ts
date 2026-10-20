@@ -9,7 +9,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { eq } from 'drizzle-orm';
 import { schema, type Db } from '@cti/db';
 import { SHARED_ADDRESS_LIMIT } from '../conversations/shared-address.js';
-import { ensureConversation, flagConversation, setHandler, stopSeller, suppressAddress } from '../conversations/store.js';
+import { ensureConversation, flagConversation, setHandler, stopSeller, suppressAddress, suppressionFor } from '../conversations/store.js';
 import { seedUser } from '../test/call-plan-seed.js';
 import { leadId, seedRecord, snapshot } from '../test/outreach-fixtures.js';
 import { seedReleasedLead, touchById } from '../test/ai-call-seed.js';
@@ -107,6 +107,17 @@ describe.skipIf(!pgLane)('ai_call.place: a seller a person handles or who waits 
       expect((await h.run(LATER)).placed).toBe(1);
     });
 
+    it('a flagged seller Sam still handles is cleared in one step ("sam" again), and the call goes', async () => {
+      const h = await paceHarness(db);
+      const lead = await seedReleasedLead(db, h.base);
+      const person = await seedUser(db, h.base.orgId);
+      const conv = await ensureConversation(db, { orgId: h.base.orgId, crmRecordId: lead.crmRecordId });
+      await flagConversation(db, { conversationId: conv.id, reason: 'wants_appointment', now: NOW });
+      await paused(h, lead);
+      expect(await setHandler(db, { conversationId: conv.id, handler: 'sam', userId: person, now: NOW })).toBe(true);
+      expect(await claimAiTouch(db, lead.touchId, LATER)).not.toBeNull();
+    });
+
     it('an open, unflagged conversation handled by Sam is called as before', async () => {
       const h = await paceHarness(db);
       const lead = await seedReleasedLead(db, h.base);
@@ -154,6 +165,15 @@ describe.skipIf(!pgLane)('ai_call.place: a seller a person handles or who waits 
       // A, these, and B: the limit itself.
       await moreRecords(h.base.orgId, SHARED_ADDRESS_LIMIT - 2);
       const b = await seedReleasedLead(db, h.base, { recordOver: { email: ADDRESS } });
+      await paused(h, b);
+    });
+
+    it('an address that bounced before the seller opted out is held: the stop upgrades the reason', async () => {
+      const h = await paceHarness(db);
+      await suppressAddress(db, { orgId: h.base.orgId, address: ADDRESS, reason: 'bounced', conversationId: null });
+      await stoppedSeller(h, 'opted_out');
+      expect(await suppressionFor(db, h.base.orgId, ADDRESS)).toBe('opted_out');
+      const b = await seedReleasedLead(db, h.base, { recordOver: { email: 'Seller@Example.com' } });
       await paused(h, b);
     });
 

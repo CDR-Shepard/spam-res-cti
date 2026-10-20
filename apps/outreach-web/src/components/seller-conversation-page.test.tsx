@@ -126,6 +126,34 @@ describe('SellerConversationPage: taking over and giving back', () => {
     expect(await screen.findByRole('button', { name: 'Clear flag and give back to Sam' })).toBeInTheDocument();
   });
 
+  it('a flagged seller Sam still handles shows Take over AND Clear flag and give back to Sam; clearing sends "sam"', async () => {
+    const calls = stubApi({
+      [`GET ${CONV}`]: sellerView({ handler: 'sam', flagReason: 'wants_appointment' }),
+      [`PUT ${HANDLER}`]: sellerView({ items: [noteItem({ id: rowId(4), detail: 'given_back', byName: 'Admin' })] }),
+    });
+    page();
+    expect(await screen.findByRole('button', { name: 'Take over' })).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: 'Clear flag and give back to Sam' }));
+    expect(calls.find((c) => c.method === 'PUT')).toEqual({ url: HANDLER, method: 'PUT', body: { handler: 'sam' } });
+    // The answer has no flag: only Take over is left.
+    await waitFor(() => expect(screen.queryByRole('button', { name: /give back/i })).not.toBeInTheDocument());
+    expect(screen.getByRole('button', { name: 'Take over' })).toBeInTheDocument();
+  });
+
+  it('a Sam-handled seller with no flag shows only Take over', async () => {
+    stubApi({ [`GET ${CONV}`]: sellerView({ handler: 'sam', flagReason: null }) });
+    page();
+    expect(await screen.findByRole('button', { name: 'Take over' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /give back/i })).not.toBeInTheDocument();
+  });
+
+  it('a flagged seller a person handles shows only the clear button (no Take over)', async () => {
+    stubApi({ [`GET ${CONV}`]: sellerView({ handler: 'person', handlerName: 'Dana', flagReason: 'legal' }) });
+    page();
+    expect(await screen.findByRole('button', { name: 'Clear flag and give back to Sam' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Take over' })).not.toBeInTheDocument();
+  });
+
   it('shows neither button to someone who may not change the handler', async () => {
     stubApi({ [`GET ${CONV}`]: sellerView({ mayChangeHandler: false }) });
     page();

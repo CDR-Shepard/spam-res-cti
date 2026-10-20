@@ -74,7 +74,18 @@ function RecordName({ view }: { view: ConversationView }) {
   return <a href={view.recordUrl} target="_blank" rel="noreferrer" className="underline decoration-foreground/20 underline-offset-4 hover:decoration-foreground">{view.name}</a>;
 }
 
+/**
+ * Take over while Sam handles the seller; give back while a person does. A flag (it pauses Sam's calls and emails) is
+ * cleared by the give-back whoever handles the seller, so a flagged seller Sam still handles shows both buttons.
+ */
 function HandoverButton({ view, busy, onChange }: { view: ConversationView; busy: boolean; onChange: (handler: ConversationHandler) => void }) {
-  if (view.handler === 'sam') return <Button size="sm" variant="outline" disabled={busy} onClick={() => onChange('person')}>Take over</Button>;
-  return <Button size="sm" variant="outline" disabled={busy} onClick={() => onChange('sam')}>{view.flagReason ? 'Clear flag and give back to Sam' : 'Give back to Sam'}</Button>;
+  const flagged = Boolean(view.flagReason);
+  return (
+    <>
+      {view.handler === 'sam' && <Button size="sm" variant="outline" disabled={busy} onClick={() => onChange('person')}>Take over</Button>}
+      {(view.handler !== 'sam' || flagged) && (
+        <Button size="sm" variant="outline" disabled={busy} onClick={() => onChange('sam')}>{flagged ? 'Clear flag and give back to Sam' : 'Give back to Sam'}</Button>
+      )}
+    </>
+  );
 }

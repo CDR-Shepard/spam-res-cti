@@ -16,6 +16,13 @@ import { describeError } from '../email/errors.js';
 export const SHARED_ADDRESS_LIMIT = 5;
 
 /**
+ * The suppression reasons that are a seller's stop (asked_to_stop is stored as opted_out): they hold an AI call to a
+ * record with the address (ai-calls/touches.ts), and one replaces a stored `bounced` (store.ts suppressAddress). A
+ * bounce alone is about the mailbox, not the seller: it holds no call.
+ */
+export const STOP_SUPPRESSIONS = ['opted_out', 'complained'] as const;
+
+/**
  * A stop that did not spread to other records because an address of the stop is on more than SHARED_ADDRESS_LIMIT of
  * them. `sharedRecordCount` is how many of the tenant's records carry such an address. Ids and a count only.
  */

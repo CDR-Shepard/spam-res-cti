@@ -13,6 +13,7 @@ import { seedPlanLead, seedUser } from '../test/call-plan-seed.js';
 import { appendEvent, ensureConversation, suppressAddress, type SellerConversationRow } from '../conversations/store.js';
 import { queueEmail, sendBlock } from './outbox.js';
 import { sendDueEmails } from './send.js';
+import { handleDeliveryEvent } from './events.js';
 import type { ResendClient, ResendSendRequest, ResendSendResult } from './resend-client.js';
 import type { AlertEvent } from '../alerts.js';
 
@@ -389,6 +390,60 @@ describe.skipIf(!pgLane)('outbox and send tick (real Postgres)', () => {
         expect(await rowOf(emailId)).toMatchObject({ status: 'canceled', lastError: 'daily_cap' });
         expect(await conversationOf(s.conv.id)).toMatchObject({ flagReason: 'unsure' });
         expect(alerts).toEqual([expect.objectContaining({ kind: 'seller_needs_person', context: expect.objectContaining({ block: 'daily_cap' }) })]);
+      });
+
+      it('an open seller Sam handles is flagged once: a second tick over another canceled answer raises no second alert', async () => {
+        const s = await seedSeller({ settings: PAUSED });
+        await queue(s);
+        const first = await tickWithAlerts(fakeResend().client);
+        expect(await conversationOf(s.conv.id)).toMatchObject({ flagReason: 'unsure' });
+        expect(first.alerts).toHaveLength(1);
+        await queue(s, { purpose: 'holding' });
+        const second = await tickWithAlerts(fakeResend().client);
+        expect(second.counts.canceled).toBe(1);
+        expect(second.alerts).toEqual([]);
+      });
+
+      /** The conversation's seller rules hold the answer whatever the switch says: nobody is waiting for a person. */
+      it.each([
+        ['stopped', async (s: Seller) => setConversation(s.conv.id, { status: 'stopped', stopReason: 'opted_out' })],
+        ['booked', async (s: Seller) => setConversation(s.conv.id, { status: 'booked' })],
+        ['taken_over', async (s: Seller) => setConversation(s.conv.id, { handler: 'person' })],
+        ['suppressed', async (s: Seller) => suppressAddress(db, { orgId: s.orgId, address: ADDRESS, reason: 'opted_out', conversationId: null })],
+      ] as const)('a %s seller\'s reply canceled for the pause is not flagged and raises no alert', async (_rule, setUp) => {
+        const s = await seedSeller({ settings: PAUSED });
+        await setUp(s);
+        const { emailId } = await queue(s);
+        const { counts, alerts } = await tickWithAlerts(fakeResend().client);
+        expect(counts.canceled).toBe(1);
+        expect(await rowOf(emailId)).toMatchObject({ status: 'canceled', lastError: 'paused' });
+        expect(await conversationOf(s.conv.id)).toMatchObject({ flagReason: null });
+        expect(alerts).toEqual([]);
+      });
+
+      it("a seller with Salesforce Email Opt Out: the reply canceled for the switch is not flagged and raises no alert", async () => {
+        const s = await seedSeller({ settings: { samEmail: { enabled: false } }, sfEmailOptOut: true });
+        await queue(s);
+        const { alerts } = await tickWithAlerts(fakeResend().client);
+        expect(await conversationOf(s.conv.id)).toMatchObject({ flagReason: null });
+        expect(alerts).toEqual([]);
+      });
+
+      it('the complaint flow end to end: a seller who complained with a reply still queued is never handed to a person', async () => {
+        const s = await seedSeller();
+        const sentId = await seedSent(s, HOUR);
+        const { emailId } = await queue(s);
+        const notified: AlertEvent[] = [];
+        const notify = { alert: async (event: AlertEvent) => void notified.push(event), appPublicUrl: 'https://app.example.com', log: fakeLog() };
+        const resendId = (await rowOf(sentId)).resendId!;
+        expect(await handleDeliveryEvent(db, { type: 'email.complained', data: { email_id: resendId } }, NOW, notify)).toBe('done');
+        expect(notified.map((a) => a.kind)).toEqual(['email_complaint']);
+
+        const { counts, alerts } = await tickWithAlerts(fakeResend().client);
+        expect(counts.canceled).toBe(1);
+        expect((await rowOf(emailId)).status).toBe('canceled');
+        expect(await conversationOf(s.conv.id)).toMatchObject({ status: 'stopped', stopReason: 'complained', flagReason: null });
+        expect(alerts).toEqual([]);
       });
 
       it('a first email canceled for the switch is unchanged: no flag, no alert', async () => {

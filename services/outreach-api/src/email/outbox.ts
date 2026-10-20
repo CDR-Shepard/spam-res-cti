@@ -269,26 +269,31 @@ export async function emailsOutInLastDay(db: Db, i: { orgId: string; conversatio
   return rows<{ n: number }>(result)[0]?.n ?? 0;
 }
 
-async function firstBlock(db: Db, f: SendFacts, emailId: string, now: Date): Promise<SendBlock | null> {
-  const off = switchBlock(f.settings);
-  if (off) return off;
-  const practice = f.practiceUserId !== null;
-  if (!practice) {
-    // Only a first email needs the approval, so no other purpose pays for the read.
-    const approved = f.purpose !== 'first' || (await hasApprovedPlan(db, f.orgId, f.crmRecordId));
-    const address = await addressBlocks(db, f.orgId, f.toAddress);
-    const held = sellerBlock({ ...f, approved, closed: f.isClosed, suppressed: address.suppressed, sfEmailOptOut: f.sfEmailOptOut || address.sfOptOut });
-    if (held) return held;
-  }
+/** Rules 2 to 9 for a due email, with their reads: the shared sellerBlock. Null for a practice email (it goes to the admin). */
+async function sellerHold(db: Db, f: SendFacts): Promise<EmailBlock | null> {
+  if (f.practiceUserId !== null) return null;
+  // Only a first email needs the approval, so no other purpose pays for the read.
+  const approved = f.purpose !== 'first' || (await hasApprovedPlan(db, f.orgId, f.crmRecordId));
+  const address = await addressBlocks(db, f.orgId, f.toAddress);
+  return sellerBlock({ ...f, approved, closed: f.isClosed, suppressed: address.suppressed, sfEmailOptOut: f.sfEmailOptOut || address.sfOptOut });
+}
+
+/** Rules 10 and 11, once rules 1 to 9 let the email through. */
+async function capOrWindow(db: Db, f: SendFacts, emailId: string, now: Date): Promise<SendBlock | null> {
   if ((await emailsOutInLastDay(db, { orgId: f.orgId, conversationId: f.conversationId, exceptEmailId: emailId }, now)) >= EMAIL_DAILY_CAP) return 'daily_cap';
   // A practice email goes to the admin, not the seller: the seller's hours do not apply to it.
-  if (practice) return null;
+  if (f.practiceUserId !== null) return null;
   return emailSendAt(f.phones, now).getTime() > now.getTime() ? 'outside_window' : null;
 }
 
 /** What the send tick learns about one due email: the block, and the facts it acts on afterwards. */
 export interface SendEvaluation {
   block: SendBlock | null;
+  /**
+   * What the seller's own rules (2 to 9) say, read even when the tenant's switch blocks first: null = nothing about
+   * the seller holds the email (always null for a practice email). The tick asks a person to answer a seller only then.
+   */
+  sellerBlock: EmailBlock | null;
   /** The seller's phones the block was judged on (to place an `outside_window` email). */
   phones: Array<{ e164: string }>;
   conversationId: string;
@@ -299,8 +304,11 @@ export interface SendEvaluation {
 
 export async function evaluateSend(db: Db, emailId: string, now: Date): Promise<SendEvaluation> {
   const facts = await loadFacts(db, emailId);
+  const held = await sellerHold(db, facts);
+  const block = switchBlock(facts.settings) ?? held ?? (await capOrWindow(db, facts, emailId, now));
   return {
-    block: await firstBlock(db, facts, emailId, now),
+    block,
+    sellerBlock: held,
     phones: facts.phones,
     conversationId: facts.conversationId,
     purpose: facts.purpose,

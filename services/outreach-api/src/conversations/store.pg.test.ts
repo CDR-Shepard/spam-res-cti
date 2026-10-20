@@ -173,6 +173,38 @@ describe.skipIf(!pgLane)('conversation store (real Postgres)', () => {
     it('is false for an unknown conversation', async () => {
       expect(await setHandler(t.db, { conversationId: '00000000-0000-4000-8000-000000000000', handler: 'person', userId: null, now: NOW })).toBe(false);
     });
+
+    it('a flagged seller Sam still handles: "sam" clears the flag in one step, with one given_back event', async () => {
+      const { orgId, crmRecordId } = await seedSeller();
+      const person = await seedUser(t.db, orgId);
+      const conv = await ensureConversation(t.db, { orgId, crmRecordId });
+      await flagConversation(t.db, { conversationId: conv.id, reason: 'wants_appointment', now: NOW });
+      expect(await setHandler(t.db, { conversationId: conv.id, handler: 'sam', userId: person, now: NOW })).toBe(true);
+      expect(await conversationRow(conv.id)).toMatchObject({ handler: 'sam', handlerUserId: null, flagReason: null, flaggedAt: null });
+      const handlerEvents = (await eventsOf(conv.id)).filter((e) => e.kind === 'handler');
+      expect(handlerEvents).toEqual([expect.objectContaining({ actor: 'person', userId: person, detail: 'given_back', sfLogStatus: 'skipped' })]);
+      // Cleared: asking again changes nothing.
+      expect(await setHandler(t.db, { conversationId: conv.id, handler: 'sam', userId: person, now: NOW })).toBe(false);
+      expect((await eventsOf(conv.id)).filter((e) => e.kind === 'handler')).toHaveLength(1);
+    });
+
+    it('"sam" on a Sam-handled seller with no flag is a no-op: false, nothing written', async () => {
+      const { orgId, crmRecordId } = await seedSeller();
+      const conv = await ensureConversation(t.db, { orgId, crmRecordId });
+      expect(await setHandler(t.db, { conversationId: conv.id, handler: 'sam', userId: null, now: NOW })).toBe(false);
+      expect(await conversationRow(conv.id)).toMatchObject({ handler: 'sam', handlerChangedAt: null });
+      expect(await eventsOf(conv.id)).toEqual([]);
+    });
+
+    it('"person" on a flagged seller a person already handles stays a no-op (the flag waits for the give-back)', async () => {
+      const { orgId, crmRecordId } = await seedSeller();
+      const person = await seedUser(t.db, orgId);
+      const conv = await ensureConversation(t.db, { orgId, crmRecordId });
+      await flagConversation(t.db, { conversationId: conv.id, reason: 'unsure', now: NOW });
+      await setHandler(t.db, { conversationId: conv.id, handler: 'person', userId: person, now: NOW });
+      expect(await setHandler(t.db, { conversationId: conv.id, handler: 'person', userId: person, now: NOW })).toBe(false);
+      expect((await conversationRow(conv.id)).flagReason).toBe('unsure');
+    });
   });
 
   describe('flagConversation', () => {
@@ -838,13 +870,35 @@ describe.skipIf(!pgLane)('conversation store (real Postgres)', () => {
       expect(await suppressionFor(t.db, orgId, 'other@example.com')).toBeNull();
     });
 
-    it('keeps the first reason', async () => {
+    it.each(['opted_out', 'complained'] as const)('a stop upgrades a bounced address: bounced, then %s, stores the stop reason', async (reason) => {
+      const { orgId, crmRecordId } = await seedSeller();
+      const conv = await ensureConversation(t.db, { orgId, crmRecordId });
+      await suppressAddress(t.db, { orgId, address: 'seller@example.com', reason: 'bounced', conversationId: null });
+      await suppressAddress(t.db, { orgId, address: 'SELLER@example.com', reason, conversationId: conv.id });
+      expect(await suppressionFor(t.db, orgId, 'seller@example.com')).toBe(reason);
+      expect(await suppressionRows(orgId)).toMatchObject([{ address: 'seller@example.com', conversationId: conv.id }]);
+    });
+
+    it('an upgrade with no conversation keeps the one the bounce recorded', async () => {
       const { orgId, crmRecordId } = await seedSeller();
       const conv = await ensureConversation(t.db, { orgId, crmRecordId });
       await suppressAddress(t.db, { orgId, address: 'seller@example.com', reason: 'bounced', conversationId: conv.id });
-      await suppressAddress(t.db, { orgId, address: 'SELLER@example.com', reason: 'complained', conversationId: null });
-      expect(await suppressionFor(t.db, orgId, 'seller@example.com')).toBe('bounced');
-      expect(await suppressionRows(orgId)).toHaveLength(1);
+      await suppressAddress(t.db, { orgId, address: 'seller@example.com', reason: 'opted_out', conversationId: null });
+      expect(await suppressionRows(orgId)).toMatchObject([{ reason: 'opted_out', conversationId: conv.id }]);
+    });
+
+    it.each([
+      ['opted_out', 'complained'],
+      ['opted_out', 'bounced'],
+      ['complained', 'opted_out'],
+      ['complained', 'bounced'],
+      ['bounced', 'bounced'],
+    ] as const)('otherwise keeps the first reason: %s, then %s, stays the first', async (first, second) => {
+      const { orgId, crmRecordId } = await seedSeller();
+      const conv = await ensureConversation(t.db, { orgId, crmRecordId });
+      await suppressAddress(t.db, { orgId, address: 'seller@example.com', reason: first, conversationId: conv.id });
+      await suppressAddress(t.db, { orgId, address: 'SELLER@example.com', reason: second, conversationId: null });
+      expect(await suppressionRows(orgId)).toMatchObject([{ reason: first, conversationId: conv.id }]);
     });
 
     it('is per tenant', async () => {
