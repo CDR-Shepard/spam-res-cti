@@ -26,10 +26,18 @@ export const CONSULTATION_MINUTES = 60;
 /** The one id a high-priority booking has; offers are p1..p9 / w1..w9. */
 export const PRIORITY_SLOT_ID = 'h1';
 /**
- * When a high-priority booking may start, in ROUTING_ZONE: at least `minLeadMinutes` from now, on a `stepMinutes` boundary,
- * from `firstStartHour` and ending by `endByHour`. `defaultStartHour` is the time offered when the seller names none.
+ * When a high-priority booking may start, in ROUTING_ZONE: at least `minLeadMinutes` and at most `maxAheadDays` from now, on a
+ * `stepMinutes` boundary, from `firstStartHour` and ending by `endByHour`. `defaultStartHour` is the time offered when the
+ * seller names none.
  */
-export const PRIORITY_RULES = { minLeadMinutes: 120, firstStartHour: 8, endByHour: 20, defaultStartHour: 9, stepMinutes: 15 } as const;
+export const PRIORITY_RULES = {
+  minLeadMinutes: 120,
+  maxAheadDays: 14,
+  firstStartHour: 8,
+  endByHour: 20,
+  defaultStartHour: 9,
+  stepMinutes: 15,
+} as const;
 
 /** A booking region's short code ("LA", "SD"). */
 export const RegionKey = z.string().regex(/^[A-Z]{2,6}$/);
@@ -114,8 +122,9 @@ export const Consultations = z.object({ last: ConsultationFact.nullable(), next:
 export type Consultations = z.infer<typeof Consultations>;
 
 /**
- * What the agent's book_appointment tool stored on ai_calls.appointment (0055). A high-priority booking has slotId 'h1' and
- * `priority: true`; cti-api enforces that pairing (no `.refine` here: this is used as a plain object schema elsewhere).
+ * What the agent's book_appointment or book_priority_appointment tool stored on ai_calls.appointment (0055). A high-priority
+ * booking has slotId 'h1' and `priority: true`; cti-api enforces that pairing (booking-pairing.ts; no `.refine` here: this
+ * is used as a plain object schema elsewhere).
  */
 export const BookedAppointment = z
   .object({
@@ -134,9 +143,9 @@ export const BookedAppointment = z
     region: RegionKey.optional(),
     /** High-priority booking (slotId 'h1'): only ever true. */
     priority: z.literal(true).optional(),
-    /** High-priority booking: what changed since the seller's earlier consultation, in Sam's words. */
+    /** Any booking (book_appointment or high priority): what changed since the seller's earlier consultation, in Sam's words. */
     whatChanged: z.string().max(300).optional(),
-    /** High-priority booking: the consultation this one follows up on, when the seller had one. */
+    /** Any booking (book_appointment or high priority): the consultation this one follows up on, when the seller had one. */
     previousConsultation: ConsultationFact.optional(),
   })
   .strict();

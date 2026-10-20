@@ -6,6 +6,7 @@ import {
   PRIORITY_BAD_TIME,
   PRIORITY_NEEDS_ADDRESS,
   PRIORITY_OUTSIDE_HOURS,
+  PRIORITY_TOO_FAR,
   PRIORITY_TOO_SOON,
   PRIORITY_UNAVAILABLE,
   SLOT_TAKEN,
@@ -222,7 +223,7 @@ describe('bookPriorityAppointment (high priority, routing step 1)', () => {
     ['a Saturday', '2026-10-24T10:00', '2026-10-24T17:00:00.000Z'],
     ['8 AM, the first start', '2026-10-20T08:00', '2026-10-20T15:00:00.000Z'],
     ['7 PM, the last start (it ends at 8 PM)', '2026-10-20T19:00', '2026-10-21T02:00:00.000Z'],
-    ['9 AM after daylight saving ends (PST)', '2026-11-02T09:00', '2026-11-02T17:00:00.000Z'],
+    ['exactly 14 days ahead: 9 AM PST, after daylight saving ends', '2026-11-02T09:00', '2026-11-02T17:00:00.000Z'],
   ])('%s books', async (_label, start, iso) => {
     expect((await priority(args({ start }))).output).toMatch(/^booked/);
     expect(stored()).toMatchObject({ slotId: 'h1', start: iso, end: new Date(Date.parse(iso) + 60 * 60_000).toISOString(), priority: true });
@@ -235,6 +236,8 @@ describe('bookPriorityAppointment (high priority, routing step 1)', () => {
     ['7:45 AM', '2026-10-20T07:45', PRIORITY_OUTSIDE_HOURS],
     ['7:15 PM (it would end after 8 PM)', '2026-10-20T19:15', PRIORITY_OUTSIDE_HOURS],
     ['8 PM', '2026-10-20T20:00', PRIORITY_OUTSIDE_HOURS],
+    ['14 days and 15 minutes away', '2026-11-02T09:15', PRIORITY_TOO_FAR],
+    ['a wrong year', '2027-10-20T10:00', PRIORITY_TOO_FAR],
     ['off the quarter hour', '2026-10-20T10:10', PRIORITY_BAD_TIME],
     ['words', 'tomorrow 2pm', PRIORITY_BAD_TIME],
     ['no such hour', '2026-10-20T25:00', PRIORITY_BAD_TIME],
@@ -255,6 +258,22 @@ describe('bookPriorityAppointment (high priority, routing step 1)', () => {
     expect(await priority(args({ address_confirmed: 'yes' }))).toEqual({ output: PRIORITY_NEEDS_ADDRESS });
     expect(await priority(args({ start: '2026-10-19T11:10' }))).toEqual({ output: PRIORITY_BAD_TIME });
     expect(await priority(args({ start: '2026-10-19T07:00' }))).toEqual({ output: PRIORITY_TOO_SOON });
+    expect(await priority(args({ start: '2026-11-10T07:00' }))).toEqual({ output: PRIORITY_TOO_FAR });
+    expect(stored()).toBeNull();
+  });
+
+  it('a refusal is logged by its code only', async () => {
+    await priority(args({ start: '2027-10-20T10:00' }));
+    expect(log.info).toHaveBeenCalledWith({ aiCallId: ID, slotId: 'h1', refused: 'too_far' }, expect.any(String));
+  });
+
+  it("a 'taken' answer (the store never gives one for high priority) is logged at error and answered as a failed booking", async () => {
+    store.setAppointment = async () => 'taken';
+    const res = await priority(args({ reason: 'SECRET-REASON', note: 'SECRET-NOTE' }));
+    expect(res).toEqual({ output: 'booking failed — offer to have the specialist call them back instead (schedule_callback)' });
+    expect(res.output).not.toMatch(/\blist\b/);
+    expect(log.error).toHaveBeenCalledWith({ aiCallId: ID, slotId: 'h1' }, expect.any(String));
+    expect(JSON.stringify(log.error.mock.calls)).not.toContain('SECRET');
     expect(stored()).toBeNull();
   });
 
@@ -271,6 +290,15 @@ describe('bookPriorityAppointment (high priority, routing step 1)', () => {
     ['Auction on Friday', '', 'Urgent: Auction on Friday.'],
     ['Auction on Friday.', '   ', 'Urgent: Auction on Friday.'],
     ['  Auction\n on   Friday ', ' Call\n\nfirst. ', 'Urgent: Auction on Friday. Call first.'],
+    ['Auction on Friday…', '', 'Urgent: Auction on Friday…'],
+    ['The bank said "Friday."', 'Call first.', 'Urgent: The bank said "Friday." Call first.'],
+    ["The bank said 'Friday.'", '', "Urgent: The bank said 'Friday.'"],
+    ['They asked "can you come today?"', '', 'Urgent: They asked "can you come today?"'],
+    ['The bank said "sell now!"', '', 'Urgent: The bank said "sell now!"'],
+    ['The bank said “Friday.”', '', 'Urgent: The bank said “Friday.”'],
+    ['The bank said ‘Friday!’', '', 'Urgent: The bank said ‘Friday!’'],
+    ['They asked “today?”', '', 'Urgent: They asked “today?”'],
+    ['The bank said "Friday"', '', 'Urgent: The bank said "Friday".'],
   ])('the note: reason %j and note %j → %j', async (reason, note, want) => {
     await priority(args({ reason, note }));
     expect(stored()).toMatchObject({ note: want });

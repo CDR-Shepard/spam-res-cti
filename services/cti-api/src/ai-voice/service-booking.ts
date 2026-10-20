@@ -36,6 +36,8 @@ export const PRIORITY_NEEDS_ADDRESS =
 export const PRIORITY_BAD_TIME =
   "That time couldn't be read — nothing was booked. Use the date and a time on the quarter hour, in Pacific time, like 2026-10-21T14:00.";
 export const PRIORITY_TOO_SOON = "That's less than two hours away — nothing was booked. Offer a time at least two hours from now.";
+export const PRIORITY_TOO_FAR =
+  "That's more than two weeks away — nothing was booked. Check the date with them; for a later time, offer to have the team call them back (schedule_callback).";
 export const PRIORITY_OUTSIDE_HOURS =
   'The visit has to start at 8 AM or later and finish by 8 PM (latest start 7 PM), any day — nothing was booked. Offer a time in that range.';
 const NOT_LISTED = 'That time is not on your list. Offer one of the listed times.';
@@ -52,6 +54,9 @@ const WHAT_CHANGED_MAX = 300;
 /** A high-priority start exactly as the tool asks for it: a Pacific wall-clock time, no seconds, no zone. */
 const LOCAL_START = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/;
 const MINUTE_MS = 60_000;
+const DAY_MS = 24 * 60 * MINUTE_MS;
+/** A sentence already ends: a stop, `?`, `!` or an ellipsis, maybe inside a closing quote. */
+const SENTENCE_END = /[.!?…]["'”’]?$/;
 /** The summary line a booking leaves (summary.ts carries it through rewrites). */
 export const BOOKED_LINE_PREFIX = 'Appointment booked:';
 const KIND_WORDS = { phone: 'phone consultation', walkthrough: 'in-person consultation' } as const;
@@ -145,31 +150,38 @@ export async function storeBooking(ctx: ToolCtx, booked: BookedAppointment): Pro
   return 'booked';
 }
 
-export async function bookAppointment(args: unknown, env: ToolEnv): Promise<ToolResult> {
+/**
+ * Store the booking and say how it went: booked, `taken()` when the store refused the time, or the callback fallback when
+ * anything throws (building the booking included). Never throws.
+ */
+async function storeAndAnswer(env: ToolEnv, what: string, booking: () => BookedAppointment, taken: () => ToolResult): Promise<ToolResult> {
   const { ctx, effects } = env;
+  try {
+    return (await effects.bookAppointment(ctx, booking())) === 'taken' ? taken() : { output: BOOKED, then: 'continue' };
+  } catch (e) {
+    ctx.log.error({ aiCallId: ctx.aiCallId, what, err: errText(e) }, 'ai-voice: call bookkeeping failed');
+    return { output: FAILED };
+  }
+}
+
+export async function bookAppointment(args: unknown, env: ToolEnv): Promise<ToolResult> {
+  const { ctx } = env;
   const id = field(args, 'slot_id');
   const slot = ctx.slots.find((s) => s.id === id);
   if (!slot) return { output: NOT_LISTED };
   if (Date.parse(slot.start) <= ctx.now().getTime() + MIN_LEAD_MS) return { output: PASSED };
   if (slot.kind === 'walkthrough' && field(args, 'address_confirmed') !== true) return { output: WALKTHROUGH_NEEDS_ADDRESS };
-  try {
-    const result = await effects.bookAppointment(ctx, bookingFor(slot, args, ctx));
-    if (result === 'taken') {
-      ctx.log.info({ aiCallId: ctx.aiCallId, slotId: slot.id }, 'ai-voice: appointment time already taken');
-      return { output: SLOT_TAKEN, then: 'continue' };
-    }
-    return { output: BOOKED, then: 'continue' };
-  } catch (e) {
-    ctx.log.error({ aiCallId: ctx.aiCallId, what: 'book_appointment', err: errText(e) }, 'ai-voice: call bookkeeping failed');
-    return { output: FAILED };
-  }
+  return storeAndAnswer(env, 'book_appointment', () => bookingFor(slot, args, ctx), () => {
+    ctx.log.info({ aiCallId: ctx.aiCallId, slotId: slot.id }, 'ai-voice: appointment time already taken');
+    return { output: SLOT_TAKEN, then: 'continue' };
+  });
 }
 
-/** "Urgent: <reason>. <note>", one line of at most 300 characters (no second full stop when the reason ends a sentence). */
+/** "Urgent: <reason>. <note>", one line of at most 300 characters (no added full stop when the reason already ends a sentence). */
 function urgentNote(args: unknown): string {
   const reason = flat(field(args, 'reason'));
   const head = reason ? `Urgent: ${reason}` : 'Urgent';
-  const sentence = /[.!?]$/.test(head) ? head : `${head}.`;
+  const sentence = SENTENCE_END.test(head) ? head : `${head}.`;
   const note = flat(field(args, 'note'));
   return (note ? `${sentence} ${note}` : sentence).slice(0, NOTE_MAX).trim();
 }
@@ -187,7 +199,9 @@ function priorityStart(args: unknown, ctx: ToolCtx): { refusal: string; code: st
   if (typeof local !== 'string' || start === null || wallMinutes(local) % PRIORITY_RULES.stepMinutes !== 0) {
     return { refusal: PRIORITY_BAD_TIME, code: 'bad_time' };
   }
-  if (start.getTime() < ctx.now().getTime() + PRIORITY_RULES.minLeadMinutes * MINUTE_MS) return { refusal: PRIORITY_TOO_SOON, code: 'too_soon' };
+  const ahead = start.getTime() - ctx.now().getTime();
+  if (ahead < PRIORITY_RULES.minLeadMinutes * MINUTE_MS) return { refusal: PRIORITY_TOO_SOON, code: 'too_soon' };
+  if (ahead > PRIORITY_RULES.maxAheadDays * DAY_MS) return { refusal: PRIORITY_TOO_FAR, code: 'too_far' };
   const from = wallMinutes(local);
   if (from < PRIORITY_RULES.firstStartHour * 60 || from + CONSULTATION_MINUTES > PRIORITY_RULES.endByHour * 60) {
     return { refusal: PRIORITY_OUTSIDE_HOURS, code: 'outside_hours' };
@@ -212,22 +226,16 @@ function priorityBookingFor(start: Date, rep: PriorityOffer, args: unknown, ctx:
 }
 
 export async function bookPriorityAppointment(args: unknown, env: ToolEnv): Promise<ToolResult> {
-  const { ctx, effects } = env;
+  const { ctx } = env;
   const checked = priorityStart(args, ctx);
   if ('refusal' in checked) {
     ctx.log.info({ aiCallId: ctx.aiCallId, slotId: PRIORITY_SLOT_ID, refused: checked.code }, 'ai-voice: high-priority booking refused');
     return { output: checked.refusal };
   }
-  try {
-    const result = await effects.bookAppointment(ctx, priorityBookingFor(checked.start, checked.rep, args, ctx));
-    if (result === 'taken') {
-      // The store never refuses a high-priority time (D-10 is skipped for it); an effect that does is answered as a slot's.
-      ctx.log.info({ aiCallId: ctx.aiCallId, slotId: PRIORITY_SLOT_ID }, 'ai-voice: appointment time already taken');
-      return { output: SLOT_TAKEN, then: 'continue' };
-    }
-    return { output: BOOKED, then: 'continue' };
-  } catch (e) {
-    ctx.log.error({ aiCallId: ctx.aiCallId, what: 'book_priority_appointment', err: errText(e) }, 'ai-voice: call bookkeeping failed');
+  return storeAndAnswer(env, 'book_priority_appointment', () => priorityBookingFor(checked.start, checked.rep, args, ctx), () => {
+    // The store never refuses a high-priority time (D-10 is skipped for it), so this is a fault, not a clash: SLOT_TAKEN's
+    // "another time from the list" would not fit.
+    ctx.log.error({ aiCallId: ctx.aiCallId, slotId: PRIORITY_SLOT_ID }, 'ai-voice: high-priority booking answered taken; nothing was booked');
     return { output: FAILED };
-  }
+  });
 }

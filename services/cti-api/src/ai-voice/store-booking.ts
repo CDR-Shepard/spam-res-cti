@@ -16,8 +16,9 @@
  * interested and so on frees it (the row keeps the appointment as a record of what was said).
  */
 import { and, eq, isNotNull, isNull, ne, sql, type SQL } from 'drizzle-orm';
-import { BOOKING_STANDS_OUTCOMES, BookedAppointment, PRIORITY_SLOT_ID } from '@cti/contracts';
+import { BOOKING_STANDS_OUTCOMES, BookedAppointment } from '@cti/contracts';
 import { getDb, schema } from '@cti/db';
+import { checkPriorityPairing } from './booking-pairing.js';
 
 type Db = ReturnType<typeof getDb>;
 type Tx = Parameters<Parameters<Db['transaction']>[0]>[0];
@@ -78,11 +79,6 @@ export const setAppointmentQuery = (db: Conn, id: string, a: BookedAppointment) 
     })
     .where(and(eq(t.id, id), isNull(t.endedAt)))
     .returning({ id: t.id });
-
-/** Only slot h1 is high priority, and it always is (the pairing BookedAppointment leaves to cti-api). */
-export function checkPriorityPairing(a: BookedAppointment): void {
-  if ((a.priority === true) !== (a.slotId === PRIORITY_SLOT_ID)) throw new RangeError('a high-priority booking is slot h1, and only it');
-}
 
 /**
  * Book `a` for call `id`, atomically refusing a time another real call already holds with the same owner. A high-priority

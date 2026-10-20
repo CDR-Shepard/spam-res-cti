@@ -264,7 +264,7 @@ describe('routing constants', () => {
     expect(ROUTING_ZONE).toBe('America/Los_Angeles');
     expect(CONSULTATION_MINUTES).toBe(60);
     expect(PRIORITY_SLOT_ID).toBe('h1');
-    expect(PRIORITY_RULES).toEqual({ minLeadMinutes: 120, firstStartHour: 8, endByHour: 20, defaultStartHour: 9, stepMinutes: 15 });
+    expect(PRIORITY_RULES).toEqual({ minLeadMinutes: 120, maxAheadDays: 14, firstStartHour: 8, endByHour: 20, defaultStartHour: 9, stepMinutes: 15 });
   });
 });
 

@@ -7,7 +7,7 @@
 import { INBOUND_STATUSES, bookingStands } from '@cti/contracts';
 import type { BridgeSocket } from './bridge.js';
 import type { ActiveAiCall } from './registry.js';
-import { checkPriorityPairing } from './store-booking.js';
+import { checkPriorityPairing } from './booking-pairing.js';
 import type { AiCallRow, AiCallStore, NewAiCall, NewCtiCall, TranscriptEntry } from './store.js';
 import type { AiVoiceTwilio, FetchedCall } from './twilio.js';
 
