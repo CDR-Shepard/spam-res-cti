@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { AiCallOutcome } from '@cti/contracts';
 import { OUTCOME_WORDS, ctiDisposition, outcomeWords, qualificationLines } from './outcomes.js';
 
 describe('OUTCOME_WORDS', () => {
@@ -20,6 +21,12 @@ describe('OUTCOME_WORDS', () => {
       appointment_set: 'Appointment set',
       already_booked: 'Already booked',
     });
+  });
+
+  // cti-api's AiCallOutcome union (store.ts) is hand-kept beside the contracts enum; OUTCOME_WORDS is a Record over the
+  // union, so its keys are the union. A value one side has and the other lacks would be dropped or mis-parsed downstream.
+  it('has exactly the contracts AiCallOutcome values: the two lists cannot drift apart', () => {
+    expect(new Set(Object.keys(OUTCOME_WORDS))).toEqual(new Set(AiCallOutcome.options));
   });
 
   it('outcomeWords falls back for an unknown or missing outcome', () => {

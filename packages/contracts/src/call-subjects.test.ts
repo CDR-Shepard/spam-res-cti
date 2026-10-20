@@ -16,6 +16,7 @@ describe('ctiSubjectDisposition', () => {
 describe('AI call subjects', () => {
   it('a conversation outcome counts; a callback to-do or a missed call is an AI call Task but no conversation', () => {
     expect(AI_CONVERSATION_SUBJECT.test('AI call: Appointment set')).toBe(true);
+    expect(AI_CONVERSATION_SUBJECT.test('AI call: Already booked')).toBe(true);
     expect(AI_CONVERSATION_SUBJECT.test('AI call: callback Thursday')).toBe(false);
     expect(AI_CONVERSATION_SUBJECT.test('AI call: No answer')).toBe(false);
     expect(AI_CALL_SUBJECT.test('AI call: callback Thursday')).toBe(true);

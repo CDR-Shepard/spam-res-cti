@@ -308,7 +308,7 @@ describe('withSalesforceEffects', () => {
  * names a conversation (@cti/contracts AI_CONVERSATION_SUBJECT). Every outcome is checked against what this file writes.
  */
 describe('the AI call Task subject is read back by AI_CONVERSATION_SUBJECT', () => {
-  const conversation = new Set(['qualified_transferred', 'qualified_callback', 'not_interested', 'do_not_call', 'transfer_failed', 'appointment_set']);
+  const conversation = new Set(['qualified_transferred', 'qualified_callback', 'not_interested', 'do_not_call', 'transfer_failed', 'appointment_set', 'already_booked']);
   it.each(Object.keys(OUTCOME_WORDS))('%s', (outcome) => {
     const { subject } = aiCallTaskInput(row({ outcome: outcome as AiCallRow['outcome'] }), { whoId: LEAD }, SUMMARY);
     expect(AI_CONVERSATION_SUBJECT.test(subject)).toBe(conversation.has(outcome));

@@ -34,6 +34,10 @@ describe('nextStepFor (decision 9)', () => {
     expect(nextStepFor('busy', 1, 1)).toEqual({ kind: 'complete', reason: 'ai_call_no_answer' });
   });
 
+  it('already_booked on the last attempt still completes as already_booked, never as no answer', () => {
+    expect(nextStepFor('already_booked', 3, 3)).toEqual({ kind: 'complete', reason: 'already_booked' });
+  });
+
   it('every outcome has a step, and the terminal statuses are the four final ones', () => {
     for (const o of AiCallOutcome.options) expect(nextStepFor(o, 1, 3).kind).toMatch(/^(hand_off|exit|complete|retry)$/);
     expect([...TERMINAL_AI_CALL_STATUSES]).toEqual(['transferred', 'completed', 'failed', 'blocked']);

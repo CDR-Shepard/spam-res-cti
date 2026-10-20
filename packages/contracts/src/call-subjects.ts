@@ -11,7 +11,7 @@ export const CTI_CALL_SUBJECT = /^(?:inbound|outbound) call \| /i;
 /** Any AI call Task: the call's own ("AI call: <outcome words>") and its callback to-do ("AI call: callback …"). */
 export const AI_CALL_SUBJECT = /^ai call\b/i;
 /** An AI call Task whose outcome was a conversation (a person was reached and spoke). */
-export const AI_CONVERSATION_SUBJECT = /^ai call:\s*(?:transferred to rep|callback requested|not interested|do not call|transfer missed|appointment set)\b/i;
+export const AI_CONVERSATION_SUBJECT = /^ai call:\s*(?:transferred to rep|callback requested|not interested|do not call|transfer missed|appointment set|already booked)\b/i;
 
 /** The disposition part of a CTI call subject; null when it is not one, or has none (an inbound call without one). */
 export function ctiSubjectDisposition(subject: string): string | null {

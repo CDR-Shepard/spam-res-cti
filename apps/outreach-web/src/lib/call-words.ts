@@ -172,6 +172,7 @@ const EXIT_WORDS: Readonly<Record<string, string>> = {
   not_interested: 'Not interested',
   do_not_call: 'Asked not to be called',
   wrong_number: 'Wrong number',
+  already_booked: 'Already booked',
   deselected: 'Removed from the lead picker',
 };
 

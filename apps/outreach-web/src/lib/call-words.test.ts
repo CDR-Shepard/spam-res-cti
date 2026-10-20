@@ -91,6 +91,7 @@ describe('AI call result words', () => {
     ['ai_call_no_answer', 'No answer after every attempt'],
     ['ai_call_ended', 'The call ended'],
     ['not_interested', 'Not interested'],
+    ['already_booked', 'Already booked'],
     ['deselected', 'Removed from the lead picker'],
     ['some_new_reason', 'Some new reason'],
   ])('aiExitWords(%s)', (reason, words) => {
