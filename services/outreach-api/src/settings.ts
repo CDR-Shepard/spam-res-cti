@@ -133,3 +133,29 @@ export function outreachSettings(org: { settings: unknown }): OutreachSettings {
     aiCallWriteback: s.aiCallWriteback === true,
   };
 }
+
+/** A pause marker that is present but unreadable (junk in a hand-edited blob): still a pause, dated from the epoch. */
+const UNREADABLE_PAUSE = new Date(0).toISOString();
+
+export interface SamEmailSettings {
+  enabled: boolean;
+  /** ISO time Sam's email was paused (a spam complaint, see email/pause.ts); null = not paused. */
+  pausedAt: string | null;
+  pausedReason: string | null;
+}
+
+/**
+ * Sam's email channel for the tenant (`settings.samEmail`, written by email/pause.ts and the settings route).
+ * Off unless `enabled` is exactly `true`; junk is off. The pause is read the other way round: any non-null
+ * `pausedAt` pauses, even an unreadable one, so a mangled blob can only make Sam email LESS.
+ */
+export function samEmailSettings(org: { settings: unknown }): SamEmailSettings {
+  const s = isRecord(org.settings) ? org.settings : {};
+  const e = isRecord(s.samEmail) ? s.samEmail : {};
+  const pausedAt = e.pausedAt === undefined || e.pausedAt === null ? null : typeof e.pausedAt === 'string' && e.pausedAt !== '' ? e.pausedAt : UNREADABLE_PAUSE;
+  return {
+    enabled: e.enabled === true,
+    pausedAt,
+    pausedReason: typeof e.pausedReason === 'string' ? e.pausedReason : null,
+  };
+}

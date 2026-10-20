@@ -10,6 +10,7 @@ import {
   liveCallBooking,
   outreachSettings,
   practiceBooking,
+  samEmailSettings,
   type OutreachSettings,
 } from './settings.js';
 
@@ -237,5 +238,58 @@ describe('outreachSettings', () => {
     ])('bookingActive: %s', (_label, over, expected) => {
       expect(bookingActive({ ...DEFAULT_BOOKING, ...over })).toBe(expected);
     });
+  });
+});
+
+describe('samEmailSettings', () => {
+  const OFF = { enabled: false, pausedAt: null, pausedReason: null };
+
+  it.each([
+    ['an empty object', {}],
+    ['null', null],
+    ['a string', 'oops'],
+    ['an array', [{ enabled: true }]],
+    ['samEmail missing', { aiDailyBudgetUsd: 25 }],
+    ['samEmail a string', { samEmail: 'on' }],
+    ['samEmail an array', { samEmail: [true] }],
+    ['samEmail null', { samEmail: null }],
+  ])('is off for %s', (_label, settings) => {
+    expect(samEmailSettings({ settings })).toEqual(OFF);
+  });
+
+  it.each([
+    ['the string "yes"', 'yes'],
+    ['the string "true"', 'true'],
+    ['the number 1', 1],
+    ['null', null],
+  ])('is off unless enabled is exactly true (%s)', (_label, enabled) => {
+    expect(samEmailSettings({ settings: { samEmail: { enabled } } }).enabled).toBe(false);
+  });
+
+  it('is on when enabled is true, with no pause', () => {
+    expect(samEmailSettings({ settings: { samEmail: { enabled: true } } })).toEqual({ enabled: true, pausedAt: null, pausedReason: null });
+  });
+
+  it('reads the pause the way pauseSamEmail writes it', () => {
+    const settings = { samEmail: { enabled: true, pausedAt: '2026-10-20T17:00:00.000Z', pausedReason: 'complaint' } };
+    expect(samEmailSettings({ settings })).toEqual({ enabled: true, pausedAt: '2026-10-20T17:00:00.000Z', pausedReason: 'complaint' });
+  });
+
+  it('ignores a pause reason that is not a string', () => {
+    const settings = { samEmail: { enabled: true, pausedAt: '2026-10-20T17:00:00.000Z', pausedReason: 7 } };
+    expect(samEmailSettings({ settings }).pausedReason).toBeNull();
+  });
+
+  it('a pause marker that is junk still pauses: junk can only make Sam email less, never more', () => {
+    for (const pausedAt of [true, 1, {}, ['x'], '']) {
+      const read = samEmailSettings({ settings: { samEmail: { enabled: true, pausedAt } } });
+      expect(read.pausedAt, JSON.stringify(pausedAt)).not.toBeNull();
+    }
+  });
+
+  it('does not disturb the other settings, and they do not disturb it', () => {
+    const settings = { aiDailyBudgetUsd: 40, samEmail: { enabled: true } };
+    expect(samEmailSettings({ settings }).enabled).toBe(true);
+    expect(outreachSettings({ settings }).aiDailyBudgetUsd).toBe(40);
   });
 });
