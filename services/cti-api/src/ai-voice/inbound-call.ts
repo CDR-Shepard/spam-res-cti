@@ -28,7 +28,7 @@ import { getActiveCall, registerActiveCall, type ActiveAiCall } from './registry
 import { REGISTRY_MARGIN_SECONDS } from './service.js';
 import type { AgentPromptTemplates, AiCallStore } from './store.js';
 import { findTestPhone as realFindTestPhone, type TestPhoneMatch } from './test-phones.js';
-import { streamToken, streamTwiml, streamWssUrl } from './twilio.js';
+import { INBOUND_STREAM_ENDED_PATH, callbackUrl, streamToken, streamTwiml, streamWssUrl } from './twilio.js';
 
 export const INBOUND_NOT_STARTED = 'ai-voice: inbound test call not started';
 
@@ -174,5 +174,11 @@ export async function startInboundAiCall(deps: InboundAiDeps, call: StartCall): 
     registerActiveCall(inboundEntry(cfg, { ...call, addedBy: row.startedBy }, row.id, company, templates), ttlMs, deps.log);
   }
   deps.log.info({ aiCallId: row.id, replayed: row.replayed }, 'ai-voice: inbound test call answered');
-  return streamTwiml({ wssUrl: streamWssUrl(cfg.API_PUBLIC_URL), aiCallId: row.id, token: streamToken(row.id, cfg.SESSION_SECRET) });
+  return streamTwiml({
+    wssUrl: streamWssUrl(cfg.API_PUBLIC_URL),
+    aiCallId: row.id,
+    token: streamToken(row.id, cfg.SESSION_SECRET),
+    // A stream that never connects goes to the usual routing instead of silence (routes-webhooks.ts).
+    afterUrl: callbackUrl(cfg.API_PUBLIC_URL, INBOUND_STREAM_ENDED_PATH, row.id),
+  });
 }

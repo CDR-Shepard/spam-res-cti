@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   AiCallBridge,
   END_GRACE_MS,
+  FINAL_WORDS_WAIT_MS,
   OPENER_DELAY_MS,
   PLAYBACK_DRAIN_MAX_MS,
   SESSION_READY_TIMEOUT_MS,
@@ -10,7 +11,7 @@ import {
   type BridgeSocket,
   type ToolResult,
 } from './bridge.js';
-import { SAY_GOODBYE_FIRST, sayGoodbyeWithNumber } from './bridge-tools.js';
+import { ANSWER_THEM_FIRST, SAY_GOODBYE_FIRST, sayGoodbyeWithNumber } from './bridge-tools.js';
 import { DRAIN_MARGIN_MS } from './bridge-playback.js';
 import { AI_CALL_TOOLS } from './prompt.js';
 
@@ -91,6 +92,7 @@ function setup(over: Partial<BridgeOptions> = {}, hookOver: { onTool?: BridgeHoo
       reasoningEffort: 'low',
       vadEagerness: 'auto',
       maxCallMs: 600_000,
+      finalWordsWaitMs: 0, // the goodbye guard decides at once unless a test waits for words
       ...over,
     },
     hooks,
@@ -2578,6 +2580,13 @@ describe('a silent end_call after the caller spoke (goodbyeBeforeEnd)', () => {
     openai.msg({ type: 'response.output_audio_transcript.done', transcript: 'Okay, take care, Gerald. Bye now.' });
     openai.msg(done(...tools));
   };
+  /** One agent response that plays a question (no goodbye in it). */
+  const asks = (openai: FakeSocket, item: string) => {
+    openai.msg({ type: 'response.created' });
+    openai.msg({ type: 'response.output_audio.delta', item_id: item, delta: audio(400) });
+    openai.msg({ type: 'response.output_audio_transcript.done', transcript: 'And what has you thinking about selling?' });
+    openai.msg(done());
+  };
   const silentEnd = (openai: FakeSocket, id: string) => {
     openai.msg({ type: 'response.created' });
     openai.msg(done(endCall(id)));
@@ -2605,6 +2614,338 @@ describe('a silent end_call after the caller spoke (goodbyeBeforeEnd)', () => {
     });
     expect(openai.types()).toContain('response.create');
     expect(hooks.log.info).toHaveBeenCalledWith(expect.anything(), 'ai-voice bridge: end_call with no goodbye after the caller spoke — asked for one');
+  });
+
+  /** A caller turn with its words, as the session transcriber sends them after the commit. */
+  const said = (openai: FakeSocket, id: string, words: string) => {
+    callerTurn(openai, id);
+    openai.msg({ type: 'conversation.item.input_audio_transcription.completed', item_id: id, transcript: words });
+  };
+  const outputOf = (openai: FakeSocket, callId: string) =>
+    openai.sent.find((m) => m.type === 'conversation.item.create' && (m as { item?: { call_id?: string } }).item?.call_id === callId) as
+      | { item: { output: string } }
+      | undefined;
+  const STILL_TALKING_LOG = 'ai-voice bridge: end_call while the caller was still talking — told to answer them';
+
+  it.each(['instant', 'gate'] as const)('a caller who asked a question is answered, not hung up on (%s; a test call, 2026-10-19)', async (bargeIn) => {
+    const { openai, bridge, hooks } = setup({ goodbyeBeforeEnd: true, bargeIn }, { onTool: end });
+    bridge.start();
+    openai.msg(READY);
+    asks(openai, 'a1');
+    said(openai, 'c1', "You don't have a rough timeline?");
+    await flush();
+    openai.msg({ type: 'response.created' }); // gate: the answer to their turn, which instead ends the call silently
+    openai.clearSent();
+    openai.msg(done(endCall('e1')));
+    await flush();
+    expect(end).not.toHaveBeenCalled();
+    expect(outputOf(openai, 'e1')?.item.output).toBe(ANSWER_THEM_FIRST);
+    // The answer is speech only: an inbound agent's one tool is end_call, and it must not end again instead of answering.
+    const creates = openai.sent.filter((m) => m.type === 'response.create');
+    expect(creates).toHaveLength(1);
+    expect(creates[0]).toMatchObject({ type: 'response.create', response: { tool_choice: 'none' } });
+    expect(hooks.log.info).toHaveBeenCalledWith(expect.anything(), STILL_TALKING_LOG);
+    expect(hooks.log.info).not.toHaveBeenCalledWith(expect.anything(), 'ai-voice bridge: end_call with no goodbye after the caller spoke — asked for one');
+    expect(hooks.onTranscript).toHaveBeenCalledWith(expect.objectContaining({ role: 'system', text: '[end_call sent back — the caller was still talking]' }));
+  });
+
+  it('their streamed words count before the final transcript is in', async () => {
+    const { openai, bridge } = setup({ goodbyeBeforeEnd: true }, { onTool: end });
+    bridge.start();
+    openai.msg(READY);
+    asks(openai, 'a1');
+    openai.msg({ type: 'conversation.item.input_audio_transcription.delta', item_id: 'c1', delta: 'Why is that' });
+    openai.msg({ type: 'conversation.item.input_audio_transcription.delta', item_id: 'c1', delta: ' a team detail?' });
+    callerTurn(openai, 'c1');
+    await flush();
+    silentEnd(openai, 'e1');
+    await flush();
+    expect(end).not.toHaveBeenCalled();
+    expect(outputOf(openai, 'e1')?.item.output).toBe(ANSWER_THEM_FIRST);
+  });
+
+  it('a caller whose last words are no question gets the goodbye-only ask, then the end', async () => {
+    const { openai, bridge } = setup({ goodbyeBeforeEnd: true }, { onTool: end });
+    bridge.start();
+    openai.msg(READY);
+    spokenResponse(openai, 'a1');
+    said(openai, 'c1', 'Okay, thanks, bye.');
+    said(openai, 'c2', 'Mm.');
+    await flush();
+    silentEnd(openai, 'e1');
+    await flush();
+    expect(outputOf(openai, 'e1')?.item.output).toBe(SAY_GOODBYE_FIRST);
+    spokenResponse(openai, 'a2');
+    await flush();
+    expect(end).toHaveBeenCalledTimes(1);
+  });
+
+  it('after the answer the call goes on: once the agent speaks, a hang-up does not record the withdrawn end', async () => {
+    const { openai, bridge } = setup({ goodbyeBeforeEnd: true }, { onTool: end });
+    bridge.start();
+    openai.msg(READY);
+    asks(openai, 'a1');
+    said(openai, 'c1', 'You don’t know how long it takes to buy my house?');
+    await flush();
+    silentEnd(openai, 'e1');
+    await flush();
+    spokenResponse(openai, 'a2'); // the answer
+    await flush();
+    bridge.stop();
+    await flush();
+    expect(end).not.toHaveBeenCalled();
+  });
+
+  it('a caller who hangs up before the answer plays still gets the end_call run at the end, for its outcome', async () => {
+    const { openai, bridge } = setup({ goodbyeBeforeEnd: true }, { onTool: end });
+    bridge.start();
+    openai.msg(READY);
+    asks(openai, 'a1');
+    said(openai, 'c1', "So what's the offer?");
+    await flush();
+    silentEnd(openai, 'e1');
+    await flush();
+    expect(end).not.toHaveBeenCalled();
+    bridge.stop();
+    await flush();
+    expect(end).toHaveBeenCalledWith('end_call', { outcome: 'other', summary: 'bye' });
+  });
+
+  it('answers at most twice a call: a third silent end_call while they talk gets the goodbye-only ask (no loop)', async () => {
+    const { openai, bridge } = setup({ goodbyeBeforeEnd: true }, { onTool: end });
+    bridge.start();
+    openai.msg(READY);
+    asks(openai, 'a1');
+    for (const n of [1, 2, 3]) {
+      said(openai, `c${n}`, 'Why not?');
+      await flush();
+      silentEnd(openai, `e${n}`);
+      await flush();
+    }
+    expect(outputOf(openai, 'e1')?.item.output).toBe(ANSWER_THEM_FIRST);
+    expect(outputOf(openai, 'e2')?.item.output).toBe(ANSWER_THEM_FIRST);
+    expect(outputOf(openai, 'e3')?.item.output).toBe(SAY_GOODBYE_FIRST);
+    expect(end).not.toHaveBeenCalled();
+  });
+
+  it('once the answer has started, the next response may use tools again (gate mode: we send each create)', async () => {
+    const { openai, bridge } = setup({ goodbyeBeforeEnd: true, bargeIn: 'gate' }, { onTool: end });
+    bridge.start();
+    openai.msg(READY);
+    asks(openai, 'a1');
+    said(openai, 'c1', 'Why not?');
+    await flush();
+    silentEnd(openai, 'e1');
+    await flush();
+    asks(openai, 'a2'); // the answer
+    await flush();
+    openai.clearSent();
+    said(openai, 'c2', 'What would you pay?');
+    await flush();
+    expect(openai.sent.filter((m) => m.type === 'response.create')).toEqual([{ type: 'response.create', event_id: expect.any(String) }]);
+  });
+
+  it('waits for their final words: a transcript that comes after the end_call still counts', async () => {
+    const { openai, bridge } = setup({ goodbyeBeforeEnd: true, finalWordsWaitMs: FINAL_WORDS_WAIT_MS }, { onTool: end });
+    bridge.start();
+    openai.msg(READY);
+    asks(openai, 'a1');
+    callerTurn(openai, 'c1');
+    await flush();
+    silentEnd(openai, 'e1');
+    await vi.advanceTimersByTimeAsync(500);
+    expect(outputOf(openai, 'e1')).toBeUndefined(); // still waiting for the words
+    openai.msg({ type: 'conversation.item.input_audio_transcription.completed', item_id: 'c1', transcript: 'So what would you pay?' });
+    await flush();
+    expect(outputOf(openai, 'e1')?.item.output).toBe(ANSWER_THEM_FIRST);
+    expect(end).not.toHaveBeenCalled();
+  });
+
+  it('words that never come in time get the goodbye-only ask, as before', async () => {
+    const { openai, bridge } = setup({ goodbyeBeforeEnd: true, finalWordsWaitMs: FINAL_WORDS_WAIT_MS }, { onTool: end });
+    bridge.start();
+    openai.msg(READY);
+    asks(openai, 'a1');
+    callerTurn(openai, 'c1');
+    await flush();
+    silentEnd(openai, 'e1');
+    await vi.advanceTimersByTimeAsync(FINAL_WORDS_WAIT_MS - 1);
+    expect(outputOf(openai, 'e1')).toBeUndefined();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(outputOf(openai, 'e1')?.item.output).toBe(SAY_GOODBYE_FIRST);
+  });
+
+  it('a failed transcription counts as their words being in (none known): no wait, the goodbye-only ask', async () => {
+    const { openai, bridge } = setup({ goodbyeBeforeEnd: true, finalWordsWaitMs: FINAL_WORDS_WAIT_MS }, { onTool: end });
+    bridge.start();
+    openai.msg(READY);
+    asks(openai, 'a1');
+    callerTurn(openai, 'c1');
+    openai.msg({ type: 'conversation.item.input_audio_transcription.failed', item_id: 'c1', error: { code: 'x' } });
+    await flush();
+    silentEnd(openai, 'e1');
+    await flush();
+    expect(outputOf(openai, 'e1')?.item.output).toBe(SAY_GOODBYE_FIRST);
+  });
+
+  it("a reply that is no question is not answered (after the agent's goodbye: \"Alright, sounds good.\")", async () => {
+    const { openai, bridge } = setup({ goodbyeBeforeEnd: true }, { onTool: end });
+    bridge.start();
+    openai.msg(READY);
+    spokenResponse(openai, 'a1'); // "Okay, take care, Gerald. Bye now."
+    said(openai, 'c1', 'Alright, sounds good.');
+    await flush();
+    silentEnd(openai, 'e1');
+    await flush();
+    expect(outputOf(openai, 'e1')?.item.output).toBe(SAY_GOODBYE_FIRST);
+    spokenResponse(openai, 'a2');
+    await flush();
+    expect(end).toHaveBeenCalledTimes(1);
+  });
+
+  it('a caller who speaks again during the wait is answered as usual, not told goodbye (review, 2026-10-20)', async () => {
+    const { openai, bridge } = setup({ goodbyeBeforeEnd: true, finalWordsWaitMs: FINAL_WORDS_WAIT_MS }, { onTool: end });
+    bridge.start();
+    openai.msg(READY);
+    asks(openai, 'a1');
+    said(openai, 'c1', 'Okay, bye.');
+    callerTurn(openai, 'c2'); // words not in yet: the guard waits
+    await flush();
+    silentEnd(openai, 'e1');
+    await vi.advanceTimersByTimeAsync(500);
+    openai.clearSent();
+    callerTurn(openai, 'c3'); // "Oh wait —"
+    await vi.advanceTimersByTimeAsync(FINAL_WORDS_WAIT_MS);
+    expect(outputOf(openai, 'e1')?.item.output).toBe(ANSWER_THEM_FIRST);
+    expect(openai.sent.filter((m) => m.type === 'response.create')).toEqual([{ type: 'response.create' }]); // tools and all
+    spokenResponse(openai, 'a2');
+    await flush();
+    expect(end).not.toHaveBeenCalled();
+  });
+
+  it('gate: a caller talking when the guard decides is answered as usual once their turn ends', async () => {
+    const { openai, bridge } = setup({ goodbyeBeforeEnd: true, bargeIn: 'gate' }, { onTool: end });
+    bridge.start();
+    openai.msg(READY);
+    asks(openai, 'a1');
+    said(openai, 'c1', 'Okay, thanks.');
+    await flush();
+    openai.msg({ type: 'response.created' });
+    speechStarted(openai, 'c2'); // they start again before the end_call arrives
+    openai.msg(done(endCall('e1')));
+    await flush();
+    expect(outputOf(openai, 'e1')?.item.output).toBe(ANSWER_THEM_FIRST);
+    expect(end).not.toHaveBeenCalled();
+  });
+
+  it('a caller who hangs up during the wait: the end_call runs once, before the end is reported (its outcome is recorded)', async () => {
+    const { openai, bridge, hooks } = setup({ goodbyeBeforeEnd: true, finalWordsWaitMs: FINAL_WORDS_WAIT_MS }, { onTool: end });
+    bridge.start();
+    openai.msg(READY);
+    asks(openai, 'a1');
+    callerTurn(openai, 'c1'); // "Okay thanks, bye" — its transcript not in yet
+    await flush();
+    silentEnd(openai, 'e1');
+    await vi.advanceTimersByTimeAsync(200);
+    bridge.stop();
+    await vi.advanceTimersByTimeAsync(FINAL_WORDS_WAIT_MS);
+    expect(end).toHaveBeenCalledTimes(1);
+    expect(end.mock.invocationCallOrder[0]).toBeLessThan(hooks.onEnd.mock.invocationCallOrder[0]!);
+  });
+
+  it.each([
+    ['an opt-out, even as a question', 'other', 'Can you take me off your list?', [], false],
+    ['an outbound end the agent judged not_interested', 'not_interested', 'Who gave you my number?', [], true],
+    ['a batch that marked them do-not-call', 'other', 'Why do you keep calling?', ['mark_do_not_call'], false],
+    ['a batch that booked', 'appointment_set', 'Is that two or two thirty?', ['book_appointment'], false],
+  ])('never answered: %s (goodbye-only ask)', async (_name, outcome, words, tools, outbound) => {
+    const { openai, bridge } = setup({ goodbyeBeforeEnd: true, goodbyeOnNotInterested: outbound }, { onTool: end });
+    bridge.start();
+    openai.msg(READY);
+    asks(openai, 'a1');
+    said(openai, 'c1', words);
+    await flush();
+    openai.msg({ type: 'response.created' });
+    const extra = tools.map((name, i) => fnCall(name, '{"note":"asked"}', `t${i}`));
+    openai.msg(done(...extra, fnCall('end_call', JSON.stringify({ outcome, summary: 'bye' }), 'e1')));
+    await flush();
+    expect(outputOf(openai, 'e1')?.item.output).toBe(SAY_GOODBYE_FIRST);
+  });
+
+  it('inbound: a question is answered even when the agent ended with not_interested', async () => {
+    const { openai, bridge } = setup({ goodbyeBeforeEnd: true }, { onTool: end });
+    bridge.start();
+    openai.msg(READY);
+    asks(openai, 'a1');
+    said(openai, 'c1', 'So what would you offer?');
+    await flush();
+    openai.msg({ type: 'response.created' });
+    openai.msg(done(fnCall('end_call', '{"outcome":"not_interested","summary":"bye"}', 'e1')));
+    await flush();
+    expect(outputOf(openai, 'e1')?.item.output).toBe(ANSWER_THEM_FIRST);
+  });
+
+  it('a silent booking + end_call is not held for their words: a hang-up right after records the booking first', async () => {
+    const order: string[] = [];
+    const onTool = vi.fn(async (name: string) => {
+      order.push(name);
+      return name === 'end_call' ? { output: 'ending', then: 'hangup' as const } : { output: '{"ok":true}' };
+    });
+    const { openai, bridge, hooks } = setup({ goodbyeBeforeEnd: true, finalWordsWaitMs: FINAL_WORDS_WAIT_MS }, { onTool });
+    hooks.onEnd.mockImplementation(() => order.push('onEnd'));
+    bridge.start();
+    openai.msg(READY);
+    asks(openai, 'a1');
+    callerTurn(openai, 'c1'); // "Thursday at two works, bye" — its transcript not in yet
+    await flush();
+    openai.msg({ type: 'response.created' });
+    openai.msg(done(fnCall('book_appointment', '{"slot":"thu-2pm"}', 'b1'), fnCall('end_call', '{"outcome":"appointment_set","summary":"booked"}', 'e1')));
+    await flush();
+    bridge.stop();
+    await vi.advanceTimersByTimeAsync(FINAL_WORDS_WAIT_MS);
+    expect(order).toEqual(['book_appointment', 'end_call', 'onEnd']);
+  });
+
+  it('a caller who keeps talking over silent end_calls is answered at most twice, then said goodbye to (a TV cannot keep a call up)', async () => {
+    const { openai, bridge } = setup({ goodbyeBeforeEnd: true }, { onTool: end });
+    bridge.start();
+    openai.msg(READY);
+    asks(openai, 'a1');
+    for (const n of [1, 2, 3]) {
+      callerTurn(openai, `c${n}`);
+      await flush();
+      silentEnd(openai, `e${n}`);
+      callerTurn(openai, `d${n}`); // more talk while the end_call is decided
+      await flush();
+    }
+    expect(outputOf(openai, 'e1')?.item.output).toBe(ANSWER_THEM_FIRST);
+    expect(outputOf(openai, 'e2')?.item.output).toBe(ANSWER_THEM_FIRST);
+    expect(outputOf(openai, 'e3')?.item.output).toBe(SAY_GOODBYE_FIRST);
+  });
+
+  it('outbound: a seller who declines is not kept on the line (the goodbye note with our number)', async () => {
+    const note = sayGoodbyeWithNumber('six one nine, five five five, zero zero zero zero');
+    const { openai, bridge } = setup({ goodbyeBeforeEnd: true, goodbyeNote: note }, { onTool: end });
+    bridge.start();
+    openai.msg(READY);
+    asks(openai, 'a1');
+    said(openai, 'c1', "No, I'm not interested in selling. We're not selling.");
+    await flush();
+    silentEnd(openai, 'e1');
+    await flush();
+    expect(outputOf(openai, 'e1')?.item.output).toBe(note);
+  });
+
+  it("a question after the agent's goodbye is still answered", async () => {
+    const { openai, bridge } = setup({ goodbyeBeforeEnd: true }, { onTool: end });
+    bridge.start();
+    openai.msg(READY);
+    spokenResponse(openai, 'a1'); // "Okay, take care, Gerald. Bye now."
+    said(openai, 'c1', 'Wait, is that two or two thirty?');
+    await flush();
+    silentEnd(openai, 'e1');
+    await flush();
+    expect(outputOf(openai, 'e1')?.item.output).toBe(ANSWER_THEM_FIRST);
   });
 
   it('sends back the goodbye note it was given (outbound: with our callback number)', async () => {
@@ -2788,6 +3129,7 @@ describe('a silent end_call after the caller spoke (goodbyeBeforeEnd)', () => {
     openai.msg({ type: 'response.output_audio.delta', item_id: 'a2', delta: audio(800) }); // "Okay, take c-"
     speechStarted(openai, 'c2'); // "bye!"
     openai.msg(cancelled);
+    openai.msg({ type: 'input_audio_buffer.speech_stopped', item_id: 'c2', audio_end_ms: 0 });
     callerTurn(openai, 'c2');
     openai.clearSent();
     silentEnd(openai, 'e2'); // the reply to their "bye!"

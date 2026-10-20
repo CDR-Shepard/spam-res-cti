@@ -56,7 +56,9 @@ describe('tryInboundAiCall — who gets the agent', () => {
     expect(twiml).toBe(
       '<?xml version="1.0" encoding="UTF-8"?><Response><Connect><Stream url="wss://api.test/telephony/twilio/ai-voice/stream">' +
         `<Parameter name="aiCallId" value="${row.id}"/><Parameter name="token" value="${streamToken(row.id, SECRET)}"/>` +
-        '</Stream></Connect></Response>',
+        '</Stream></Connect>' +
+        // A stream that never connects (Twilio 31901) runs this instead of hanging up in silence (routes-webhooks.ts).
+        `<Redirect method="POST">https://api.test/telephony/twilio/ai-voice/inbound-stream-ended?aiCallId=${row.id}</Redirect></Response>`,
     );
     expect(findTestPhone).toHaveBeenCalledWith(deps.db, ORG, CALLER);
     expect(log.warn).not.toHaveBeenCalled();

@@ -120,6 +120,18 @@ function safeClose(socket: BridgeSocket, log: BridgeLog): void {
   }
 }
 
+/** The call is inbound and its conversation never started (a failed lookup counts as no: the caller is hung up on, as before). */
+async function inboundNotStarted(aiCallId: string, deps: StreamSessionDeps): Promise<boolean> {
+  if (!UUID_RE.test(aiCallId)) return false;
+  try {
+    const row = await deps.store.get(aiCallId);
+    return row !== null && row.direction === 'inbound' && row.startedAt === null && row.endedAt === null;
+  } catch (e) {
+    deps.log.error({ aiCallId, err: errText(e) }, 'ai-voice: refused stream lookup failed');
+    return false;
+  }
+}
+
 async function onStart(socket: BridgeSocket, start: Msg, deps: StreamSessionDeps): Promise<StreamOutcome> {
   const params = obj(start.customParameters);
   const aiCallId = str(params.aiCallId);
@@ -128,6 +140,9 @@ async function onStart(socket: BridgeSocket, start: Msg, deps: StreamSessionDeps
   const refuse = async (outcome: StreamOutcome, markFailed: boolean): Promise<StreamOutcome> => {
     deps.log.warn({ aiCallId: UUID_RE.test(aiCallId) ? aiCallId : '(invalid)', outcome }, 'ai-voice: stream refused');
     safeClose(socket, deps.log);
+    // An inbound caller goes on to the usual routing once the stream closes (streamTwiml's afterUrl, which ends the row):
+    // a hang-up here would race it.
+    if (markFailed && (await inboundNotStarted(aiCallId, deps))) return outcome;
     if (TWILIO_CALL_SID_RE.test(callSid)) {
       await deps.twilio.hangup(callSid).catch((e: unknown) => deps.log.error({ err: errText(e) }, 'ai-voice: hangup failed'));
     }
@@ -179,7 +194,7 @@ function conversationFor(
   entry: ActiveAiCall,
   booking: BookingTools,
   deps: StreamSessionDeps,
-): Pick<BridgeOptions, 'instructions' | 'tools' | 'opener' | 'goodbyeBeforeEnd' | 'goodbyeNote'> {
+): Pick<BridgeOptions, 'instructions' | 'tools' | 'opener' | 'goodbyeBeforeEnd' | 'goodbyeNote' | 'goodbyeOnNotInterested'> {
   // Part 6 B: a practice call rings a test number but says the seller's local time (the record's phone; service.ts).
   const prompt: PromptInput = { ...entry.prompt, localTime: localTimeFor(entry.localTimeE164 ?? entry.toE164, deps.now()) };
   if (entry.direction === 'inbound') {
@@ -195,6 +210,7 @@ function conversationFor(
     tools: toolsFor(booking),
     goodbyeBeforeEnd: true,
     goodbyeNote: sayGoodbyeWithNumber(phoneForms(prompt.callbackNumber)?.spoken ?? null),
+    goodbyeOnNotInterested: true,
   };
 }
 

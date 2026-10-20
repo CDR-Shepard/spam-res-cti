@@ -272,6 +272,72 @@ describe('Twilio AI-voice callbacks must carry the call sid', () => {
   }
 });
 
+describe("POST /telephony/twilio/ai-voice/inbound-stream-ended (after an inbound call's <Connect><Stream>)", () => {
+  const path = `/telephony/twilio/ai-voice/inbound-stream-ended?aiCallId=${ID}`;
+  const HANGUP = '<?xml version="1.0" encoding="UTF-8"?><Response><Hangup/></Response>';
+  const inboundCall = async (over: Record<string, unknown> = {}) => {
+    await store.insert({ id: ID, orgId: ORG, startedBy: ADMIN, direction: 'inbound', isTest: true, toE164: '+16195550100', fromE164: '+16195550000', status: 'queued', callSid: CALL_SID, ...over });
+    registerActiveCall(activeEntry({ aiCallId: ID, orgId: ORG, callSid: CALL_SID, direction: 'inbound' }));
+  };
+
+  it('403 on a bad signature, and the row is left alone', async () => {
+    await inboundCall();
+    expect((await signedPost(path, { CallSid: CALL_SID }, 'bad')).statusCode).toBe(403);
+    expect(store.rows.get(ID)).toMatchObject({ status: 'queued', endedAt: null });
+  });
+
+  it('a stream that never connected (a test call, 2026-10-19: silence) ends the row as failed and sends the caller to the usual routing', async () => {
+    await inboundCall();
+    const res = await signedPost(path, { CallSid: CALL_SID, CallStatus: 'in-progress' });
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toBe('<?xml version="1.0" encoding="UTF-8"?><Response><Redirect method="POST">https://api.test/telephony/twilio/inbound</Redirect></Response>');
+    // Ended (endedAt set), so the inbound webhook finds no open row to stream again: no loop.
+    expect(store.rows.get(ID)).toMatchObject({ status: 'failed', endedAt: NOW });
+    expect(await store.openInboundByCallSid(ORG, CALL_SID)).toBeNull();
+    expect(getActiveCall(ID)).toBeNull();
+  });
+
+  it('a stream that ran is over: hang up, nothing written', async () => {
+    await inboundCall({ status: 'in_progress', startedAt: NOW });
+    const res = await signedPost(path, { CallSid: CALL_SID, CallStatus: 'in-progress' });
+    expect(res.body).toBe(HANGUP);
+    expect(store.rows.get(ID)).toMatchObject({ status: 'in_progress', endedAt: null });
+  });
+
+  it('an outbound row, an ended row or an unknown id hangs up', async () => {
+    await liveCall('in_progress');
+    expect((await signedPost(path, { CallSid: CALL_SID })).body).toBe(HANGUP);
+    expect(store.rows.get(ID)).toMatchObject({ status: 'in_progress', endedAt: null });
+    const unknown = `/telephony/twilio/ai-voice/inbound-stream-ended?aiCallId=${OTHER_ID}`;
+    expect((await signedPost(unknown, { CallSid: CALL_SID })).body).toBe(HANGUP);
+  });
+
+  it("another call's CallSid is refused", async () => {
+    await inboundCall();
+    expect((await signedPost(path, { CallSid: `CA${'f'.repeat(32)}` })).statusCode).toBe(403);
+    expect(store.rows.get(ID)).toMatchObject({ status: 'queued', endedAt: null });
+  });
+
+  it.each([
+    ['its status moved on (the start-time write failed)', { status: 'in_progress' }, false],
+    ['it has a transcript', { transcript: [{ role: 'agent', text: 'Hi, this is Alex.', at: '2026-10-20T18:00:00Z' }] }, false],
+    ['its bridge is running on this server', {}, true],
+  ])('a conversation that began with no start time is not routed again: %s', async (_name, over, withBridge) => {
+    await inboundCall(over);
+    if (withBridge) registerActiveCall(activeEntry({ aiCallId: ID, orgId: ORG, callSid: CALL_SID, direction: 'inbound', bridge }));
+    expect((await signedPost(path, { CallSid: CALL_SID, CallStatus: 'in-progress' })).body).toBe(HANGUP);
+    expect(store.rows.get(ID)?.endedAt).toBeNull();
+  });
+
+  it('a store failure hangs up (200, never a Twilio error)', async () => {
+    await inboundCall();
+    vi.spyOn(store, 'finalizeInbound').mockRejectedValueOnce(new Error('db down'));
+    const res = await signedPost(path, { CallSid: CALL_SID, CallStatus: 'in-progress' });
+    expect(res.statusCode).toBe(200);
+    expect(res.body).toBe(HANGUP);
+  });
+});
+
 describe('POST /telephony/twilio/ai-voice/status', () => {
   const path = `/telephony/twilio/ai-voice/status?aiCallId=${ID}`;
 

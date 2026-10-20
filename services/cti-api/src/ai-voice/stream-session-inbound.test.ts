@@ -266,3 +266,31 @@ describe('an inbound call is finalized when the conversation ends', () => {
     expect(store.rows.get(ID)).toMatchObject({ status: 'completed', outcome: 'incomplete' });
   });
 });
+
+describe('an inbound stream refused before the conversation starts', () => {
+  // Closing the stream sends the caller on to streamTwiml's afterUrl (inbound-stream-ended: the usual routing); a REST
+  // hang-up or a failed mark here would race that and cut them off instead.
+  it('AI voice switched off since the call came in: closed, not hung up, the row left for the routing fallback', async () => {
+    deps.cfg = { ...cfg, OUTREACH_KILL_SWITCH: 'on' } as AppConfig;
+    expect(await begin()).toBe('unavailable');
+    expect(twilioWs.closed).toBe(true);
+    expect(twilio.hangups).toEqual([]);
+    expect(store.rows.get(ID)?.status).toBe('queued');
+  });
+
+  it('a call this server does not know (the registry lost it): closed, not hung up', async () => {
+    clearActiveCalls();
+    expect(await begin()).toBe('no_call');
+    expect(twilioWs.closed).toBe(true);
+    expect(twilio.hangups).toEqual([]);
+    expect(store.rows.get(ID)?.status).toBe('queued');
+  });
+
+  it('a row that already ended is hung up on, as before', async () => {
+    clearActiveCalls();
+    await store.update(ID, { endedAt: STARTED });
+    expect(await begin()).toBe('no_call');
+    expect(twilio.hangups).toEqual([CALL_SID]);
+  });
+});
+

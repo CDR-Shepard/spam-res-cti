@@ -27,6 +27,7 @@ import { enqueueSyncForCall } from '../salesforce/sync.js';
 import { normalize } from '@cti/phone';
 import { lastDialerForCaller, stickyAgentForCaller } from '../dialer/sticky.js';
 import { tryInboundAiCall } from '../ai-voice/inbound-call.js';
+import { INBOUND_ROUTING_PATH } from '../ai-voice/twilio.js';
 import { aiCallbackRep } from '../ai-voice/number-pool.js';
 import { drizzleAiCallStore } from '../ai-voice/store.js';
 import { dialClientWithCallerParams } from './inbound-caller-params.js';
@@ -174,9 +175,9 @@ async function aiCallbackRepOrNone(
 export async function registerInboundRoutes(app: FastifyInstance): Promise<void> {
   const cfg = loadConfig();
 
-  app.post('/telephony/twilio/inbound', async (req, reply) => {
+  app.post(INBOUND_ROUTING_PATH, async (req, reply) => {
     const rawBody = (req as FastifyRequest & { rawBody?: string }).rawBody ?? '';
-    const url = `${cfg.API_PUBLIC_URL}/telephony/twilio/inbound`;
+    const url = `${cfg.API_PUBLIC_URL}${INBOUND_ROUTING_PATH}`;
     const provider = getProvider();
     const valid = provider.validateWebhook(req.headers as Record<string, string | string[] | undefined>, rawBody, url);
     const body = req.body as Record<string, string>;

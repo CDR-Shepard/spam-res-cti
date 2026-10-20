@@ -13,6 +13,11 @@
  *                    `transferred` (the ONLY place that sets it, even after
  *                    finalize), hang up when done; otherwise outcome
  *                    `transfer_failed` and the caller hears a callback promise.
+ *   inbound-stream-ended  after an inbound call's <Connect><Stream>: a stream
+ *                    that never connected (Twilio 31901 while a deploy swapped
+ *                    containers, 2026-10-19: the caller heard nothing) ends the
+ *                    row as failed and goes to today's inbound routing; any
+ *                    other call hangs up.
  *
  * A callback without a CallSid is refused 400, one whose CallSid is not the
  * row's 403 (both `<Reject/>`, nothing changes). Every response is valid
@@ -30,7 +35,17 @@ import { localTimeFor } from './local-time.js';
 import { finalizeAiCall, isTerminalCallStatus, mapCallStatus, type AfterCall } from './service-finalize.js';
 import type { ToolCtx, ToolEffects } from './service-tools.js';
 import type { AiCallRow, AiCallStore } from './store.js';
-import { AMD_PATH, STATUS_PATH, TRANSFER_RESULT_PATH, noRepTwiml, voicemailPlayTwiml, voicemailTwiml, type AiVoiceTwilio } from './twilio.js';
+import {
+  AMD_PATH,
+  INBOUND_STREAM_ENDED_PATH,
+  STATUS_PATH,
+  TRANSFER_RESULT_PATH,
+  inboundRoutingTwiml,
+  noRepTwiml,
+  voicemailPlayTwiml,
+  voicemailTwiml,
+  type AiVoiceTwilio,
+} from './twilio.js';
 import { VOICEMAIL_READY_WAIT_MS, type VoicemailAudio } from './voicemail-audio.js';
 
 export interface WebhookDeps {
@@ -59,6 +74,8 @@ const EMPTY_TWIML = '<?xml version="1.0" encoding="UTF-8"?><Response/>';
 const HANGUP_TWIML = '<?xml version="1.0" encoding="UTF-8"?><Response><Hangup/></Response>';
 const REJECT_TWIML = '<Response><Reject/></Response>';
 const LIVE_FOR_VOICEMAIL = ['ringing', 'in_progress'];
+/** An inbound row's statuses before its conversation starts (markFailed leaves `failed` with no end time). */
+const NOT_STARTED_STATUSES: readonly string[] = ['queued', 'ringing', 'failed'];
 const DIAL_CONNECTED = new Set(['completed', 'answered']);
 
 const errText = (e: unknown): string => (e instanceof Error ? e.message : String(e));
@@ -197,6 +214,30 @@ export async function onTransferResult(row: AiCallRow, dialStatus: string, deps:
   return noRepTwiml();
 }
 
+/**
+ * An inbound call's stream ended without the call ending. One whose stream never started (no `startedAt`) and is still
+ * open is ended as failed here — `endedAt` set, so the inbound webhook finds no open row to stream again — and goes to
+ * today's routing, as any inbound AI failure does. A stream that ran is over: hang up.
+ */
+export async function onInboundStreamEnded(row: AiCallRow, deps: WebhookDeps, apiPublicUrl: string): Promise<string> {
+  if (row.direction !== 'inbound' || row.endedAt !== null || streamRan(row)) return HANGUP_TWIML;
+  const res = await finalizeAiCall({ store: deps.store, log: deps.log }, row.id, { callStatus: 'failed', durationSeconds: null, endedAt: deps.now() });
+  if (!res.finalized) return HANGUP_TWIML; // ended meanwhile (the sweeper, a replay): nothing more to route
+  deps.log.warn({ aiCallId: row.id }, 'ai-voice: inbound stream never connected — sent to the usual routing');
+  return inboundRoutingTwiml(apiPublicUrl);
+}
+
+/** Signs that the conversation began: a start time, a status past ringing, any transcript, or a bridge on this server. */
+function streamRan(row: AiCallRow): boolean {
+  const transcript: unknown = row.transcript;
+  return (
+    row.startedAt !== null ||
+    !NOT_STARTED_STATUSES.includes(row.status) ||
+    (Array.isArray(transcript) && transcript.length > 0) ||
+    getActiveCall(row.id)?.bridge != null
+  );
+}
+
 export function registerAiVoiceWebhooks(app: FastifyInstance, deps: WebhookDeps): void {
   app.post(AMD_PATH, async (req, reply) => {
     if (!validSignature(req)) return reply.code(403).type('text/xml').send(REJECT_TWIML);
@@ -220,5 +261,18 @@ export function registerAiVoiceWebhooks(app: FastifyInstance, deps: WebhookDeps)
     if ('refuse' in found) return refuse(reply, found.refuse);
     if (!found.row) return xml(reply, HANGUP_TWIML);
     return xml(reply, await onTransferResult(found.row, field(req.body, 'DialCallStatus'), deps));
+  });
+
+  app.post(INBOUND_STREAM_ENDED_PATH, async (req, reply) => {
+    if (!validSignature(req)) return reply.code(403).type('text/xml').send(REJECT_TWIML);
+    const found = await rowFor(req, deps.store);
+    if ('refuse' in found) return refuse(reply, found.refuse);
+    if (!found.row) return xml(reply, HANGUP_TWIML);
+    try {
+      return xml(reply, await onInboundStreamEnded(found.row, deps, loadConfig().API_PUBLIC_URL));
+    } catch (e) {
+      deps.log.error({ aiCallId: found.row.id, err: errText(e) }, 'ai-voice: inbound stream-ended failed');
+      return xml(reply, HANGUP_TWIML);
+    }
   });
 }

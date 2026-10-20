@@ -21,6 +21,10 @@ export const STREAM_PATH = `${AI_VOICE_TWILIO_PREFIX}/stream`;
 export const AMD_PATH = `${AI_VOICE_TWILIO_PREFIX}/amd`;
 export const STATUS_PATH = `${AI_VOICE_TWILIO_PREFIX}/status`;
 export const TRANSFER_RESULT_PATH = `${AI_VOICE_TWILIO_PREFIX}/transfer-result`;
+/** After an inbound call's `<Connect><Stream>` ends: hang up, or send a stream that never connected to the usual routing. */
+export const INBOUND_STREAM_ENDED_PATH = `${AI_VOICE_TWILIO_PREFIX}/inbound-stream-ended`;
+/** The inbound voice webhook (routes/inbound.ts): today's routing for anyone not given the AI agent. */
+export const INBOUND_ROUTING_PATH = '/telephony/twilio/inbound';
 /** `GET <path>/<token>`: a call's voicemail audio in Sam's voice, fetched by Twilio's `<Play>` (voicemail-audio.ts). */
 export const VOICEMAIL_AUDIO_PATH = `${AI_VOICE_TWILIO_PREFIX}/voicemail`;
 
@@ -53,11 +57,24 @@ export function callbackUrl(apiPublicUrl: string, path: string, aiCallId: string
   return `${apiPublicUrl}${path}?aiCallId=${encodeURIComponent(aiCallId)}`;
 }
 
-export function streamTwiml(i: { wssUrl: string; aiCallId: string; token: string }): string {
+/**
+ * `afterUrl`: where Twilio goes once the stream ends with the call still up — it never connected, or our side closed it
+ * first. A call already hung up (the caller, or our REST hang-up landing before the close) never gets there, so a
+ * refused inbound stream only closes the socket (stream-session.ts).
+ */
+export function streamTwiml(i: { wssUrl: string; aiCallId: string; token: string; afterUrl?: string }): string {
   const res = new twilio.twiml.VoiceResponse();
   const stream = res.connect().stream({ url: i.wssUrl });
   stream.parameter({ name: 'aiCallId', value: i.aiCallId });
   stream.parameter({ name: 'token', value: i.token });
+  if (i.afterUrl) res.redirect({ method: 'POST' }, i.afterUrl);
+  return res.toString();
+}
+
+/** Sends a call on to the inbound webhook, which routes it as it routes anyone not given the AI agent. */
+export function inboundRoutingTwiml(apiPublicUrl: string): string {
+  const res = new twilio.twiml.VoiceResponse();
+  res.redirect({ method: 'POST' }, `${apiPublicUrl}${INBOUND_ROUTING_PATH}`);
   return res.toString();
 }
 

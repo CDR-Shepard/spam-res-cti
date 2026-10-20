@@ -68,6 +68,16 @@ export const SAY_GOODBYE_FIRST = JSON.stringify({
 });
 
 /**
+ * What the agent hears when it ends the call without a word right after the caller asked a question (caller-question.ts).
+ * The call goes on and the agent answers them, in a speech-only turn. Like SAY_GOODBYE_FIRST it names no tool and no
+ * silence, so there is nothing in it to read out loud.
+ */
+export const ANSWER_THEM_FIRST = JSON.stringify({
+  ended: false,
+  next: 'answer what they just said, out loud',
+});
+
+/**
  * The outbound guard's note: the same goodbye-only ask, with our callback number spoken in it, because the goodbye
  * after a sent-back end_call kept dropping the number the outbound prompt asks for (simulated outbound calls,
  * 2026-10-19). Without a number it is SAY_GOODBYE_FIRST.
