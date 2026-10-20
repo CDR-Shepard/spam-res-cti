@@ -1,8 +1,8 @@
 /**
  * The SQL of booking an appointment slot (plan 1D): `book_appointment` writes the booking to `ai_calls.appointment`.
  *
- * D-10: one owner's time is booked once. Two AI calls may have been offered the same free time (each trigger read the
- * calendar before either booked), so the write takes a transaction-scoped advisory lock on the appointment owner, looks
+ * D-10: one rep's time is booked once. Two AI calls may have been offered the same free time (each trigger read the
+ * calendar before either booked), so the write takes a transaction-scoped advisory lock on the booked rep (the slot's), looks
  * for another REAL call in the org that already holds an overlapping time with that owner, and writes only if there is
  * none. The lock serialises racing bookings for one owner; under READ COMMITTED the second transaction's conflict read
  * runs after the first commits, so it sees that booking.

@@ -16,7 +16,7 @@ const NO_NUMBERS = 'No test phones are set. Add yours to Test phones on the Test
 
 /**
  * "Practice call to my phone" (admins, plan 1D): the AI agent rings one of the CTI's test numbers as if it were this seller,
- * with the real record and this card's plan (proposed or approved), and the appointment owner's real free times. It never
+ * with the real record and this card's plan (proposed or approved), and the region reps' real free times. It never
  * books, converts or writes anything in Salesforce, and it never approves the plan.
  */
 export function PracticeCall({ card, campaignId = null }: { card: CallPlanCard; campaignId?: string | null }) {

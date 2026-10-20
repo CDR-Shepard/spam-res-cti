@@ -2,7 +2,7 @@
  * Plan 1D write-back: the words the run passes to the renderers (render.ts): what was booked or held, what the write-back
  * created, the conversion, and the results link. Ids, times and Salesforce names only; the call's content is the renderers'.
  */
-import type { BookedAppointment } from '@cti/contracts';
+import { ROUTING_ZONE, type BookedAppointment } from '@cti/contracts';
 import { timezoneForNumber } from '@cti/firewall';
 import type { OwnerUser } from '../appointments/calendar.js';
 import type { AppointmentResult } from './appointment.js';
@@ -12,8 +12,6 @@ import type { ConversionOwner } from './conversion-owner.js';
 import type { Change, WritePlan } from './plan.js';
 import { ptWords, type Applied, type RenderInput } from './render.js';
 import type { RowRun } from './row-run.js';
-
-const PT_ZONE = 'America/Los_Angeles';
 
 /** One entry of "Not written", with the code behind it (last_error). */
 export interface NotWritten {
@@ -32,7 +30,7 @@ export function sellerTimeZone(toE164: string): string | null {
 
 /** " (seller: 1:00 PM CDT)" when the seller is outside Pacific time. */
 function sellerPart(start: Date, zone: string | null): string {
-  if (zone === null || zone === PT_ZONE) return '';
+  if (zone === null || zone === ROUTING_ZONE) return '';
   try {
     const words = new Intl.DateTimeFormat('en-US', { timeZone: zone, hour: 'numeric', minute: '2-digit', timeZoneName: 'short' }).format(start);
     return ` (seller: ${words.replace(/ /g, ' ')})`;

@@ -45,8 +45,7 @@ const NOT_LISTED = 'That time is not on your list. Offer one of the listed times
 const PASSED = 'That time has already passed (or is only minutes away) — nothing was booked. Offer a later time from the list.';
 /** A slot starting sooner than this is refused as passed (final review m2): nobody can be ready for it. */
 const MIN_LEAD_MS = 5 * 60_000;
-const PT_ZONE = 'America/Los_Angeles';
-const PT_PARTS = new Intl.DateTimeFormat('en-US', { timeZone: PT_ZONE, weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', hour12: true });
+const PT_PARTS = new Intl.DateTimeFormat('en-US', { timeZone: ROUTING_ZONE, weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', hour12: true });
 const BOOKED =
   'booked — confirm the day and time in one line with your goodbye, then end_call with outcome appointment_set';
 const FAILED = 'booking failed — offer to have the specialist call them back instead (schedule_callback)';

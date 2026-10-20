@@ -207,7 +207,7 @@ export async function bookOpportunity(
   },
 ): Promise<AppointmentResult> {
   const opp = checkId(i.oppId, 'oppId');
-  const owner = checkId(i.booked.specialistSfUserId, 'the appointment owner');
+  const owner = checkId(i.booked.specialistSfUserId, 'the booked rep');
   const existing = await findOne(
     client,
     (o) => `SELECT Id FROM Event WHERE WhatId = '${soqlEscape(opp)}' AND OwnerId = '${soqlEscape(owner)}' AND StartDateTime = ${soqlDateTime(i.booked.start)}${originClause(o)} LIMIT 1`,
@@ -309,7 +309,7 @@ async function refusedAsNull(run: () => Promise<string>): Promise<{ id: string |
 
 /** A hold we already put on the owner's calendar at the booked time (a retry never doubles it), or null. */
 export async function findLeadHold(client: SalesforceClient, booked: BookedAppointment): Promise<string | null> {
-  const owner = checkId(booked.specialistSfUserId, 'the appointment owner');
+  const owner = checkId(booked.specialistSfUserId, 'the booked rep');
   return findOne(
     client,
     (o) =>

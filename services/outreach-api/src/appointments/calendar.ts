@@ -1,6 +1,7 @@
 /**
- * Salesforce reads for appointment booking, through the tenant's integration connection: the users on the appointment owner
- * list, and the busy calendar time (Events not shown as Free) of one owner or of several reps at once.
+ * Salesforce reads for appointment booking, through the tenant's integration connection: the users on the "High-priority
+ * appointments go to" list and the region reps, and the busy calendar time (Events not shown as Free) of one rep or of several
+ * reps at once.
  *
  * All-day Events are stored as midnight GMT with EndDateTime = the last day's midnight (a one-day Event has start = end), so
  * they are matched by local DATE, never by instant: the busy query asks for timed Events overlapping [from, to) and for

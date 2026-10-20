@@ -119,8 +119,9 @@ export function bookingRouting(b: AiCallBookingSettings): BookingRouting {
 }
 
 /**
- * Plan 1D: the tenant's appointment booking settings (one appointment owner: the first active user on `specialists`). The
- * saved blob when it parses as a whole, else the defaults as a whole (a malformed blob never half-applies). `routing` is always
+ * Plan 1D: the tenant's appointment booking settings (`specialists`: its first active user, the appointment owner, takes high
+ * priority; `routing`: the region reps take every other booking). The saved blob when it parses as a whole, else the
+ * defaults as a whole (a malformed blob never half-applies). `routing` is always
  * filled in: a blob saved before routing existed keeps everything it had and gets the routing defaults. The configured
  * default list (AI_CALL_DEFAULT_SPECIALISTS) applies only to the defaults: a saved list, even an empty one, always wins.
  * Fix 1 (M-4): this is the only reader of `aiCallBooking`, and the default list is required, so no reader can see an empty

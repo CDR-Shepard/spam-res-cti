@@ -1,6 +1,6 @@
 /**
  * Real Postgres + fake Salesforce: a row that runs after the booked time has passed (Fix 1, I-1). It is handled like a
- * write-time conflict: no Event, no Appointment Set, the Followup moves and a Task to the appointment owner; a Lead is
+ * write-time conflict: no Event, no Appointment Set, the Followup moves and a Task to the booked rep; a Lead is
  * never converted for a time that has passed, but a conversion an earlier attempt made is kept.
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';

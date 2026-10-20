@@ -233,7 +233,10 @@ export type BookingRouting = z.infer<typeof BookingRouting>;
 export const AiCallBookingSettings = z
   .object({
     enabled: z.boolean(),
-    /** Ordered. The FIRST ACTIVE user owns every AI-booked slot and Event (decision 1: Grant Golden). No rotation, no owner-first rule. */
+    /**
+     * Ordered. The FIRST ACTIVE user (Grant Golden) is the appointment owner: the high-priority rep, and the owner of what a
+     * Lead conversion creates. Every other booking goes to its region's reps (`routing`). No rotation, no owner-first rule.
+     */
     specialists: z.array(z.string().regex(SF_USER_ID)).max(20),
     /** A Lead that books is converted (decision 2). Off → the hold + Task fallback for every Lead booking. */
     convertLeads: z.boolean(),
@@ -276,7 +279,7 @@ export const WritebackReadiness = z.object({
   convertReady: z.boolean(),
   /** The connected user's default record types (what conversion creates), shown on the card. */
   convertRecordTypes: z.object({ account: z.string().nullable(), opportunity: z.string().nullable() }),
-  /** The appointment owner the list resolves to now (first active), or null → booking is off. */
+  /** The appointment owner the list resolves to now (first active), or null → no high-priority offer (region bookings go on). */
   appointmentOwner: SalesforceUserOption.nullable(),
   items: z.array(
     z.object({ object: z.string(), field: z.string().nullable(), label: z.string(), problem: WritebackReadinessProblem }),

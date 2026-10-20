@@ -3,13 +3,13 @@
  * deterministic. Every value is shown as given, on one line, with control characters stripped; the changes text stays
  * within the field's length and the post within the org's Lead FeedItem limit (980 characters, both objects).
  */
+import { ROUTING_ZONE } from '@cti/contracts';
 import { cutUtf16, wellFormed } from '../research/text.js';
 import { consultationWords } from './booking-words.js';
 import { DNC_FIELDS, TABLE_FIELDS, type Change, type Skipped, type WritePlan } from './plan.js';
 
 export const CHATTER_MAX = 980;
 export const CHANGES_MAX = 32_000;
-const PT_ZONE = 'America/Los_Angeles';
 const SUMMARY_SHORT = 200;
 const LINE_PART_MAX = 200;
 const REFUSAL_MAX = 150;
@@ -49,7 +49,7 @@ export interface RenderInput {
   transferredTo?: string | null;
 }
 
-const PT_PARTS = new Intl.DateTimeFormat('en-US', { timeZone: PT_ZONE, weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', hour12: true });
+const PT_PARTS = new Intl.DateTimeFormat('en-US', { timeZone: ROUTING_ZONE, weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', hour12: true });
 
 function ptParts(at: Date): Record<string, string> {
   const out: Record<string, string> = {};

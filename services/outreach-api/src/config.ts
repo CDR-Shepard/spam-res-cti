@@ -69,8 +69,9 @@ const schema = z.object({
   /** Google Maps (Geocoding + Routes) for Sam's booking: property county and rep drive times. Unset = no maps; booking offers no times. */
   GOOGLE_MAPS_API_KEY: z.string().min(1).optional(),
   /**
-   * Plan 1D: the default appointment owner list, comma-separated Salesforce User ids (005…), in order. Used until a tenant
-   * saves its own list in the AI calls settings card. Production: Grant Golden. Empty (the default) = nobody to book with.
+   * Plan 1D: the default "High-priority appointments go to" list, comma-separated Salesforce User ids (005…), in order. Used
+   * until a tenant saves its own list in the AI calls settings card. Production: Grant Golden. Empty (the default) = no
+   * high-priority offer, and conversions are owned by the booked rep; region bookings go on.
    */
   AI_CALL_DEFAULT_SPECIALISTS: z
     .string()
