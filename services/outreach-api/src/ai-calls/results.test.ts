@@ -68,6 +68,19 @@ describe.skipIf(!pgLane)('collectAiCallResults (real Postgres)', () => {
     expect(await keyActive(lead.enrollmentId)).toBe(true);
   });
 
+  // Final review I1: a seller who asked to move their booked consultation is called by a person (cti-api's open callback
+  // Task), never by Sam again: the touch completes, no AI call is planned, and no write-back row is made.
+  it('2b: completed / already_booked: the touch is counted and the enrollment completes; no AI re-call, no write-back row', async () => {
+    const lead = await placed('completed', 'already_booked', { settings: { aiCallWriteback: true } });
+    await db.update(schema.aiCalls).set({ callbackAt: new Date('2026-10-07T00:00:00.000Z') }).where(eq(schema.aiCalls.id, lead.aiCallId));
+    const res = await collectAiCallResults(db, NOW, quiet);
+    expect(res.retried).toBe(0);
+    expect(await touchById(db, lead.touchId)).toMatchObject({ outcome: 'already_booked', countedAt: NOW });
+    expect(await enrollmentById(db, lead.enrollmentId)).toMatchObject({ status: 'completed', exitReason: 'already_booked', callStage: 'done', touchesDone: 1 });
+    expect(await touchesOf(lead.enrollmentId)).toHaveLength(1);
+    expect(await writebacksOf(lead.aiCallId)).toEqual([]);
+  });
+
   it('3: completed / not_interested: the enrollment exits not_interested and the contact keys are freed', async () => {
     const lead = await placed('completed', 'not_interested');
     await collectAiCallResults(db, NOW, quiet);

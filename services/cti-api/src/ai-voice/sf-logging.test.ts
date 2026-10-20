@@ -210,6 +210,21 @@ describe('logCallbackTask', () => {
     expect(created).toHaveLength(0);
   });
 
+  // Final review I1: Sam offers "the team will call you to move it" on a booked consultation, then ends already_booked.
+  it('already_booked with a scheduled callback: the same open callback Task, owned by the hand-off user', async () => {
+    owners.set(LEAD, { type: 'Lead', ownerId: SF_OWNER });
+    const r = row({ outcome: 'already_booked', callbackAt: new Date('2026-10-08T00:00:00Z'), summary: 'x\nCallback requested: Wednesday 5 PM — to move the consultation' });
+    expect(await logCallbackTask(r, SUMMARY, deps)).toBe('00T1');
+    expect(created).toHaveLength(1);
+    expect(created[0]!.userId).toBe(OWNER);
+    expect(created[0]!.input).toMatchObject({ subject: 'AI call: callback Wed, Oct 7, 5:00 PM PDT', activityDate: '2026-10-07', customFields: { Status: CALLBACK_TASK_STATUS } });
+  });
+
+  it('already_booked with no callback scheduled: no callback Task', async () => {
+    expect(await logCallbackTask(row({ outcome: 'already_booked', callbackAt: null }), SUMMARY, deps)).toBeNull();
+    expect(created).toHaveLength(0);
+  });
+
   it('if the org refuses the open status, the callback Task is still made (completed)', async () => {
     const create = vi
       .fn()

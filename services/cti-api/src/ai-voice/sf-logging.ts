@@ -10,7 +10,8 @@
  *                    "AI call: <outcome in words>". Id → ai_calls.sf_task_id
  *                    and calls.salesforce_task_id.
  *   logCallbackTask  a promised call back (outcome qualified_callback or
- *                    transfer_failed): an OPEN Task for the hand-off user
+ *                    transfer_failed, or already_booked with a callback
+ *                    scheduled to move it): an OPEN Task for the hand-off user
  *                    (the record owner), created with their own Salesforce
  *                    connection so it is theirs; if that connection is gone,
  *                    created by the starter with OwnerId (customFields) set
@@ -38,6 +39,15 @@ export const SF_CALL_TIMEOUT_MS = 30_000;
 export const SF_CREATE_TIMEOUT_MS = 60_000;
 const SUBJECT_MAX = 255;
 const CALLBACK_OUTCOMES = new Set(['qualified_callback', 'transfer_failed']);
+
+/**
+ * Does this call get the open callback Task? A callback outcome; or a seller whose consultation was already booked and who
+ * asked the team to call to move it (already_booked with a scheduled callback, final review I1). The touch still completes.
+ */
+function promisedCallback(row: AiCallRow): boolean {
+  if (!row.outcome) return false;
+  return CALLBACK_OUTCOMES.has(row.outcome) || (row.outcome === 'already_booked' && row.callbackAt !== null);
+}
 /** Every callback line the tool wrote; the last one is the callback (callbackAt is the last call's too). */
 const WHEN_LINES = /^Callback requested: (.+?)(?: — .*)?$/gm;
 const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
@@ -208,7 +218,7 @@ async function createCallbackAs(author: Author, links: TaskLinks, input: CallTas
  */
 export async function logCallbackTask(row: AiCallRow, summary: string, deps: SfLogDeps): Promise<string | null> {
   const links = recordLinks(row);
-  if (!links || !row.outcome || !CALLBACK_OUTCOMES.has(row.outcome)) return null;
+  if (!links || !promisedCallback(row)) return null;
   try {
     const input = callbackTaskInput(row, links, summary, deps.now());
     const handoff = await authorFor(row.handoffUserId, deps);
