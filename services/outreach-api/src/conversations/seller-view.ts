@@ -9,7 +9,7 @@
  * Why Sam may not email, in the order the page explains it: the server has no email setup or no writer
  * (`not_configured`), the tenant's switch is off or paused, the record has no usable address, and then outbox.ts's
  * own rules for a first email (`sellerBlock`: no call plan a person approved, a closed record, the conversation,
- * suppression, Salesforce Email Opt Out), so the page and the send tick never disagree.
+ * suppression, Salesforce Email Opt Out on any record with the address), so the page and the send tick never disagree.
  *
  * Every statement is scoped by tenant. No log line here (it writes none), so no address or name can reach one.
  */
@@ -17,9 +17,8 @@ import { sql } from 'drizzle-orm';
 import { FlagReason, StopReason, type ConversationView, type EmailBlock } from '@cti/contracts';
 import type { Db } from '@cti/db';
 import { loadConnection } from '../crm/connection-store.js';
-import { hasApprovedPlan, phonesOf, sellerBlock, switchBlock } from '../email/outbox.js';
+import { addressBlocks, hasApprovedPlan, phonesOf, sellerBlock, switchBlock } from '../email/outbox.js';
 import { SF_ID_CORE } from '../tenancy/record-owner.js';
-import { suppressionFor } from './store.js';
 import { readTimeline } from './timeline.js';
 
 const rows = <T>(r: unknown): T[] => (r as { rows: T[] }).rows;
@@ -35,6 +34,7 @@ export interface SellerRecord {
   /** The record's email, trimmed; null when there is none Sam could send to. */
   address: string | null;
   isClosed: boolean;
+  /** This record's own Salesforce Email Opt Out; sellerEmailBlock also reads the other records with the address. */
   sfEmailOptOut: boolean;
   phones: Array<{ e164: string }>;
 }
@@ -104,15 +104,18 @@ export async function sellerEmailBlock(
   if (off) return off;
   const { record, conversation } = i;
   if (record.address === null) return 'no_address';
+  const approved = await hasApprovedPlan(db, i.orgId, record.id);
+  // The send tick's own read: an opt-out (suppression, or Email Opt Out on any record with the address) is the address's.
+  const address = await addressBlocks(db, i.orgId, record.address);
   return sellerBlock({
     purpose: 'first',
-    approved: await hasApprovedPlan(db, i.orgId, record.id),
+    approved,
     closed: record.isClosed,
     conversationStatus: conversation?.status ?? 'open',
     handler: conversation?.handler ?? 'sam',
     flagReason: conversation?.flagReason ?? null,
-    suppressed: (await suppressionFor(db, i.orgId, record.address)) !== null,
-    sfEmailOptOut: record.sfEmailOptOut,
+    suppressed: address.suppressed,
+    sfEmailOptOut: record.sfEmailOptOut || address.sfOptOut,
   });
 }
 

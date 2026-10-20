@@ -148,6 +148,37 @@ export async function hasApprovedPlan(db: Db, orgId: string, crmRecordId: string
   return rows<{ approved: boolean }>(result)[0]?.approved === true;
 }
 
+/**
+ * Salesforce Email Opt Out is about the ADDRESS: true when any of the tenant's records that carry it (trimmed, any case)
+ * has the box ticked, whichever record the email is for. A duplicate Lead that opted out speaks for every record with
+ * the address (no record-count limit: an opt-out is never the wrong side to err on).
+ */
+async function sfOptedOutAddress(db: Db, orgId: string, address: string): Promise<boolean> {
+  const result = await db.execute(sql`
+    select exists (
+      select 1 from crm_records
+      where org_id = ${orgId}::uuid and lower(btrim(email)) = lower(btrim(${address}::text)) and sf_email_opt_out
+    ) as "optedOut"`);
+  return rows<{ optedOut: boolean }>(result)[0]?.optedOut === true;
+}
+
+/** What the address itself says, whichever record it is on: suppressed in this tenant, and Salesforce Email Opt Out. */
+export interface AddressBlocks {
+  /** On the tenant's suppression list, any reason (`suppressionFor`). */
+  suppressed: boolean;
+  /** Email Opt Out on any of the tenant's records with this address (sfOptedOutAddress). */
+  sfOptOut: boolean;
+}
+
+/**
+ * The address's own blocks: the ONE read the send tick, the seller page and the reply handler (email/inbound.ts) share,
+ * so the three never disagree about an address. Two reads in turn, never at once (they may share a transaction's client).
+ */
+export async function addressBlocks(db: Db, orgId: string, address: string): Promise<AddressBlocks> {
+  const suppressed = (await suppressionFor(db, orgId, address)) !== null;
+  return { suppressed, sfOptOut: await sfOptedOutAddress(db, orgId, address) };
+}
+
 interface SendFacts {
   orgId: string;
   conversationId: string;
@@ -198,8 +229,9 @@ export interface SellerFacts {
   conversationStatus: string;
   handler: string;
   flagReason: string | null;
-  /** The address is on the tenant's suppression list (`suppressionFor`). */
+  /** The address is on the tenant's suppression list (`addressBlocks`). */
   suppressed: boolean;
+  /** Salesforce Email Opt Out on the seller's record, or on any of the tenant's records with the address (`addressBlocks`). */
   sfEmailOptOut: boolean;
 }
 
@@ -242,13 +274,10 @@ async function firstBlock(db: Db, f: SendFacts, emailId: string, now: Date): Pro
   if (off) return off;
   const practice = f.practiceUserId !== null;
   if (!practice) {
-    const held = sellerBlock({
-      ...f,
-      // Only a first email needs the approval, so no other purpose pays for the read.
-      approved: f.purpose !== 'first' || (await hasApprovedPlan(db, f.orgId, f.crmRecordId)),
-      closed: f.isClosed,
-      suppressed: (await suppressionFor(db, f.orgId, f.toAddress)) !== null,
-    });
+    // Only a first email needs the approval, so no other purpose pays for the read.
+    const approved = f.purpose !== 'first' || (await hasApprovedPlan(db, f.orgId, f.crmRecordId));
+    const address = await addressBlocks(db, f.orgId, f.toAddress);
+    const held = sellerBlock({ ...f, approved, closed: f.isClosed, suppressed: address.suppressed, sfEmailOptOut: f.sfEmailOptOut || address.sfOptOut });
     if (held) return held;
   }
   if ((await emailsOutInLastDay(db, { orgId: f.orgId, conversationId: f.conversationId, exceptEmailId: emailId }, now)) >= EMAIL_DAILY_CAP) return 'daily_cap';
@@ -270,7 +299,8 @@ export async function evaluateSend(db: Db, emailId: string, now: Date): Promise<
  *  3. a `first` email to a closed record (`closed`);
  *  4. the conversation is `stopped`;  5. it is `booked` and this is not a `holding` email;
  *  6. a person has taken over;  7. a person is needed (a flag) and this is a `first` or `reply`;
- *  8. the address is suppressed;  9. Salesforce says Email Opt Out;
+ *  8. the address is suppressed;  9. Salesforce says Email Opt Out (on the seller's record, or on any of the tenant's
+ *     records with the address the email goes to);
  * 10. the conversation already had 3 other emails out in the last 24 hours (`daily_cap`);
  * 11. it is outside the seller's 08:00 to 18:00 (`outside_window`: wait, do not cancel).
  * Rules 2 to 9 and 11 do not apply to an email on a practice conversation (whatever its purpose): it goes to the

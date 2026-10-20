@@ -210,6 +210,17 @@ describe.skipIf(!pgLane)('seller conversation routes (real Postgres)', () => {
       expect(await blocked({ recordOver: { sfEmailOptOut: true } })).toBe('sf_opt_out');
     });
 
+    it('Salesforce Email Opt Out on ANOTHER record with the same address (any case) blocks the email too: sf_opt_out (I2b)', async () => {
+      const s = await seedSeller();
+      await seedRecord(t.db, s.orgId, snapshot({ sfRecordId: leadId(880_000 + (sellerSeq += 1)), email: ` ${SELLER_EMAIL.toUpperCase()} ` }), { sfEmailOptOut: true });
+      sessionFor(s.orgId, s.admin.id, true);
+      expect((await get(s.sfRecordId)).json()).toMatchObject({ emailBlock: 'sf_opt_out', mayEmail: false });
+      // Another tenant's opted-out record with that address says nothing here.
+      const other = await seedSeller();
+      sessionFor(other.orgId, other.admin.id, true);
+      expect((await get(other.sfRecordId)).json()).toMatchObject({ emailBlock: null, mayEmail: true });
+    });
+
     it('the seller rules read the real conversation: stopped, taken over, flagged, suppressed', async () => {
       const s = await seedSeller();
       sessionFor(s.orgId, s.admin.id, true);

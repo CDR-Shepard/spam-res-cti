@@ -8,7 +8,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest
 import { eq } from 'drizzle-orm';
 import { schema, type Db } from '@cti/db';
 import { createTestDb, pgLane, type TestDb } from '../test/pg.js';
-import { seedCampaign, seedOrg } from '../test/outreach-fixtures.js';
+import { leadId, seedCampaign, seedOrg, seedRecord, snapshot } from '../test/outreach-fixtures.js';
 import { seedPlanLead, seedUser } from '../test/call-plan-seed.js';
 import { appendEvent, ensureConversation, suppressAddress, type SellerConversationRow } from '../conversations/store.js';
 import { queueEmail, sendBlock } from './outbox.js';
@@ -28,6 +28,8 @@ const HOUR = 60 * MINUTE;
 const ADDRESS = 'delivered@resend.dev';
 const SUBJECT = 'Re: the house on Oak Street';
 const BODY = 'Thanks for getting back to me. Would Thursday afternoon work for a quick call?';
+/** Distinct Salesforce ids for the extra records a test seeds. */
+let twinSeq = 0;
 /** A Chicago number: Central time, and Illinois adds no calling-hours rule to the 08:00-18:00 email window (Texas, 512, starts at 09:00). */
 const CHICAGO = [{ field: 'MobilePhone', e164: '+13125550100' }];
 const CFG = {
@@ -934,6 +936,29 @@ describe.skipIf(!pgLane)('outbox and send tick (real Postgres)', () => {
     it('9. Salesforce Email Opt Out on the record', async () => {
       const s = await seedSeller({ sfEmailOptOut: true });
       expect(await sendBlock(db, (await queue(s)).emailId, NOW)).toBe('sf_opt_out');
+    });
+
+    it('9. Salesforce Email Opt Out on ANOTHER of the tenant\'s records with the address (any case) blocks it: sf_opt_out (I2b)', async () => {
+      const s = await seedSeller();
+      const other = await seedSeller();
+      const twin = await seedRecord(db, s.orgId, snapshot({ sfRecordId: leadId(990_000 + (++twinSeq)), email: ' Delivered@Resend.DEV ' }), { sfEmailOptOut: true });
+      expect(await sendBlock(db, (await queue(s)).emailId, NOW)).toBe('sf_opt_out');
+      // The address the email goes to is what counts, not only the seller's record.
+      expect(await sendBlock(db, (await queue(s, { to: 'someone-else@example.com' })).emailId, NOW)).toBeNull();
+      // Another tenant's opted-out record with the same address holds nothing.
+      expect(await sendBlock(db, (await queue(other)).emailId, NOW)).toBeNull();
+      await db.update(schema.crmRecords).set({ sfEmailOptOut: false }).where(eq(schema.crmRecords.id, twin));
+      expect(await sendBlock(db, (await queue(s)).emailId, NOW)).toBeNull();
+    });
+
+    it('the send tick cancels it as sf_opt_out (I2b)', async () => {
+      const s = await seedSeller();
+      await seedRecord(db, s.orgId, snapshot({ sfRecordId: leadId(990_000 + (++twinSeq)), email: ADDRESS }), { sfEmailOptOut: true });
+      const { emailId } = await queue(s);
+      const resend = { send: vi.fn(), getReceived: vi.fn() };
+      await sendDueEmails({ db, resend, cfg: CFG, now: NOW, log: { info: () => {}, warn: () => {}, error: () => {} } });
+      expect(resend.send).not.toHaveBeenCalled();
+      expect(await rowOf(emailId)).toMatchObject({ status: 'canceled', lastError: 'sf_opt_out' });
     });
 
     it('10. the daily cap, 11. then the hours', async () => {
