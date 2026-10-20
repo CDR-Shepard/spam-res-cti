@@ -6,10 +6,13 @@
  * the campaign to be an active ai_call campaign, the enrollment active and `queued`, the
  * touch's plan to be the enrollment's approved plan, consent read as exactly `yes` by that
  * plan's own research, no do-not-contact flag pending on the record and none on the plan that
- * nobody dismissed, the lead still ticked in the campaign's lead picker, and the seller's real conversation
- * not `stopped` (an opt-out, a complaint or a "not interested" on any channel ends every call to the seller).
+ * nobody dismissed, the lead still ticked in the campaign's lead picker, and the seller not paused (SELLER_PAUSED).
  * The enrollment row is locked FOR SHARE first, in its own statement, so the claim's snapshot is taken after
  * any writer holding it (an approval, a hold, an exit) has committed.
+ *
+ * A paused seller is left out of the due scope too, not only refused by the claim: a touch that only waits for a
+ * person is never a candidate, so it is never refused, burns no attempt and starts no refusal run (pace.ts gives up
+ * on a touch refused too long). Given back to Sam, it is called at the next tick.
  */
 import { and, eq, sql } from 'drizzle-orm';
 import { schema, type Db } from '@cti/db';
@@ -53,10 +56,21 @@ export type Settle =
 const rows = <T>(r: unknown): T[] => (r as { rows: T[] }).rows;
 const iso = (d: Date) => sql`${d.toISOString()}::timestamptz`;
 
+/**
+ * The seller of enrollment `e` must not be called now, by its REAL conversation (an admin's practice copy never
+ * counts): `stopped` (an opt-out, a complaint, a do-not-call or a "not interested"), taken over by a person, or
+ * flagged for one (a holding email promised the seller a person; giving the seller back to Sam clears the flag).
+ */
+const SELLER_PAUSED = sql`exists (
+    select 1 from seller_conversations sc
+    where sc.org_id = e.org_id and sc.crm_record_id = e.crm_record_id and sc.practice_user_id is null
+      and (sc.status = 'stopped' or sc.handler = 'person' or sc.flag_reason is not null))`;
+
 /** The due scope (dueAiCallTouches' test case 1), with touches `t`, enrollments `e`, campaigns `c`. */
 const dueScope = (now: Date) => sql`
   t.channel = 'ai_call' and t.status = 'planned' and t.due_at <= ${iso(now)}
-  and e.status = 'active' and c.status = 'active' and c.mode = 'ai_call'`;
+  and e.status = 'active' and c.status = 'active' and c.mode = 'ai_call'
+  and not ${SELLER_PAUSED}`;
 
 export async function orgsWithDueAiCalls(db: Db, now: Date): Promise<string[]> {
   const result = await db.execute(sql`
@@ -117,7 +131,7 @@ const claimable = sql`
   and cr.id = p.research_id and cr.snapshot ->> 'consent' = 'yes'
   and not ${DNC_PENDING_SQL}
   and exists (select 1 from campaign_selections cs where cs.campaign_id = e.campaign_id and cs.org_id = e.org_id and cs.sf_record_id = r.sf_record_id)
-  and not exists (select 1 from seller_conversations sc where sc.org_id = e.org_id and sc.crm_record_id = e.crm_record_id and sc.practice_user_id is null and sc.status = 'stopped')`;
+  and not ${SELLER_PAUSED}`;
 
 /**
  * `planned → dialing`: one more attempt, and the key kept from a retry that may still be in cti-api, or a new one:
