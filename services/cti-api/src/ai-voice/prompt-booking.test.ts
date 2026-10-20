@@ -307,6 +307,18 @@ describe('promptView: who each time is with, and high priority', () => {
     expect((v.appointment_times as ReadonlyArray<Record<string, string>>).map((t) => t.time_with)).toEqual(['Blake', 'Seth', '']);
   });
 
+  // Final review I2: specialist_name is kept for saved custom templates ("book a time with {{specialist_name}}").
+  it('specialist_name: the one rep every offered time is with', () => {
+    const blake = { specialistSfUserId: '0058X00000FA8tLQAT', specialistFirstName: 'Blake' };
+    expect(view({ slots: [slot(blake), walk(blake)], sellerTimeZone: LA }).specialist_name).toBe('Blake');
+  });
+
+  it('specialist_name: times with more than one rep say "one of our specialists", never the first rep for all', () => {
+    const blake = { specialistSfUserId: '0058X00000FA8tLQAT', specialistFirstName: 'Blake' };
+    const chance = { specialistSfUserId: '0055f000005qXn8AAE', specialistFirstName: 'Chance' };
+    expect(view({ slots: [slot(blake), walk(chance)], sellerTimeZone: LA }).specialist_name).toBe('one of our specialists');
+  });
+
   it('a priority offer: can_book_priority and can_book_any, Grant, and the default start in the seller zone', () => {
     expect(view({ priority: GRANT })).toMatchObject({
       can_book: false,

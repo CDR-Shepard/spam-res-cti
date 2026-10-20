@@ -19,6 +19,8 @@ export type PromptViewValue = string | boolean | ReadonlyArray<Record<string, st
 const OWNER_NAME_MAX = 80;
 /** Said for the high-priority specialist when the offer has no first name: "a visit from our specialist". */
 const PRIORITY_SPECIALIST_FALLBACK = 'our specialist';
+/** specialist_name when the offered times are with more than one rep: a saved template never names one rep for all of them. */
+const SEVERAL_SPECIALISTS = 'one of our specialists';
 
 /** A frozen copy with no prototype: only its own keys can be looked up. */
 function bare<T extends Record<string, unknown>>(values: T): T {
@@ -33,6 +35,15 @@ function sayable(fact: ConsultationFact | null | undefined): ConsultationFact | 
 /** "Blake" from "Blake Kossuth", flattened like any record value; '' when unknown. */
 function firstWord(name: string | null): string {
   return oneLine(name, OWNER_NAME_MAX)?.split(' ')[0] ?? '';
+}
+
+/**
+ * specialist_name, kept for saved custom templates (the default names each time's rep with time_with): the first named rep
+ * when every time is with one rep, else SEVERAL_SPECIALISTS (final review I2).
+ */
+function specialistName(slots: Ctx['slots']): string {
+  if (new Set(slots.map((s) => s.specialistSfUserId)).size > 1) return SEVERAL_SPECIALISTS;
+  return slots.find((s) => s.specialistFirstName)?.specialistFirstName ?? '';
 }
 
 /** The seller's earlier consultation (`last`) and the one already booked (`next`), in their zone. */
@@ -61,7 +72,6 @@ function priorityValues(priority: PriorityOffer | null, sellerTz: string) {
 export function promptView(input: PromptInput): Record<string, PromptViewValue> {
   const c = context(input);
   const priority = promptPriority(input.priority, input.address);
-  const specialist = c.slots.find((s) => s.specialistFirstName)?.specialistFirstName ?? '';
   return bare({
     agent_name: c.agent,
     company_name: c.company,
@@ -84,7 +94,7 @@ export function promptView(input: PromptInput): Record<string, PromptViewValue> 
     can_book_any: c.slots.length > 0 || priority !== null,
     offers_phone_call: c.slots.some((s) => s.kind === 'phone'),
     offers_walkthrough: c.slots.some((s) => s.kind === 'walkthrough'),
-    specialist_name: specialist,
+    specialist_name: specialistName(c.slots),
     appointment_times: Object.freeze(
       c.slots.map((s) =>
         bare({ time_id: s.id, time_kind: KIND_WORDS[s.kind], time_with: s.specialistFirstName ?? '', time_text: slotWords(s, c.sellerTz) }),
