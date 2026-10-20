@@ -9,23 +9,37 @@ import { loadTranscript } from './results-query.js';
 import { runWritebacks } from '../writeback/run.js';
 import { seedAiCall } from '../test/ai-call-seed.js';
 import { ctxOf, seedAiCallCampaign, seedPlanLead, seedUser, type PlanLeadOptions } from '../test/call-plan-seed.js';
+import { BLAKE, CHANCE, fakeMaps, SD_LEAD_ADDRESS, SETH, THOMAS, USERS, usersWithInactive } from '../test/fake-offer.js';
 import { fakeCti } from '../test/fake-pace.js';
 import { fakeSfWrites, type FakeSfWrites } from '../test/fake-sf-writes.js';
+import { rowsWhere } from '../test/fake-soql-where.js';
 import { seedCampaign, seedEnrollment, seedRecord, snapshot } from '../test/outreach-fixtures.js';
 import { createTestDb, pgLane } from '../test/pg.js';
 import { DEFAULT_AI_CALL_BOOKING } from '../settings.js';
 import { depsFor, GRANT, PHONE_BOOKING, quiet } from '../test/writeback-harness.js';
 
 const TEST_NUMBER = '+15125550111';
-/** Tue Oct 6, 9:00 AM PT: the default phone hours leave free times today and tomorrow. */
+/** Tue Oct 6, 9:00 AM PT: the San Diego region leaves free times today and on the next days. */
 const NOW = new Date('2026-10-06T16:00:00.000Z');
+const SD_REPS = [SETH, THOMAS];
 
-/** A Salesforce org that answers only the offer's reads (the owner and their calendar) and records every request. */
-function readOnlyOrg(): FakeSfWrites {
+type Row = Record<string, unknown>;
+interface OrgOptions {
+  users?: Row[];
+  consultations?: Row[];
+}
+
+/**
+ * A Salesforce org that answers only the offer's reads (the reps' User rows and calendars, the seller's consultations and
+ * the property address of a made-up San Diego Lead) and records every request.
+ */
+function readOnlyOrg(o: OrgOptions = {}): FakeSfWrites {
   return fakeSfWrites({
     queries: [
-      [/^SELECT Id, FirstName, Name, IsActive, TimeZoneSidKey FROM User/, [{ Id: GRANT, FirstName: 'Grant', Name: 'Grant Golden', IsActive: true, TimeZoneSidKey: 'America/Los_Angeles' }]],
+      [/Subject LIKE '%Consultation%'/, o.consultations ?? []],
+      [/^SELECT Id, FirstName, Name, IsActive, TimeZoneSidKey FROM User/, (q: string) => rowsWhere(q, o.users ?? USERS)],
       [/^SELECT StartDateTime, EndDateTime, IsAllDayEvent, ActivityDate, OwnerId, Location, Subject FROM Event/, []],
+      [/ FROM Lead WHERE Id = /, [{ Name: 'Pat Seller', OwnerId: '005000000000001AAA', IsConverted: false, ...SD_LEAD_ADDRESS }]],
     ],
   });
 }
@@ -40,15 +54,15 @@ describe.skipIf(!pgLane)('practice AI calls (real Postgres)', () => {
     await drop?.();
   });
 
-  async function setup(o: { planStatus?: 'proposed' | 'approved'; planOver?: PlanLeadOptions['planOver']; settings?: Record<string, unknown> } = {}) {
+  async function setup(o: { planStatus?: 'proposed' | 'approved'; planOver?: PlanLeadOptions['planOver']; settings?: Record<string, unknown> } & OrgOptions = {}) {
     const base = await seedAiCallCampaign(db, 'active');
     if (o.settings) await db.update(schema.organizations).set({ settings: o.settings }).where(eq(schema.organizations.id, base.orgId));
     const admin = await seedUser(db, base.orgId);
     const lead = await seedPlanLead(db, base, { planStatus: o.planStatus ?? 'approved', approvedBy: admin, ...(o.planOver ? { planOver: o.planOver } : {}) });
     const cti = fakeCti(db);
     cti.available = { available: true, testNumbers: [TEST_NUMBER, '+12125550100'] };
-    const sf = readOnlyOrg();
-    const deps = { db, clients: async () => sf.client, cti: cti.cti, now: NOW, log: quiet, defaultSpecialists: [GRANT] };
+    const sf = readOnlyOrg(o);
+    const deps = { db, clients: async () => sf.client, cti: cti.cti, now: NOW, log: quiet, defaultSpecialists: [GRANT], maps: fakeMaps().maps };
     const ctx = ctxOf(base.orgId, admin, true);
     return { base, admin, lead, cti, sf, deps, ctx };
   }
@@ -136,35 +150,59 @@ describe.skipIf(!pgLane)('practice AI calls (real Postgres)', () => {
   // Booking and write-back both on (fix 2: booking needs write-back).
   const BOOKING_ON = { aiCallBooking: { ...DEFAULT_AI_CALL_BOOKING, enabled: true, specialists: [GRANT] }, aiCallWriteback: true };
 
-  it('fix 2: a tenant that never turned booking on still hears times when a default owner is configured, and nothing is written', async () => {
+  it('fix 2: a tenant that never turned booking on still hears the region\'s times, and nothing is written', async () => {
     const s = await setup();
     await startPractice(s.deps, s.ctx, s.lead.enrollmentId, { version: 1, to: TEST_NUMBER });
     const target = s.cti.requests[0]!.target;
     if (target.kind !== 'practice') throw new Error('not a practice target');
     expect(target.slots?.length).toBeGreaterThan(0);
-    expect(target.slots!.every((slot) => slot.specialistSfUserId === GRANT)).toBe(true);
+    expect(target.slots!.every((slot) => slot.region === 'SD' && SD_REPS.includes(slot.specialistSfUserId))).toBe(true);
     expect(s.sf.log.every((entry) => entry === 'query')).toBe(true);
   });
 
-  it('6: with booking active the trigger carries the owner\'s free times, read only', async () => {
+  it('6: with booking active the trigger carries the region\'s free times, read only', async () => {
     const s = await setup({ settings: BOOKING_ON });
     await startPractice(s.deps, s.ctx, s.lead.enrollmentId, { version: 1, to: TEST_NUMBER });
     const target = s.cti.requests[0]!.target;
     if (target.kind !== 'practice') throw new Error('not a practice target');
     expect(target.slots?.length).toBeGreaterThan(0);
-    expect(target.slots!.every((slot) => slot.specialistSfUserId === GRANT)).toBe(true);
+    expect(target.slots!.every((slot) => slot.region === 'SD' && SD_REPS.includes(slot.specialistSfUserId))).toBe(true);
     expect(s.sf.log.every((entry) => entry === 'query')).toBe(true);
   });
 
-  it('P6 M-1: a time another real AI call already booked with the owner is not offered (as the pacer does)', async () => {
-    const s = await setup({ settings: BOOKING_ON });
+  it('6a: the trigger carries the seller\'s consultations, read from the lead and the records its research found, and Grant\'s high-priority offer', async () => {
+    const contact = '0038X00000BcdeFQAR';
+    const s = await setup({ consultations: [{ StartDateTime: '2026-03-12T17:00:00.000+0000', Subject: 'Phone Consultation', Owner: { Name: 'Blake Person' } }] });
+    const [plan] = await db.select({ researchId: schema.callPlans.researchId }).from(schema.callPlans).where(eq(schema.callPlans.id, s.lead.planId!));
+    const [research] = await db.select({ snapshot: schema.callResearch.snapshot }).from(schema.callResearch).where(eq(schema.callResearch.id, plan!.researchId));
+    const snapshot = research!.snapshot as { records: Row[] };
+    const records = [...snapshot.records, { relation: 'converted_contact', sfObject: 'Contact', id: contact, role: null, fields: [] }];
+    await db.update(schema.callResearch).set({ snapshot: { ...snapshot, records } }).where(eq(schema.callResearch.id, plan!.researchId));
+
+    await startPractice(s.deps, s.ctx, s.lead.enrollmentId, { version: 1, to: TEST_NUMBER });
+    const target = s.cti.requests[0]!.target;
+    if (target.kind !== 'practice') throw new Error('not a practice target');
+    expect(target.context).toEqual({
+      returning: false,
+      consultations: { last: { start: '2026-03-12T17:00:00.000Z', kind: 'phone', ownerName: 'Blake Person' }, next: null },
+    });
+    // Wednesday 09:00 PDT: the next booking day after Tuesday.
+    expect(target.priority).toEqual({ specialistSfUserId: GRANT, specialistFirstName: 'Grant', timeZone: 'America/Los_Angeles', defaultStart: '2026-10-07T16:00:00.000Z' });
+    const consultationsRead = s.sf.soql.find((q) => /Subject LIKE '%Consultation%'/.test(q))!;
+    expect(consultationsRead).toContain(s.lead.sfRecordId);
+    expect(consultationsRead).toContain(contact);
+  });
+
+  it('P6 M-1: a time another real AI call already booked with a rep is not offered with that rep (as the pacer does)', async () => {
+    // San Diego with one active rep (Seth), so a time he is booked for has nobody else to take it.
+    const s = await setup({ settings: BOOKING_ON, users: usersWithInactive(THOMAS) });
     await startPractice(s.deps, s.ctx, s.lead.enrollmentId, { version: 1, to: TEST_NUMBER });
     const first = s.cti.requests[0]!.target;
     if (first.kind !== 'practice' || !first.slots?.length) throw new Error('no slots offered');
     const taken = first.slots[0]!;
     await seedAiCall(db, s.base.orgId, s.admin, {
       status: 'in_progress', outcome: 'appointment_set', endedAt: null,
-      appointment: { ...PHONE_BOOKING, slotId: taken.id, kind: taken.kind, start: taken.start, end: taken.end, specialistSfUserId: GRANT },
+      appointment: { ...PHONE_BOOKING, slotId: taken.id, kind: taken.kind, start: taken.start, end: taken.end, specialistSfUserId: taken.specialistSfUserId },
     });
     // The first practice call has ended (one at a time per admin, final review).
     await db.update(schema.aiCalls).set({ status: 'completed' }).where(eq(schema.aiCalls.startedBy, s.admin));
@@ -207,16 +245,20 @@ describe.skipIf(!pgLane)('practice AI calls (real Postgres)', () => {
     });
   });
 
-  it('6b: whatever the toggles, no specialist anywhere sends no slots; a Salesforce failure sends none and the call still goes', async () => {
+  it('6b: whatever the toggles, no active rep and no high-priority rep sends no slots or priority; a Salesforce failure sends none and the call still goes', async () => {
     const emptyList = { aiCallBooking: { ...DEFAULT_AI_CALL_BOOKING, enabled: true, specialists: [] as string[] }, aiCallWriteback: true };
-    const s = await setup({ settings: emptyList });
+    const s = await setup({ settings: emptyList, users: usersWithInactive(CHANCE, BLAKE, SETH, THOMAS) });
     await startPractice(s.deps, s.ctx, s.lead.enrollmentId, { version: 1, to: TEST_NUMBER });
     expect(s.cti.requests[0]!.target).not.toHaveProperty('slots');
-    expect(s.sf.log).toEqual([]);
+    expect(s.cti.requests[0]!.target).not.toHaveProperty('priority');
+    expect(s.sf.soql.filter((q) => / FROM Event WHERE OwnerId /.test(q))).toEqual([]);
     const t = await setup();
     const res = await startPractice({ ...t.deps, clients: async () => { throw new Error('not connected'); } }, t.ctx, t.lead.enrollmentId, { version: 1, to: TEST_NUMBER });
     expect(res.ok).toBe(true);
     expect(t.cti.requests[0]!.target).not.toHaveProperty('slots');
+    expect(t.cti.requests[0]!.target).not.toHaveProperty('priority');
+    expect(t.cti.requests[0]!.target).toMatchObject({ context: { returning: false } });
+    expect(t.cti.requests[0]!.target).not.toHaveProperty('context.consultations');
   });
 
   it('6c: booking ticked off, or on with write-back off, still offers times (a practice call never books)', async () => {
@@ -279,7 +321,7 @@ describe.skipIf(!pgLane)('practice AI calls (real Postgres)', () => {
     expect(s.sf.updates).toEqual([]);
     expect(s.sf.soapBodies).toEqual([]);
     expect(s.sf.log.every((entry) => entry === 'query')).toBe(true);
-    expect(s.sf.soql.every((q) => /^SELECT .* FROM (User|Event) /.test(q))).toBe(true);
+    expect(s.sf.soql.every((q) => /^SELECT .* FROM (User|Event|Lead) /.test(q))).toBe(true);
 
     // Belt and braces (Task 26): even a write-back row a bug enqueued for it is skipped before any Salesforce request.
     const requestsBefore = s.sf.log.length;

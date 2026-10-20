@@ -6,6 +6,7 @@ import { schema, type Db } from '@cti/db';
 import { SalesforceAuthError } from '@cti/salesforce';
 import { enrollmentById, planById, seedAiCall, seedAiCallRequest, seedReleasedLead, touchById } from '../test/ai-call-seed.js';
 import { validPlan } from '../test/call-plan-fixtures.js';
+import { BLAKE, CHANCE, eventRow, fakeMaps, GRANT, SD_LEAD_ADDRESS, SETH, THOMAS, USERS, usersWithInactive } from '../test/fake-offer.js';
 import { CONSENT_FIELD, paceHarness } from '../test/fake-pace.js';
 import { placeDueAiCalls } from './pace.js';
 import { nextAttemptAt } from './pacing-rules.js';
@@ -53,7 +54,7 @@ describe.skipIf(!pgLane)('placeDueAiCalls (real Postgres)', () => {
         orgId: h.base.orgId,
         userId: l.approver,
         idempotencyKey: keyOf(l.touchId, 1),
-        target: { kind: 'record', objectType: 'Lead', recordId: l.sfRecordId, planText: planText(), context: { returning: false } },
+        target: { kind: 'record', objectType: 'Lead', recordId: l.sfRecordId, planText: planText(), context: { returning: false, consultations: { last: null, next: null } } },
       }))),
     );
     for (const l of [a, b]) {
@@ -364,7 +365,7 @@ describe.skipIf(!pgLane)('placeDueAiCalls (real Postgres)', () => {
       if (orgId === good.base.orgId) return good.sf.client;
       throw new CrmNotConnectedError();
     };
-    const counts = await placeDueAiCalls({ db, clients, cti: good.cti.cti, now: NOW, log: { info: () => {}, warn: () => {}, error: (obj: unknown, msg?: string) => good.logs.push({ level: 'error', obj, msg }) }, clock: () => 0, defaultSpecialists: [] });
+    const counts = await placeDueAiCalls({ db, clients, cti: good.cti.cti, now: NOW, log: { info: () => {}, warn: () => {}, error: (obj: unknown, msg?: string) => good.logs.push({ level: 'error', obj, msg }) }, clock: () => 0, defaultSpecialists: [], maps: null });
 
     expect(counts.placed).toBeGreaterThanOrEqual(1);
     expect((await touchById(db, goodLead.touchId)).status).toBe('sent');
@@ -470,40 +471,48 @@ describe.skipIf(!pgLane)('placeDueAiCalls (real Postgres)', () => {
     });
   });
 
-  describe('plan 1D: every trigger carries the returning flag; a freshly minted key also carries free appointment times', () => {
-    const OWNER = '0058X00000Fsx39QAB';
-    const ownerRow = (over: Record<string, unknown> = {}) => ({ Id: OWNER, FirstName: 'Grant', Name: 'Grant Golden', IsActive: true, TimeZoneSidKey: 'America/Los_Angeles', ...over });
-    const bookingWith = (specialists: string[]) => ({ aiCallBooking: { ...DEFAULT_AI_CALL_BOOKING, enabled: true, specialists }, aiCallWriteback: true });
+  describe('plan 1D: every trigger carries the returning flag and the consultations read; a freshly minted key also carries the routed offer', () => {
+    const bookingOn = (over: Record<string, unknown> = {}) => ({ aiCallBooking: { ...DEFAULT_AI_CALL_BOOKING, enabled: true, specialists: [GRANT] }, aiCallWriteback: true, ...over });
     type RecordTarget = Extract<InternalAiCallRequest['target'], { kind: 'record' }>;
     const target = (r: InternalAiCallRequest): RecordTarget => {
       if (r.target.kind !== 'record') throw new Error('expected a record target');
       return r.target;
     };
     const RETURNING = { planOver: { reengagement: { lastContact: 'back in February', lastTopic: null } } };
-    const offerLog = (h: { base: { orgId: string } }, touchId: string, slots: string) => ({ level: 'info', obj: { orgId: h.base.orgId, touchId, slots }, msg: 'ai_call.place: no appointment times offered' });
+    const NO_CONSULTATIONS = { last: null, next: null };
+    const NOTE = 'ai_call.place: appointment offer note';
+    const noteLog = (h: { base: { orgId: string } }, touchId: string, note: string, priority = false) =>
+      ({ level: 'info', obj: { orgId: h.base.orgId, touchId, note, slots: 0, priority }, msg: NOTE });
     const userQueries = (soql: string[]) => soql.filter((q) => / FROM User /.test(q));
-    const busyQueries = (soql: string[]) => soql.filter((q) => /ShowAs != 'Free'/.test(q));
+    const busyQueries = (soql: string[]) => soql.filter((q) => / FROM Event WHERE OwnerId /.test(q));
+    /** The tenant's settings, every rep and Grant active (unless `users` says otherwise), a made-up San Diego property, Google answering. */
+    async function routed(settings: Record<string, unknown> = bookingOn(), users: Array<Record<string, unknown>> = [...USERS], opts: { defaultSpecialists?: string[] } = {}) {
+      const h = await paceHarness(db, settings, { ...opts, maps: fakeMaps().maps });
+      h.sf.state.users = users;
+      h.sf.state.recordFields = { ...SD_LEAD_ADDRESS };
+      return h;
+    }
 
-    it('1: booking on, the owner active, a free calendar: context.returning follows the plan, and 1–12 slots of the owner that parse', async () => {
-      const h = await paceHarness(db, bookingWith([OWNER]));
-      h.sf.state.users = [ownerRow()];
+    it('1: booking on, the region\'s reps active, free calendars: context follows the plan, and 1–12 San Diego slots that parse, in person first', async () => {
+      const h = await routed();
       const returning = await seedReleasedLead(db, h.base, RETURNING);
       const fresh = await seedReleasedLead(db, h.base);
 
       expect((await h.run(NOW)).placed).toBe(2);
 
       const byRecord = new Map(h.cti.requests.map((r) => [target(r).recordId, target(r)]));
-      expect(byRecord.get(returning.sfRecordId)!.context).toEqual({ returning: true });
-      expect(byRecord.get(fresh.sfRecordId)!.context).toEqual({ returning: false });
+      expect(byRecord.get(returning.sfRecordId)!.context).toEqual({ returning: true, consultations: NO_CONSULTATIONS });
+      expect(byRecord.get(fresh.sfRecordId)!.context).toEqual({ returning: false, consultations: NO_CONSULTATIONS });
       for (const t of byRecord.values()) {
         expect(t.slots!.length).toBeGreaterThanOrEqual(1);
         expect(t.slots!.length).toBeLessThanOrEqual(12);
         expect(AppointmentSlots.safeParse(t.slots).success).toBe(true);
-        expect(t.slots!.every((s) => s.specialistSfUserId === OWNER && s.specialistFirstName === 'Grant')).toBe(true);
-        expect(t.slots![0]!.id).toBe('p1');
+        expect(t.slots!.every((s) => s.region === 'SD' && [SETH, THOMAS].includes(s.specialistSfUserId))).toBe(true);
+        expect(t.slots![0]!.id).toBe('w1');
+        expect(t.priority?.specialistSfUserId).toBe(GRANT);
       }
-      expect(busyQueries(h.sf.state.soql)[0]).toContain(`OwnerId = '${OWNER}'`);
-      expect(h.logs.some((l) => l.msg === 'ai_call.place: no appointment times offered')).toBe(false);
+      expect(busyQueries(h.sf.state.soql)[0]).toContain('OwnerId IN (');
+      expect(h.logs.some((l) => l.msg === NOTE)).toBe(false);
     });
 
     it('1c (Fix 1, M-4): the plan text says when we last spoke as of the trigger, not as of planning', async () => {
@@ -514,66 +523,67 @@ describe.skipIf(!pgLane)('placeDueAiCalls (real Postgres)', () => {
       expect((await h.run(NOW)).placed).toBe(1);
       const t = target(h.cti.requests[0]!);
       expect(t.planText).toContain('\nLast time we spoke: earlier this week\n');
-      expect(t.context).toEqual({ returning: true });
+      expect(t.context).toEqual({ returning: true, consultations: NO_CONSULTATIONS });
     });
 
     it('1b (final review WEB I-2): a configured default owner never turns booking on: a tenant that saved nothing gets no times', async () => {
-      const h = await paceHarness(db, {}, { defaultSpecialists: [OWNER] });
-      h.sf.state.users = [ownerRow()];
+      const h = await routed({}, [...USERS], { defaultSpecialists: [GRANT] });
       await seedReleasedLead(db, h.base);
 
       expect((await h.run(NOW)).placed).toBe(1);
       expect('slots' in target(h.cti.requests[0]!)).toBe(false);
+      expect('priority' in target(h.cti.requests[0]!)).toBe(false);
     });
 
     it('1d (fix 2): booking on but write-back off (a blob saved before the rule): a real call gets no times and reads no calendar', async () => {
-      const h = await paceHarness(db, { ...bookingWith([OWNER]), aiCallWriteback: false });
-      h.sf.state.users = [ownerRow()];
+      const h = await routed(bookingOn({ aiCallWriteback: false }));
       await seedReleasedLead(db, h.base);
 
       expect((await h.run(NOW)).placed).toBe(1);
       expect('slots' in target(h.cti.requests[0]!)).toBe(false);
+      expect('priority' in target(h.cti.requests[0]!)).toBe(false);
       expect(userQueries(h.sf.state.soql)).toEqual([]);
-      expect(h.logs.some((l) => l.msg === 'ai_call.place: no appointment times offered')).toBe(false);
+      expect(h.logs.some((l) => l.msg === NOTE)).toBe(false);
     });
 
-    it('2: no specialists (empty default, nothing saved): no slots key, context present, nothing read for the offer, nothing logged', async () => {
+    it('2: nothing saved, no default list: no slots or priority key, context with the consultations read, no calendar read, nothing logged', async () => {
       const h = await paceHarness(db);
       await seedReleasedLead(db, h.base);
 
       expect((await h.run(NOW)).placed).toBe(1);
       const t = target(h.cti.requests[0]!);
       expect('slots' in t).toBe(false);
-      expect(t.context).toEqual({ returning: false });
+      expect('priority' in t).toBe(false);
+      expect(t.context).toEqual({ returning: false, consultations: NO_CONSULTATIONS });
       expect(userQueries(h.sf.state.soql)).toEqual([]);
-      expect(h.logs.some((l) => l.msg === 'ai_call.place: no appointment times offered')).toBe(false);
+      expect(h.logs.some((l) => l.msg === NOTE)).toBe(false);
     });
 
-    it('2b: the owner inactive: no slots, no calendar read, and the log says no_owner', async () => {
-      const h = await paceHarness(db, bookingWith([OWNER]));
-      h.sf.state.users = [ownerRow({ IsActive: false })];
+    it('2b: every rep and Grant inactive: no slots or priority, no calendar read, and the log says no_reps', async () => {
+      const h = await routed(bookingOn(), usersWithInactive(CHANCE, BLAKE, SETH, THOMAS, GRANT));
       const lead = await seedReleasedLead(db, h.base);
 
       expect((await h.run(NOW)).placed).toBe(1);
-      expect('slots' in target(h.cti.requests[0]!)).toBe(false);
+      const t = target(h.cti.requests[0]!);
+      expect('slots' in t).toBe(false);
+      expect('priority' in t).toBe(false);
       expect(busyQueries(h.sf.state.soql)).toEqual([]);
-      expect(h.logs).toContainEqual(offerLog(h, lead.touchId, 'no_owner'));
+      expect(h.logs).toContainEqual(noteLog(h, lead.touchId, 'no_reps'));
     });
 
-    it('2c: a fully busy calendar: no slots, and the log says no_free_time', async () => {
-      const h = await paceHarness(db, bookingWith([OWNER]));
-      h.sf.state.users = [ownerRow()];
-      h.sf.state.busy = [{ StartDateTime: '2026-10-01T00:00:00.000+0000', EndDateTime: '2026-11-01T00:00:00.000+0000', IsAllDayEvent: false }];
+    it('2c: the region\'s reps fully busy and Grant inactive: no slots or priority, and the log says no_free_time', async () => {
+      const h = await routed(bookingOn(), usersWithInactive(GRANT));
+      h.sf.state.busy = [SETH, THOMAS].map((rep) => eventRow(rep, '2026-10-01T00:00:00.000Z', '2026-11-01T00:00:00.000Z'));
       const lead = await seedReleasedLead(db, h.base);
 
       expect((await h.run(NOW)).placed).toBe(1);
       expect('slots' in target(h.cti.requests[0]!)).toBe(false);
-      expect(h.logs).toContainEqual(offerLog(h, lead.touchId, 'no_free_time'));
+      expect('priority' in target(h.cti.requests[0]!)).toBe(false);
+      expect(h.logs).toContainEqual(noteLog(h, lead.touchId, 'no_free_time'));
     });
 
-    it('3 (CF-13, Fix 1 I-2): a kept key cti-api stored a request under re-sends without slots and reads no calendar', async () => {
-      const h = await paceHarness(db, bookingWith([OWNER]));
-      h.sf.state.users = [ownerRow()];
+    it('3 (CF-13, Fix 1 I-2): a kept key cti-api stored a request under re-sends without slots or priority and reads no calendar', async () => {
+      const h = await routed();
       const kept = 'touch:kept:1:1759700000000';
       const lead = await seedReleasedLead(db, h.base, { ...RETURNING, touch: { triggerKey: kept } });
       const earlier = new Date(NOW.getTime() - 30 * MIN);
@@ -584,14 +594,14 @@ describe.skipIf(!pgLane)('placeDueAiCalls (real Postgres)', () => {
       expect(h.cti.requests[0]).toMatchObject({ idempotencyKey: kept });
       const t = target(h.cti.requests[0]!);
       expect('slots' in t).toBe(false);
+      expect('priority' in t).toBe(false);
       expect(t.context).toEqual({ returning: true });
       expect(userQueries(h.sf.state.soql)).toEqual([]);
       expect(await touchById(db, lead.touchId)).toMatchObject({ status: 'sent' });
     });
 
     it('3b (CF-13, Fix 1 I-2): after a transport failure cti-api never stored, the retry keeps the key, the plan text and the context, and carries times again', async () => {
-      const h = await paceHarness(db, bookingWith([OWNER]));
-      h.sf.state.users = [ownerRow()];
+      const h = await routed();
       const lead = await seedReleasedLead(db, h.base);
       h.cti.answers.push({ transport: 'timeout' });
 
@@ -605,20 +615,36 @@ describe.skipIf(!pgLane)('placeDueAiCalls (real Postgres)', () => {
       const { slots: _firstSlots, ...firstRest } = target(first);
       const { slots: retrySlots, ...retryRest } = target(retry);
       expect(retryRest).toEqual(firstRest);
+      expect(retryRest.priority?.specialistSfUserId).toBe(GRANT);
       expect(AppointmentSlots.safeParse(retrySlots).success).toBe(true);
       expect(retrySlots!.length).toBeGreaterThan(0);
       expect(await touchById(db, lead.touchId)).toMatchObject({ status: 'sent', attempts: 1 });
     });
 
-    it('4: the User query throws: the call is still triggered, without slots, and the log says salesforce_error', async () => {
-      const h = await paceHarness(db, bookingWith([OWNER]));
+    it('4: the User query throws: the call is still triggered, without slots or priority, and the log says salesforce_error', async () => {
+      const h = await routed();
       h.sf.state.userError = new Error('INVALID_SESSION_ID');
       const lead = await seedReleasedLead(db, h.base);
 
       expect((await h.run(NOW)).placed).toBe(1);
       expect('slots' in target(h.cti.requests[0]!)).toBe(false);
-      expect(h.logs).toContainEqual(offerLog(h, lead.touchId, 'salesforce_error'));
+      expect('priority' in target(h.cti.requests[0]!)).toBe(false);
+      expect(h.logs).toContainEqual(noteLog(h, lead.touchId, 'salesforce_error'));
       expect(JSON.stringify(h.logs)).not.toContain('INVALID_SESSION_ID');
+    });
+
+    it('5: the consultations read throws: the call still goes, with no consultations, no times and no priority (salesforce_error)', async () => {
+      const h = await routed();
+      h.sf.state.consultations = new Error('INVALID_FIELD: Subject at 123 Palm Ave');
+      const lead = await seedReleasedLead(db, h.base);
+
+      expect((await h.run(NOW)).placed).toBe(1);
+      const t = target(h.cti.requests[0]!);
+      expect(t.context).toEqual({ returning: false });
+      expect('slots' in t).toBe(false);
+      expect('priority' in t).toBe(false);
+      expect(h.logs).toContainEqual(noteLog(h, lead.touchId, 'salesforce_error'));
+      expect(JSON.stringify(h.logs)).not.toContain('Palm');
     });
   });
 });

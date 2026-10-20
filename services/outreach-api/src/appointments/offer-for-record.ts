@@ -4,7 +4,8 @@
  * Never throws: a read that fails costs its part only, logged by error name (record content and Salesforce's error text can
  * carry seller data, so neither is logged).
  */
-import type { AiCallBookingSettings, Consultations } from '@cti/contracts';
+import { z } from 'zod';
+import type { AiCallBookingSettings, AppointmentSlot, CallContext, Consultations, PriorityOffer } from '@cti/contracts';
 import type { SalesforceClient, SObjectDescribe } from '@cti/salesforce';
 import { readCurrent } from '../writeback/fields.js';
 import { consultationLinks, readConsultations } from './consultations.js';
@@ -16,7 +17,13 @@ export interface RecordOfferInput {
   now: Date;
   record: { sfObject: 'Lead' | 'Opportunity'; sfRecordId: string };
   /** The research records around it (a converted Lead's Contact and Opportunity, the other Opportunities…). */
-  around: ReadonlyArray<{ sfObject: string; id: string }>;
+  around: readonly AroundRecord[];
+}
+
+/** A record the research found around the one called: its object and id, nothing of its content. */
+export interface AroundRecord {
+  sfObject: string;
+  id: string;
 }
 
 export type RecordOfferDeps = OfferDeps & {
@@ -27,7 +34,28 @@ export type RecordOfferDeps = OfferDeps & {
   oppDescribe?: () => Promise<SObjectDescribe>;
 };
 
+/** One record's offer and the seller's consultations (null when they could not be read). */
+export interface RecordOffer {
+  offer: Offer;
+  consultations: Consultations | null;
+}
+
+/** What a trigger target carries of a record's offer. */
+export interface OfferTargetFields {
+  context: CallContext;
+  slots?: AppointmentSlot[];
+  priority?: PriorityOffer;
+}
+
 const errName = (err: unknown): string => (err instanceof Error ? err.name : typeof err);
+
+const SnapshotRecords = z.object({ records: z.array(z.object({ sfObject: z.string(), id: z.string() })) });
+
+/** A stored research snapshot's records, as `around`; none when the snapshot does not have that shape. */
+export function researchAround(snapshot: unknown): AroundRecord[] {
+  const parsed = SnapshotRecords.safeParse(snapshot);
+  return parsed.success ? parsed.data.records.map(({ sfObject, id }) => ({ sfObject, id })) : [];
+}
 
 /**
  * The consultations could not be read, so an upcoming one cannot be ruled out and Sam must not book a second: an offer with
@@ -82,8 +110,24 @@ async function recordOffer(deps: RecordOfferDeps, i: RecordOfferInput, cal: Offe
  * The property address (readCurrent), the consultations (a read error → null, logged by errName, and then no times: see
  * withoutTimes) and routedOffer. Never throws.
  */
-export async function offerForRecord(deps: RecordOfferDeps, i: RecordOfferInput): Promise<{ offer: Offer; consultations: Consultations | null }> {
+export async function offerForRecord(deps: RecordOfferDeps, i: RecordOfferInput): Promise<RecordOffer> {
   const [consultations, cal] = await Promise.all([consultationsOf(deps, i), calendarsOf(deps, i.orgId)]);
   const offer = await recordOffer(deps, i, cal, consultations);
   return { offer: consultations === null ? withoutTimes(offer) : offer, consultations };
+}
+
+/**
+ * A trigger target's context and offer: the consultations when they were read, the slots when there are any, and the
+ * high-priority offer whenever it is set. An offer with a note can still carry it (no_reps), so the note never decides.
+ * `offered` null (nothing read, or a kept key re-sent, CF-13) carries the returning flag alone.
+ */
+export function offerTargetFields(returning: boolean, offered: RecordOffer | null): OfferTargetFields {
+  const consultations = offered?.consultations ?? null;
+  const slots = offered?.offer.slots ?? [];
+  const priority = offered?.offer.priority ?? null;
+  return {
+    context: { returning, ...(consultations ? { consultations } : {}) },
+    ...(slots.length ? { slots } : {}),
+    ...(priority ? { priority } : {}),
+  };
 }

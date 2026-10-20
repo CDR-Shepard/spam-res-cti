@@ -9,9 +9,13 @@ import { BrowserTokenResponse } from '@cti/contracts';
 import type { BrowserTokenOutcome, CtiClient } from '../ai-calls/cti-client.js';
 import { buildApp } from '../app.js';
 import { DescribeCache } from '../research/describe.js';
+import { fakeMaps } from '../test/fake-offer.js';
 import { fakeDb, testConfig } from '../test/harness.js';
 import { GRANT } from '../test/writeback-harness.js';
 import { registerRecordTestRoutes } from './record-tests.js';
+
+/** The server's one Google Maps client: the route hands it to startRecordTestCall. */
+const MAPS = fakeMaps().maps;
 
 const state = vi.hoisted(() => ({ session: null as Record<string, unknown> | null }));
 vi.mock('@cti/auth', async (importOriginal) => ({
@@ -64,7 +68,7 @@ async function build(over: { cti?: CtiClient | null } = {}) {
       (scope) =>
         registerRecordTestRoutes(scope, {
           db: fakeDb({ organizations: [ORG] }).db, clients: async () => { throw new Error('unused'); },
-          cti: over.cti === undefined ? cti : over.cti, model: null, describes: new DescribeCache(), defaultSpecialists: [GRANT],
+          cti: over.cti === undefined ? cti : over.cti, model: null, describes: new DescribeCache(), defaultSpecialists: [GRANT], maps: MAPS,
         }),
     ],
   });
@@ -151,7 +155,8 @@ describe('POST /api/record-tests/:id/calls', () => {
     const res = await callPost({ mode: 'phone', to: '+15125550111' });
     expect(res.statusCode).toBe(200);
     expect(res.json()).toEqual({ callId: CALL_ID, response: { result: 'placed', aiCallId: AI_CALL } });
-    const [, ctx, id, body] = run.startRecordTestCall.mock.calls[0]!;
+    const [deps, ctx, id, body] = run.startRecordTestCall.mock.calls[0]!;
+    expect(deps.maps).toBe(MAPS);
     expect(ctx.session.userId).toBe(admin.userId);
     expect(id).toBe(TEST_ID);
     expect(body).toEqual({ mode: 'phone', to: '+15125550111' });

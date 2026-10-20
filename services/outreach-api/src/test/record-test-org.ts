@@ -1,6 +1,6 @@
 /**
  * Test a record (plan 1E) tests: a Salesforce org that answers research's reads for one Lead and one Opportunity and the
- * appointment offer's User and Event reads, wrapped so a test can prove the client was only ever read (G-1).
+ * appointment offer's User, Event and record reads, wrapped so a test can prove the client was only ever read (G-1).
  */
 import type { FieldMap } from '@cti/contracts';
 import type { SalesforceClient } from '@cti/salesforce';
@@ -44,8 +44,11 @@ export function recording(client: SalesforceClient): { client: SalesforceClient;
   return { client: proxy as unknown as SalesforceClient, used };
 }
 
-/** `lead` / `opp`: fields over the default row, or null when Salesforce does not return the record. */
-export function recordTestOrg(o: { lead?: Row | null; opp?: Row | null; archived?: Row[] } = {}): { client: SalesforceClient; used: string[] } {
+/**
+ * `lead` / `opp`: fields over the default row (e.g. a property address), or null when Salesforce does not return the record.
+ * `users`: the User rows the offer reads (default: Grant alone, so no region has an active rep).
+ */
+export function recordTestOrg(o: { lead?: Row | null; opp?: Row | null; archived?: Row[]; users?: Row[] } = {}): { client: SalesforceClient; used: string[] } {
   const lead = o.lead === null ? [] : [{ Id: RT_LEAD, Name: 'Pat Seller', IsConverted: false, [RT_CONSENT]: true, ...o.lead }];
   const opp = o.opp === null ? [] : [{ Id: RT_OPP, Name: 'Oak Street', [RT_CONSENT]: false, ...o.opp }];
   const sf = fakeSalesforce({
@@ -57,7 +60,7 @@ export function recordTestOrg(o: { lead?: Row | null; opp?: Row | null; archived
       [/FROM Lead WHERE Id = /, lead],
       [/FROM Opportunity WHERE Id = /, opp],
       [/FROM OpportunityContactRole/, []],
-      [/ FROM User /, [{ Id: GRANT, FirstName: 'Grant', Name: 'Grant Golden', IsActive: true, TimeZoneSidKey: 'America/Los_Angeles' }]],
+      [/ FROM User /, o.users ?? [{ Id: GRANT, FirstName: 'Grant', Name: 'Grant Golden', IsActive: true, TimeZoneSidKey: 'America/Los_Angeles' }]],
       [/FROM Task/, []],
       [/FROM Event/, []],
       [/FROM Note/, []],

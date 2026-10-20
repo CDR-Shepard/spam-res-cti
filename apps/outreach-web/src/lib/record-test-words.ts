@@ -17,12 +17,19 @@ export const RECORD_TEST_ERROR_WORDS: Record<RecordTestError, string> = {
 export const RECORD_TEST_STATUS_WORDS: Record<RecordTestStatus, string> = { running: 'Running', ready: 'Ready', failed: 'Failed' };
 
 /**
- * Why a preview offers no appointment times (outreach-api appointments/offer.ts `OfferNote`). A test offers times whatever
- * the Book appointments switch says (1D practiceBooking), so `booking_off` here only means nobody is on the list.
+ * Why a preview offers no appointment times (outreach-api appointments/offer.ts `OfferNote`). Times are routed by region: the
+ * property's county picks the region, and that region's active reps take the times. A test offers times whatever the Book
+ * appointments switch says (1D practiceBooking), so `booking_off` here only means no region has a rep. A note no longer
+ * written (an older preview's `no_owner`) reads as the plain words.
  */
 const OFFER_NOTE_WORDS: Readonly<Record<string, string>> = {
-  booking_off: 'Nobody is on the appointment list, so no times would be offered.',
-  no_owner: 'Nobody active is on the appointment list, so no times would be offered.',
+  booking_off: 'No reps are set up for any region, so no times would be offered.',
+  no_reps: "No active rep for the property's region, so no regular times would be offered.",
+  no_address: 'The record has no property address, so no times would be offered.',
+  maps_unavailable: "Couldn't look up the property on the map (Google Maps key missing or Google unavailable), so no times would be offered.",
+  not_found: "Google couldn't find the property address, so no times would be offered.",
+  outside_regions: 'The property is outside the LA and San Diego regions, so no times would be offered.',
+  already_booked: 'The seller already has a consultation booked, so no new times would be offered.',
   no_free_time: 'No free time in the next 15 days, so no times would be offered.',
   salesforce_error: "Couldn't read the calendar, so no times would be offered.",
   invalid_slots: "Couldn't read the calendar, so no times would be offered.",

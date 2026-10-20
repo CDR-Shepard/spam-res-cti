@@ -11,9 +11,10 @@
  * the touch waits (nothing claimed); new Salesforce activity since the research sends the lead
  * back to research (CF-1); then the claim (CF-2, CF-10, CF-11), the trigger, and the answer.
  *
- * Plan 1D: every trigger carries `context.returning` (the plan has a last real contact), and is offered the appointment
- * owner's free times just before the claim. CF-13 as corrected by Fix 1 (I-2): a kept key whose request cti-api stored is
- * re-sent without slots and settles through the 409 → resolveKey path; a kept key cti-api never stored is sent as fresh.
+ * Plan 1D: every trigger carries `context.returning` (the plan has a last real contact). Just before the claim the touch is
+ * given the routed offer (the region's times, the high-priority offer) and the seller's consultations (`context.consultations`).
+ * CF-13 as corrected by Fix 1 (I-2): a kept key whose request cti-api stored is re-sent without any of that and settles
+ * through the 409 → resolveKey path; a kept key cti-api never stored is sent as fresh.
  * Task 14: a fresh trigger also carries the seller's conversation history (call-history.ts), under the same rule.
  *
  * Round 2: a touch that kept its idempotency key may already have reached cti-api. Before anything else, and so before any
@@ -22,6 +23,8 @@
  * the same way before a new key is minted.
  */
 import type { Db } from '@cti/db';
+import type { MapsClient } from '../appointments/maps.js';
+import { offerTargetFields } from '../appointments/offer-for-record.js';
 import { holdIfFlagged } from '../campaigns/dnc-hold.js';
 import type { SalesforceClientFactory } from '../crm/client-factory.js';
 import type { RunnerLogger } from '../jobs/boss.js';
@@ -58,8 +61,10 @@ export interface PaceDeps {
   log: RunnerLogger;
   /** Wall clock in ms for the tick deadline; tests inject one. Defaults to `Date.now`. */
   clock?: () => number;
-  /** Plan 1D: AI_CALL_DEFAULT_SPECIALISTS, the appointment owner list of a tenant that has saved none (required: Fix 1, M-4). */
+  /** Plan 1D: AI_CALL_DEFAULT_SPECIALISTS, the specialists list of a tenant that has saved none (required: Fix 1, M-4). */
   defaultSpecialists: readonly string[];
+  /** Google Maps for the routed offer (the property's region, drive times); null without GOOGLE_MAPS_API_KEY: no times are offered. */
+  maps: MapsClient | null;
 }
 
 export interface PaceCounts {
@@ -202,15 +207,14 @@ async function placeOne(deps: PaceDeps, tick: OrgTick, c: AiTouchCandidate): Pro
     await parkPlan(db, { touchId: c.touchId, enrollmentId: c.enrollmentId, planId: plan.id }, 'unknown_user', now);
     return 'parked';
   }
-  const context = { returning: plan.plan.reengagement?.lastContact != null };
-  const offer = kept.stored ? null : await tickOffer(deps, tick, c);
+  const returning = plan.plan.reengagement?.lastContact != null;
+  const offered = kept.stored ? null : await tickOffer(deps, tick, c, plan);
   const claim = await claimAiTouch(db, c.touchId, now);
   if (!claim) return refused(deps, c);
-  // CF-13 (Fix 1, I-2): a kept key whose request cti-api stored is re-sent without slots and settles through the 409 →
-  // resolveKey path; a kept key cti-api never stored is sent as fresh. A key the claim kept that this tick never resolved
-  // (it appeared after the candidates were read) is treated as stored.
+  // CF-13 (Fix 1, I-2): a kept key whose request cti-api stored is re-sent without the offer (no slots, no priority, no
+  // consultations) and settles through the 409 → resolveKey path; a kept key cti-api never stored is sent as fresh. A key the
+  // claim kept that this tick never resolved (it appeared after the candidates were read) is treated as stored.
   const sendAsFresh = !claim.keptKey || (claim.triggerKey === c.triggerKey && !kept.stored);
-  const slots = offer && sendAsFresh ? offer.slots : [];
   // Task 14: what already happened with the seller rides on every fresh send, with or without an offer, and never on a re-send
   // of a key cti-api stored (the same body shape as its first request). A read that fails sends the call without it.
   const history = sendAsFresh ? await callHistory(deps, { orgId: c.orgId, touchId: c.touchId, crmRecordId: c.crmRecordId }) : null;
@@ -223,8 +227,7 @@ async function placeOne(deps: PaceDeps, tick: OrgTick, c: AiTouchCandidate): Pro
       objectType: c.sfObject,
       recordId: c.sfRecordId,
       planText: rendered.text,
-      context,
-      ...(slots.length ? { slots } : {}),
+      ...offerTargetFields(returning, sendAsFresh ? offered : null),
       ...(history ? { history } : {}),
     },
   });

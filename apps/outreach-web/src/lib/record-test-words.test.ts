@@ -11,10 +11,23 @@ describe('record test words', () => {
 
   it('words each offer note, and an unknown one plainly', () => {
     expect(offerNoteWords('no_free_time')).toBe('No free time in the next 15 days, so no times would be offered.');
-    // 1D practiceBooking: a test offers times whatever the Book appointments switch says, so booking_off means nobody is named.
-    expect(offerNoteWords('booking_off')).toBe('Nobody is on the appointment list, so no times would be offered.');
+    // A test offers times whatever the Book appointments switch says, so booking_off means no region has a rep.
+    expect(offerNoteWords('booking_off')).toBe('No reps are set up for any region, so no times would be offered.');
     expect(offerNoteWords('constructor')).toBe('No times would be offered.');
     expect(offerNoteWords(null)).toBe('No times would be offered.');
+  });
+
+  it('words the routed offer\'s notes', () => {
+    expect(offerNoteWords('outside_regions')).toBe('The property is outside the LA and San Diego regions, so no times would be offered.');
+    expect(offerNoteWords('no_reps')).toBe("No active rep for the property's region, so no regular times would be offered.");
+    expect(offerNoteWords('no_address')).toBe('The record has no property address, so no times would be offered.');
+    expect(offerNoteWords('maps_unavailable')).toBe("Couldn't look up the property on the map (Google Maps key missing or Google unavailable), so no times would be offered.");
+    expect(offerNoteWords('not_found')).toBe("Google couldn't find the property address, so no times would be offered.");
+    expect(offerNoteWords('already_booked')).toBe('The seller already has a consultation booked, so no new times would be offered.');
+  });
+
+  it("an older preview's single-owner no_owner note reads as the plain words", () => {
+    expect(offerNoteWords('no_owner')).toBe('No times would be offered.');
   });
 
   it('a 429 without a readable retryAt keeps the server words; other errors use the common words', () => {

@@ -105,8 +105,8 @@ describe('RecordTestPreview', () => {
   });
 
   it('no times offered: the note in words', async () => {
-    show({ [GET]: recordTest({ slots: [], offerNote: 'booking_off' }) });
-    expect(await screen.findByText('Nobody is on the appointment list, so no times would be offered.')).toBeInTheDocument();
+    show({ [GET]: recordTest({ slots: [], offerNote: 'outside_regions' }) });
+    expect(await screen.findByText('The property is outside the LA and San Diego regions, so no times would be offered.')).toBeInTheDocument();
   });
 
   it('a failed preview says why and offers Try again', async () => {

@@ -1,6 +1,6 @@
 /**
  * Test a record (plan 1E, spec §4.2): "how I'll approach this call" for any Lead or Opportunity, without a campaign.
- * The same research, plan writer, agent text and appointment offer a campaign call gets:
+ * The same research, plan writer, agent text and routed appointment offer a campaign call gets:
  *
  *   researchRecord → planFacts → plan model → withPlanFacts → renderPlanForAgent → practiceOffer → the row, ready
  *
@@ -18,6 +18,7 @@ import { CallPlanOutputError, type CallPlanModel, type CallPlanResult } from '..
 import { costMicros } from '../ai/model.js';
 import { renderPlanForAgent } from '../ai-calls/plan-text.js';
 import { practiceOffer } from '../ai-calls/practice.js';
+import type { MapsClient } from '../appointments/maps.js';
 import { abortable } from '../call-plans/abortable.js';
 import { planFacts, withPlanFacts } from '../call-plans/plan-context.js';
 import { describePlanTextIssues } from '../call-plans/plan-text-words.js';
@@ -37,8 +38,10 @@ export interface PreviewDeps {
   describes: DescribeCache;
   now: () => Date;
   log: RunnerLogger;
-  /** AI_CALL_DEFAULT_SPECIALISTS: the appointment owner list of a tenant that has saved none. */
+  /** AI_CALL_DEFAULT_SPECIALISTS: the specialists list of a tenant that has saved none. */
   defaultSpecialists: readonly string[];
+  /** Google Maps for the routed offer; null without GOOGLE_MAPS_API_KEY: no times are offered. */
+  maps: MapsClient | null;
   /** Bounds research and the model call; tests inject one. Defaults to AbortSignal.timeout(LEAD_TIMEOUT_MS). */
   signal?: () => AbortSignal;
 }
@@ -155,8 +158,9 @@ async function steps(deps: PreviewDeps, job: Job, now: Date): Promise<PreviewRes
   const planned = await plan(deps, job, snapshot, now, signal);
   const editable = EditableCallPlan.parse(planned.plan);
   const rendered = renderPlanForAgent(editable, now);
-  const offerDeps = { db: deps.db, clients: deps.clients, now, log: deps.log, defaultSpecialists: deps.defaultSpecialists };
-  const offer = await practiceOffer(offerDeps, job.orgId, job.settings, 'record-test.preview');
+  const offerDeps = { db: deps.db, clients: deps.clients, now, log: deps.log, defaultSpecialists: deps.defaultSpecialists, maps: deps.maps };
+  const record = { sfObject: job.sfObject, sfRecordId: job.sfRecordId };
+  const { offer } = await practiceOffer(offerDeps, job.orgId, job.settings, record, snapshot.records, 'record-test.preview');
   return {
     name: recordName(snapshot),
     research: snapshot,

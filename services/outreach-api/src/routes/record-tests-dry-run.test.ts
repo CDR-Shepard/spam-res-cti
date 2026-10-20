@@ -46,7 +46,7 @@ async function build() {
       (scope) =>
         registerRecordTestRoutes(scope, {
           db: fakeDb({ organizations: [ORG] }).db, clients: async () => { throw new Error('unused'); }, cti: null, model: null,
-          describes: new DescribeCache(), defaultSpecialists: [GRANT], mappingModel: model, appPublicUrl: 'https://outreach.example',
+          describes: new DescribeCache(), defaultSpecialists: [GRANT], maps: null, mappingModel: model, appPublicUrl: 'https://outreach.example',
         }),
     ],
   });

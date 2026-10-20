@@ -1,12 +1,13 @@
 /**
  * Practice AI calls (plan 1D decision 6, Task 28): an admin picks a lead on the plan board and the voice agent rings the
  * admin's own test number as if it were that seller, with the real record (cti-api loads it) and the lead's current plan
- * (proposed or approved), rendered and checked exactly as for a real call (CF-9), and the appointment owner's real free times.
+ * (proposed or approved), rendered and checked exactly as for a real call (CF-9), and the real routed offer and consultations.
  *
  * What a practice call never does: it claims no touch, so `ai_call.results` never counts it and never enqueues a write-back;
  * the write-back tick also refuses any `is_test` call before a single Salesforce request; a booking only lands on
  * `ai_calls.appointment` ("would have booked"); it never approves the plan. The only Salesforce traffic is read-only: the
- * record load in cti-api and the owner's User and Event reads for the offer here. cti-api gates it on its test branch
+ * record load in cti-api and, for the offer here, the reps' User and Event reads, the seller's consultations and the
+ * property address. cti-api gates it on its test branch
  * (an admin, a number on AI_VOICE_TEST_NUMBERS); this module checks the number first so a typo is told in words.
  */
 import { randomUUID } from 'node:crypto';
@@ -17,15 +18,15 @@ import {
   BookedAppointment,
   EditableCallPlan,
   InternalAiCallResponse,
-  type AppointmentSlot,
   type PracticeCall,
   type PracticeCallRequest,
   type PracticeCallsResponse,
 } from '@cti/contracts';
 import { schema, type Db } from '@cti/db';
 import { toE164 } from '@cti/phone';
-// LEGACY single-owner offer until Task 7 moves this to the routed offer (appointments/offer-for-record.ts).
-import { offerWithAiBookings, readOfferCalendar, type LegacyOffer as Offer } from '../appointments/offer-legacy.js';
+import type { MapsClient } from '../appointments/maps.js';
+import { noOffer, readOfferCalendars } from '../appointments/offer.js';
+import { offerForRecord, offerTargetFields, researchAround, type AroundRecord, type RecordOffer, type RecordOfferInput } from '../appointments/offer-for-record.js';
 import { describePlanTextIssues } from '../call-plans/plan-text-words.js';
 import type { SalesforceClientFactory } from '../crm/client-factory.js';
 import type { RunnerLogger } from '../jobs/boss.js';
@@ -44,8 +45,10 @@ export interface PracticeDeps {
   cti: CtiClient;
   now: Date;
   log: RunnerLogger;
-  /** AI_CALL_DEFAULT_SPECIALISTS: the appointment owner list of a tenant that has saved none (bookingSettings needs it). */
+  /** AI_CALL_DEFAULT_SPECIALISTS: the specialists list of a tenant that has saved none (bookingSettings needs it). */
   defaultSpecialists: readonly string[];
+  /** Google Maps for the routed offer; null without GOOGLE_MAPS_API_KEY: no times are offered. */
+  maps: MapsClient | null;
 }
 
 /** The campaign's practice list is the latest this many. */
@@ -76,42 +79,53 @@ async function loadLead(db: Db, orgId: string, enrollmentId: string): Promise<Le
   return (row as Lead | undefined) ?? null;
 }
 
-/** The plan at `version`, only while it is the lead's current plan (proposed or approved) and still parses. */
-async function loadPlan(db: Db, orgId: string, enrollmentId: string, version: number): Promise<{ id: string; plan: EditableCallPlan } | null> {
+/**
+ * The plan at `version`, only while it is the lead's current plan (proposed or approved) and still parses, with the records
+ * its research found (the consultations read's `around`).
+ */
+async function loadPlan(db: Db, orgId: string, enrollmentId: string, version: number): Promise<{ id: string; plan: EditableCallPlan; around: AroundRecord[] } | null> {
   const p = schema.callPlans;
+  const r = schema.callResearch;
   const [row] = await db
-    .select({ id: p.id, plan: p.plan })
+    .select({ id: p.id, plan: p.plan, snapshot: r.snapshot })
     .from(p)
+    .leftJoin(r, and(eq(r.id, p.researchId), eq(r.orgId, p.orgId)))
     .where(and(eq(p.orgId, orgId), eq(p.enrollmentId, enrollmentId), eq(p.version, version), inArray(p.status, ['proposed', 'approved'])));
   const parsed = row ? EditableCallPlan.safeParse(row.plan) : null;
-  return row && parsed?.success ? { id: row.id, plan: parsed.data } : null;
+  return row && parsed?.success ? { id: row.id, plan: parsed.data, around: researchAround(row.snapshot) } : null;
 }
 
 /** What practiceOffer reads: PracticeDeps without the cti-api client (Test a record previews reuse it, plan 1E). */
-export type PracticeOfferDeps = Pick<PracticeDeps, 'db' | 'clients' | 'now' | 'log' | 'defaultSpecialists'>;
+export type PracticeOfferDeps = Pick<PracticeDeps, 'db' | 'clients' | 'now' | 'log' | 'defaultSpecialists' | 'maps'>;
 
 /**
- * The owner's free times, read now, less what other AI calls already booked with them (as the pacer offers them), so the
- * admin hears what a seller would be offered. Offered whenever booking settings name a specialist, whatever the Book
- * appointments switch says (fix 2); the call still never books. Never throws: any failure offers nothing (note
- * salesforce_error) and the call still goes.
+ * The routed offer and the seller's consultations, read now as the pacer reads them (each rep less what other AI calls already
+ * booked with them), so the admin hears what a seller would be offered. Offered whenever some region has a rep, whatever the
+ * Book appointments switch says (fix 2); the call still never books. `around` is the research's records, for the
+ * consultations read. `label` prefixes the log lines (who asked: 1D practice, or a record test). Never throws: any failure
+ * offers nothing (note salesforce_error), and the call still goes.
  */
-export async function practiceOffer(deps: PracticeOfferDeps, orgId: string, settings: unknown, label = 'ai_call.practice'): Promise<Offer> {
+export async function practiceOffer(
+  deps: PracticeOfferDeps,
+  orgId: string,
+  settings: unknown,
+  record: RecordOfferInput['record'],
+  around: readonly AroundRecord[],
+  label = 'ai_call.practice',
+): Promise<RecordOffer> {
   try {
     const booking = practiceBooking({ settings }, deps.defaultSpecialists);
-    const cal = await readOfferCalendar(await deps.clients(orgId), { booking, now: deps.now, log: deps.log });
-    const offer = await offerWithAiBookings(deps.db, cal, { orgId, booking, now: deps.now });
-    if (offer.note && offer.note !== 'booking_off') deps.log.info({ orgId, slots: offer.note }, `${label}: no appointment times offered`);
-    return offer;
+    const client = await deps.clients(orgId);
+    const calendars = () => readOfferCalendars(client, { booking, now: deps.now, log: deps.log });
+    const out = await offerForRecord({ db: deps.db, maps: deps.maps, log: deps.log, client, calendars }, { orgId, booking, now: deps.now, record, around });
+    const { note, slots, priority } = out.offer;
+    // The note by its code only: routedOffer's own line has the counts but no note.
+    if (note !== null && note !== 'booking_off') deps.log.info({ orgId, note, slots: slots.length, priority: priority !== null }, `${label}: appointment offer note`);
+    return out;
   } catch (err) {
     deps.log.warn({ orgId, errName: err instanceof Error ? err.name : typeof err }, `${label}: no appointment times offered`);
-    return { slots: [], ownerSfUserId: null, note: 'salesforce_error' };
+    return { offer: noOffer('salesforce_error'), consultations: null };
   }
-}
-
-/** The slots of practiceOffer: what a practice call offers. `label` prefixes its log lines (who asked: 1D practice, or a record test). */
-export async function practiceSlots(deps: PracticeOfferDeps, orgId: string, settings: unknown, label?: string): Promise<AppointmentSlot[]> {
-  return (await practiceOffer(deps, orgId, settings, label)).slots;
 }
 
 /**
@@ -139,8 +153,8 @@ export async function startPractice(deps: PracticeDeps, ctx: RequestContext, enr
   if (to === 'unreachable') return { ok: false, error: 'cti_unreachable' };
   if (to === null) return { ok: false, error: 'not_a_test_number' };
 
-  const context = { returning: plan.plan.reengagement?.lastContact != null };
-  const slots = await practiceSlots(deps, ctx.orgId, lead.settings);
+  const returning = plan.plan.reengagement?.lastContact != null;
+  const offered = await practiceOffer(deps, ctx.orgId, lead.settings, { sfObject: lead.sfObject, sfRecordId: lead.sfRecordId }, plan.around);
   const idempotencyKey = `practice:${randomUUID()}`;
   const row = await db.transaction(async (tx) => {
     if (await lockAndCheckPractice(tx, ctx.orgId, ctx.session.userId, deps.now)) return null;
@@ -165,7 +179,7 @@ export async function startPractice(deps: PracticeDeps, ctx: RequestContext, enr
     orgId: ctx.orgId,
     userId: ctx.session.userId,
     idempotencyKey,
-    target: { kind: 'practice', objectType: lead.sfObject, recordId: lead.sfRecordId, to, planText: rendered.text, context, ...(slots.length ? { slots } : {}) },
+    target: { kind: 'practice', objectType: lead.sfObject, recordId: lead.sfRecordId, to, planText: rendered.text, ...offerTargetFields(returning, offered) },
   });
   // A practice key is never re-sent, so a 409 is as final as a transport failure: the row keeps a null result.
   if (answer.kind !== 'response') {

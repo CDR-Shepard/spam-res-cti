@@ -20,7 +20,9 @@ import { EditableCallPlan, aiTestIdentityUser, type InternalAiCallResponse, type
 import { schema, type Db } from '@cti/db';
 import type { CtiClient } from '../ai-calls/cti-client.js';
 import { renderPlanForAgent } from '../ai-calls/plan-text.js';
-import { practiceSlots, testNumber } from '../ai-calls/practice.js';
+import { practiceOffer, testNumber } from '../ai-calls/practice.js';
+import type { MapsClient } from '../appointments/maps.js';
+import { offerTargetFields, researchAround } from '../appointments/offer-for-record.js';
 import { describePlanTextIssues } from '../call-plans/plan-text-words.js';
 import type { SalesforceClientFactory } from '../crm/client-factory.js';
 import type { RunnerLogger } from '../jobs/boss.js';
@@ -40,8 +42,10 @@ export interface RunDeps {
   cti: CtiClient;
   now: Date;
   log: RunnerLogger;
-  /** AI_CALL_DEFAULT_SPECIALISTS: the appointment owner list of a tenant that has saved none. */
+  /** AI_CALL_DEFAULT_SPECIALISTS: the specialists list of a tenant that has saved none. */
   defaultSpecialists: readonly string[];
+  /** Google Maps for the routed offer; null without GOOGLE_MAPS_API_KEY: no times are offered. */
+  maps: MapsClient | null;
 }
 
 type Destination = { mode: 'phone'; to: string } | { mode: 'browser'; identity: string };
@@ -68,9 +72,10 @@ export async function startRecordTestCall(deps: RunDeps, ctx: RequestContext, te
   const dest = await destination(deps, ctx, body);
   if (typeof dest === 'string') return { ok: false, error: dest };
 
-  const context = { returning: plan.data.reengagement?.lastContact != null };
-  // The request's tenant row already holds the settings (requireContext read it).
-  const slots = await practiceSlots(deps, ctx.orgId, ctx.tenant.settings, 'record-test.call');
+  const returning = plan.data.reengagement?.lastContact != null;
+  // The request's tenant row already holds the settings (requireContext read it). The stored research names the records around.
+  const record = { sfObject: test.sfObject, sfRecordId: test.sfRecordId };
+  const offered = await practiceOffer(deps, ctx.orgId, ctx.tenant.settings, record, researchAround(test.research), 'record-test.call');
   const userId = ctx.session.userId;
   const idempotencyKey = `rtest:${randomUUID()}`;
   const inserted = await withCallLimit(db, { orgId: ctx.orgId, userId, now }, async (tx) => {
@@ -93,9 +98,9 @@ export async function startRecordTestCall(deps: RunDeps, ctx: RequestContext, te
   if (!inserted.ok) return { ok: false, refusal: inserted.refusal };
   const callId = inserted.value;
 
-  const record = { objectType: test.sfObject, recordId: test.sfRecordId, planText: rendered.text, context, ...(slots.length ? { slots } : {}) };
+  const call = { objectType: test.sfObject, recordId: test.sfRecordId, planText: rendered.text, ...offerTargetFields(returning, offered) };
   const target: InternalAiCallTarget =
-    dest.mode === 'phone' ? { kind: 'practice', ...record, to: dest.to } : { kind: 'practice_browser', ...record, clientIdentity: dest.identity };
+    dest.mode === 'phone' ? { kind: 'practice', ...call, to: dest.to } : { kind: 'practice_browser', ...call, clientIdentity: dest.identity };
   const answer = await deps.cti.trigger({ orgId: ctx.orgId, userId, idempotencyKey, target });
   // A test key is never re-sent, so a 409 is as final as a transport failure: the row keeps a null result (as 1D practice).
   if (answer.kind !== 'response') {

@@ -145,7 +145,7 @@ export function liveCallBooking(org: { settings: unknown }, defaultSpecialists: 
 }
 
 /**
- * Fix 2: what a PRACTICE call offers: times whenever booking settings name a specialist, whatever the toggles say, so an admin
+ * Fix 2: what a PRACTICE call offers: the routed offer whenever some region has a rep, whatever the toggles say, so an admin
  * can hear the offer before anything is turned on. A practice call still never books, converts or writes.
  */
 export function practiceBooking(org: { settings: unknown }, defaultSpecialists: readonly string[]): AiCallBookingSettings {
@@ -154,7 +154,7 @@ export function practiceBooking(org: { settings: unknown }, defaultSpecialists: 
 
 /**
  * Booking is on and some region has a rep to send. The `specialists` list no longer decides this: it only names the high-priority
- * rep and the legacy single owner. Whether a rep resolves to an ACTIVE user is checked when slots are offered (`no_owner`).
+ * rep. Whether a rep resolves to an ACTIVE user is checked when the offer is read (`no_reps`).
  */
 export function bookingActive(b: AiCallBookingSettings): boolean {
   return b.enabled && bookingRouting(b).regions.some((region) => region.reps.length > 0);

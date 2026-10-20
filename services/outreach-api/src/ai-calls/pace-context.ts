@@ -3,17 +3,18 @@
  * it may start (concurrency and the rolling daily cap), the due touches, their plans, ONE fresh
  * Salesforce read per object (which also refreshes the integration token cti-api reads,
  * decision 3), and the CF-1 activity check. A tenant whose Salesforce is unusable is skipped
- * with nothing claimed. Plan 1D: the tick keeps the tenant's booking settings and Salesforce client, so a touch can be offered
- * the appointment owner's free times (tickOffer). Fix 1: the owner's calendar is read at most once per tenant per tick (M-1);
- * the times other AI calls booked that are not on it yet are read per touch (I-4).
+ * with nothing claimed. Plan 1D: the tick keeps the tenant's booking settings and Salesforce client, so each touch can be given
+ * the routed offer and the seller's consultations (tickOffer). The reps' calendars and the Opportunity describe are read at
+ * most once per tenant per tick (M-1); the times other AI calls booked that are not on a calendar yet, the consultations and
+ * the property address are read per touch (I-4).
  */
 import { eq, inArray } from 'drizzle-orm';
 import { EditableCallPlan, FieldMap, type AiCallBookingSettings } from '@cti/contracts';
 import { schema } from '@cti/db';
-import { QueryTooLargeError, SalesforceApiError, SalesforceAuthError, type SalesforceClient } from '@cti/salesforce';
+import { QueryTooLargeError, SalesforceApiError, SalesforceAuthError, type SalesforceClient, type SObjectDescribe } from '@cti/salesforce';
 import type { OwnerUser } from '../appointments/calendar.js';
-// LEGACY single-owner offer until Task 7 moves this to the routed offer (appointments/offer-for-record.ts).
-import { offerWithAiBookings, readOfferCalendar, type LegacyOffer as Offer, type LegacyOfferCalendar as OfferCalendar } from '../appointments/offer-legacy.js';
+import { readOfferCalendars, type Offer, type OfferCalendars } from '../appointments/offer.js';
+import { offerForRecord, researchAround, type AroundRecord, type RecordOffer } from '../appointments/offer-for-record.js';
 import { fetchRecords, type SfRecordSnapshot } from '../campaigns/records.js';
 import { CrmNotConnectedError } from '../crm/client-factory.js';
 import { loadConnection } from '../crm/connection-store.js';
@@ -34,6 +35,8 @@ export interface PlanForCall {
   plan: EditableCallPlan | null;
   /** When the plan's research read Salesforce (the earlier of its snapshot's collectedAt and the row's created_at). */
   researchedAt: Date;
+  /** The records the plan's research found (the lead itself, a converted Lead's Contact and Opportunity…); [] when the snapshot does not parse. */
+  around: AroundRecord[];
 }
 
 export interface OrgTick {
@@ -48,8 +51,10 @@ export interface OrgTick {
   client: SalesforceClient;
   /** Plan 1D: the tenant's booking settings as this tick read them (the configured default list applied; off unless write-back is on, fix 2). */
   booking: AiCallBookingSettings;
-  /** Fix 1 (M-1): the appointment owner and their calendar, read from Salesforce on first use and kept for the tick. */
-  calendar(): Promise<OfferCalendar>;
+  /** M-1: the regions' active reps with their calendars, and the high-priority rep, read on first use and kept for the tick. */
+  calendars(): Promise<OfferCalendars>;
+  /** M-1: the Opportunity describe (where its property address lives), read on first use and kept for the tick. */
+  oppDescribe(): Promise<SObjectDescribe>;
 }
 
 const core = (id: string): string => id.slice(0, 15);
@@ -86,7 +91,8 @@ async function loadPlans(deps: PaceDeps, orgId: string, candidates: AiTouchCandi
         const parsed = EditableCallPlan.safeParse(row.plan);
         const collected = new Date(String((row.snapshot as { collectedAt?: unknown } | null)?.collectedAt ?? ''));
         const researchedAt = Number.isNaN(collected.getTime()) || collected > row.createdAt ? row.createdAt : collected;
-        return [row.id, { id: row.id, enrollmentId: row.enrollmentId, status: row.status, plan: parsed.success ? parsed.data : null, researchedAt }];
+        const plan = parsed.success ? parsed.data : null;
+        return [row.id, { id: row.id, enrollmentId: row.enrollmentId, status: row.status, plan, researchedAt, around: researchAround(row.snapshot) }];
       }),
   );
 }
@@ -141,34 +147,49 @@ export async function loadOrgTick(deps: PaceDeps, orgId: string): Promise<OrgTic
     }
     return null;
   }
-  let calendar: Promise<OfferCalendar> | null = null;
-  const readCalendar = (): Promise<OfferCalendar> => (calendar ??= readOfferCalendar(client, { booking, now: deps.now, log: deps.log }));
-  return { slots, candidates, plans, fresh: (id) => fresh.get(core(id)), newActivity, client, booking, calendar: readCalendar };
+  let calendars: Promise<OfferCalendars> | null = null;
+  let describe: Promise<SObjectDescribe> | null = null;
+  return {
+    slots, candidates, plans, fresh: (id) => fresh.get(core(id)), newActivity, client, booking,
+    calendars: () => (calendars ??= readOfferCalendars(client, { booking, now: deps.now, log: deps.log })),
+    oppDescribe: () => (describe ??= client.describe('Opportunity')),
+  };
 }
 
-/** M-2: the owner zones already warned about (org, owner, zone), so a refused zone is logged once per process, not per tick. */
+/** M-2: the rep zones already warned about (org, rep, zone), so a refused zone is logged once per process, not per tick. */
 const warnedZones = new Set<string>();
 const MAX_WARNED_ZONES = 1_000;
 
-function warnRefusedZone(deps: PaceDeps, orgId: string, owner: OwnerUser): void {
-  if (owner.zoneRefused === null) return;
-  const key = `${orgId}:${owner.sfUserId}:${owner.zoneRefused}`;
+function warnRefusedZone(deps: PaceDeps, orgId: string, rep: OwnerUser): void {
+  if (rep.zoneRefused === null) return;
+  const key = `${orgId}:${rep.sfUserId}:${rep.zoneRefused}`;
   if (warnedZones.has(key) || warnedZones.size >= MAX_WARNED_ZONES) return;
   warnedZones.add(key);
   // A Salesforce time zone key (a picklist value), never record content.
-  deps.log.warn({ orgId, ownerSfUserId: owner.sfUserId, zone: owner.zoneRefused, usedZone: owner.timeZone }, 'ai_call.place: the appointment owner\'s Salesforce time zone is not usable; business hours use the default zone');
+  deps.log.warn({ orgId, repSfUserId: rep.sfUserId, zone: rep.zoneRefused, usedZone: rep.timeZone }, 'ai_call.place: a rep\'s Salesforce time zone is not usable; their times are given in the default zone');
 }
 
 /**
- * Plan 1D: the appointment times this touch's trigger offers, read now (calendars change after approval): the tick's one
- * calendar read, less the times other AI calls have booked with the owner that are not on the calendar yet (I-4). The
- * Salesforce part never throws; a missing offer never stops the call. Booking switched off is not worth a log line; any other
- * empty offer is logged by its note only, never record content.
+ * The offer's note, by its code only (never record content): routedOffer's own line has the counts but no note. An offer can
+ * have a note and still carry the high-priority offer (no_reps). Booking switched off is not worth a log line.
  */
-export async function tickOffer(deps: PaceDeps, tick: OrgTick, c: AiTouchCandidate): Promise<Offer> {
-  const cal = await tick.calendar();
-  if (cal.kind === 'read') warnRefusedZone(deps, c.orgId, cal.owner);
-  const offer = await offerWithAiBookings(deps.db, cal, { orgId: c.orgId, booking: tick.booking, now: deps.now });
-  if (offer.note && offer.note !== 'booking_off') deps.log.info({ orgId: c.orgId, touchId: c.touchId, slots: offer.note }, 'ai_call.place: no appointment times offered');
-  return offer;
+function logNote(deps: PaceDeps, c: AiTouchCandidate, offer: Offer): void {
+  if (offer.note === null || offer.note === 'booking_off') return;
+  deps.log.info({ orgId: c.orgId, touchId: c.touchId, note: offer.note, slots: offer.slots.length, priority: offer.priority !== null }, 'ai_call.place: appointment offer note');
+}
+
+/**
+ * Plan 1D: what this touch's trigger offers, read now (calendars change after approval): the routed offer from the tick's
+ * calendars (each rep less the times other AI calls booked that no Event shows yet, I-4) and the seller's consultations, read
+ * from the record and the records its research found. Never throws; a missing offer never stops the call.
+ */
+export async function tickOffer(deps: PaceDeps, tick: OrgTick, c: AiTouchCandidate, plan: PlanForCall): Promise<RecordOffer> {
+  const offerDeps = { db: deps.db, maps: deps.maps, log: deps.log, client: tick.client, calendars: tick.calendars, oppDescribe: tick.oppDescribe };
+  const record = { sfObject: c.sfObject, sfRecordId: c.sfRecordId };
+  const out = await offerForRecord(offerDeps, { orgId: c.orgId, booking: tick.booking, now: deps.now, record, around: plan.around });
+  // Already read for the tick (memoized); readOfferCalendars never throws, the catch is a belt.
+  const cal = await tick.calendars().catch(() => null);
+  if (cal?.kind === 'read') for (const { rep } of cal.reps.values()) warnRefusedZone(deps, c.orgId, rep);
+  logNote(deps, c, out.offer);
+  return out;
 }

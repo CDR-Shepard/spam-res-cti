@@ -18,6 +18,7 @@ import { budgetMicros } from '../ai/budget.js';
 import type { CallPlanModel } from '../ai/call-plan-model.js';
 import { isPricedModel } from '../ai/model.js';
 import type { BrowserTokenOutcome, CtiClient } from '../ai-calls/cti-client.js';
+import type { MapsClient } from '../appointments/maps.js';
 import type { SalesforceClientFactory } from '../crm/client-factory.js';
 import { loadConnection } from '../crm/connection-store.js';
 import { sendError } from '../http/errors.js';
@@ -46,8 +47,10 @@ export interface RecordTestRouteDeps {
   mappingModel?: MappingModel | null;
   /** APP_PUBLIC_URL: the dry run's Chatter text links to the test page. */
   appPublicUrl?: string;
-  /** AI_CALL_DEFAULT_SPECIALISTS (the offer's appointment owner list when a tenant saved none). */
+  /** AI_CALL_DEFAULT_SPECIALISTS (the specialists list when a tenant saved none). */
   defaultSpecialists: readonly string[];
+  /** The server's Google Maps client for the routed offer; null without GOOGLE_MAPS_API_KEY. */
+  maps: MapsClient | null;
   now?: () => Date;
   /** Runs the preview after the reply; tests pass one that collects the work to await it. */
   background?: (work: () => Promise<void>) => void;
@@ -131,7 +134,7 @@ function sendTokenRefusal(reply: FastifyReply, answer: Exclude<BrowserTokenOutco
 }
 
 export async function registerRecordTestRoutes(app: FastifyInstance, deps: RecordTestRouteDeps): Promise<void> {
-  const { db, clients, model, describes, defaultSpecialists } = deps;
+  const { db, clients, model, describes, defaultSpecialists, maps } = deps;
   const now = deps.now ?? (() => new Date());
   // runPreview never throws; this catch is a belt.
   const background =
@@ -158,7 +161,7 @@ export async function registerRecordTestRoutes(app: FastifyInstance, deps: Recor
     if (!limited.ok) return sendLimitRefusal(reply, limited.refusal, ctx.tenant.timezone);
     const id = limited.value;
     req.log.info({ orgId: ctx.orgId, testId: id, sfObject: ref.sfObject }, 'record-test: preview started');
-    background(() => runPreview({ db, clients, model, describes, now, log: req.log, defaultSpecialists }, id));
+    background(() => runPreview({ db, clients, model, describes, now, log: req.log, defaultSpecialists, maps }, id));
     return reply.code(202).send({ id });
   });
 
@@ -197,7 +200,7 @@ export async function registerRecordTestRoutes(app: FastifyInstance, deps: Recor
     if (!body.success) return sendError(reply, 400, 'INVALID_BODY', 'Pick one of the test numbers, or start Talk in browser again.');
     const cti = deps.cti;
     if (!cti) return sendError(reply, 503, 'AI_CALLS_NOT_CONFIGURED', NOT_CONFIGURED);
-    const out = await startRecordTestCall({ db, clients, cti, now: now(), log: req.log, defaultSpecialists }, ctx, params.data.id, body.data);
+    const out = await startRecordTestCall({ db, clients, cti, now: now(), log: req.log, defaultSpecialists, maps }, ctx, params.data.id, body.data);
     if ('refusal' in out) return sendLimitRefusal(reply, out.refusal, ctx.tenant.timezone);
     if (!out.ok) return sendRunError(reply, out.error, out.words);
     return { callId: out.callId, response: out.response };

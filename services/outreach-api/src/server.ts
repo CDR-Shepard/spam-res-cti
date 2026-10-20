@@ -10,6 +10,7 @@ import { currentBuild } from './build-info.js';
 import { httpCtiClient } from './ai-calls/cti-client.js';
 import { placeDueAiCalls } from './ai-calls/pace.js';
 import { collectAiCallResults } from './ai-calls/results.js';
+import { googleMaps } from './appointments/maps.js';
 import { logEventsToSalesforce } from './conversations/sf-log.js';
 import { processEmailEvents } from './email/events.js';
 import { httpResendClient } from './email/resend-client.js';
@@ -97,6 +98,8 @@ async function main(): Promise<void> {
       ? new AnthropicEmailWriter({ client: new Anthropic({ apiKey: cfg.ANTHROPIC_API_KEY, timeout: 60_000, maxRetries: 2 }), model: cfg.EMAIL_MODEL })
       : null;
   const resend = cfg.emailEnabled && cfg.RESEND_API_KEY ? httpResendClient({ apiKey: cfg.RESEND_API_KEY }) : null;
+  // Google Maps for the routed appointment offer, one client (and its caches) for the process; no key, no times offered.
+  const maps = cfg.GOOGLE_MAPS_API_KEY ? googleMaps(cfg.GOOGLE_MAPS_API_KEY) : null;
   const handlers: Record<string, JobHandler> = {
     ...(cfg.salesforceEnabled
       ? {
@@ -122,7 +125,7 @@ async function main(): Promise<void> {
     ...(cfg.salesforceEnabled && cti
       ? {
           'ai_call.place': async () => {
-            await placeDueAiCalls({ db, clients, cti, now: new Date(), log: console, defaultSpecialists: cfg.AI_CALL_DEFAULT_SPECIALISTS });
+            await placeDueAiCalls({ db, clients, cti, now: new Date(), log: console, defaultSpecialists: cfg.AI_CALL_DEFAULT_SPECIALISTS, maps });
           },
         }
       : {}),
@@ -203,7 +206,7 @@ async function main(): Promise<void> {
       (scope) => registerReviewRoutes(scope, { db }),
       (scope) => registerCallPlanRoutes(scope, { db }),
       (scope) => registerAiCallRoutes(scope, { db, cti }),
-      (scope) => registerPracticeCallRoutes(scope, { db, clients, cti, defaultSpecialists: cfg.AI_CALL_DEFAULT_SPECIALISTS }),
+      (scope) => registerPracticeCallRoutes(scope, { db, clients, cti, defaultSpecialists: cfg.AI_CALL_DEFAULT_SPECIALISTS, maps }),
       (scope) => registerAiCallSettingsRoutes(scope, { db, clients, defaultSpecialists: cfg.AI_CALL_DEFAULT_SPECIALISTS, describes }),
       // Editable agent prompts (admins): the AI agent's instructions and voicemail template, checked and rendered by cti-api.
       (scope) => registerAgentPromptRoutes(scope, { db, cti }),
@@ -221,7 +224,7 @@ async function main(): Promise<void> {
       // Plan 1E: Test a record (admins): preview how the AI would call any Lead or Opportunity, without a campaign.
       (scope) =>
         registerRecordTestRoutes(scope, {
-          db, clients, cti, model: planModel, describes, defaultSpecialists: cfg.AI_CALL_DEFAULT_SPECIALISTS, mappingModel, appPublicUrl: cfg.APP_PUBLIC_URL,
+          db, clients, cti, model: planModel, describes, defaultSpecialists: cfg.AI_CALL_DEFAULT_SPECIALISTS, maps, mappingModel, appPublicUrl: cfg.APP_PUBLIC_URL,
         }),
     ],
   });

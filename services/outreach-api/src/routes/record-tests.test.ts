@@ -7,6 +7,7 @@ import type { CallPlanModel } from '../ai/call-plan-model.js';
 import { buildApp } from '../app.js';
 import { DescribeCache } from '../research/describe.js';
 import { validPlan } from '../test/call-plan-fixtures.js';
+import { fakeMaps, SD_LEAD_ADDRESS, USERS } from '../test/fake-offer.js';
 import { seedUser } from '../test/call-plan-seed.js';
 import { fakeDb, testConfig } from '../test/harness.js';
 import { seedConnection, seedOrg } from '../test/outreach-fixtures.js';
@@ -63,6 +64,9 @@ const model = (modelId = MODEL, plan: CallPlan = validPlan): CallPlanModel => ({
   plan: vi.fn(async () => ({ plan, inputTokens: 12_000, outputTokens: 1_500, model: MODEL })),
 });
 
+/** The server's one Google Maps client: the routes hand it to the preview and the test call. */
+const MAPS = fakeMaps().maps;
+
 let app: FastifyInstance;
 let pending: Array<() => Promise<void>> = [];
 const background = (work: () => Promise<void>) => {
@@ -76,7 +80,7 @@ async function build(db: Db, over: Partial<RecordTestRouteDeps> = {}) {
       (scope) =>
         registerRecordTestRoutes(scope, {
           db, clients: async () => recordTestOrg().client, cti: null, model: model(), describes: new DescribeCache(),
-          defaultSpecialists: [GRANT], background, ...over,
+          defaultSpecialists: [GRANT], maps: MAPS, background, ...over,
         }),
     ],
   });
@@ -192,7 +196,7 @@ describe('Test a record routes', () => {
     expect(preview.runPreview).not.toHaveBeenCalled();
     expect(pending).toHaveLength(1);
     await pending[0]!();
-    expect(preview.runPreview).toHaveBeenCalledWith(expect.objectContaining({ defaultSpecialists: [GRANT] }), TEST_ID);
+    expect(preview.runPreview).toHaveBeenCalledWith(expect.objectContaining({ defaultSpecialists: [GRANT], maps: MAPS }), TEST_ID);
   });
 
   it('8: the list is passed through', async () => {
@@ -226,7 +230,8 @@ describe.skipIf(!pgLane)('Test a record routes (real Postgres)', () => {
 
   it('6, 7: POST answers 202 at once; GET reads it running, then ready with the plan text, times, consent and words', async () => {
     await tenant();
-    app = await build(t.db);
+    // Every rep active and a made-up San Diego address on the Lead, so the routed offer has times.
+    app = await build(t.db, { clients: async () => recordTestOrg({ users: [...USERS], lead: { ...SD_LEAD_ADDRESS } }).client });
     const res = await post(RT_LEAD);
     expect(res.statusCode).toBe(202);
     const { id } = res.json() as { id: string };

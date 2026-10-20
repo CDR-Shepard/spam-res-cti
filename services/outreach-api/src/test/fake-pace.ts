@@ -1,17 +1,21 @@
 /**
  * Stand-ins for the `ai_call.place` tick tests: a scripted CtiClient and a Salesforce client that answers the record, Task and
- * Event reads (`queryAll`), and the appointment offer's User and busy-calendar reads (`query`, plan 1D).
+ * Event reads (`queryAll`), and the routed offer's reads (`query`): the reps' User and busy Event reads (answered like
+ * Salesforce, through rowsWhere), the seller's consultations, the property address and the Opportunity describe.
  */
 import { createHash } from 'node:crypto';
 import type { AiAvailability, InternalAiCallRequest, InternalAiCallResponse } from '@cti/contracts';
 import { and, eq } from 'drizzle-orm';
 import { schema, type Db } from '@cti/db';
-import type { SalesforceClient } from '@cti/salesforce';
+import type { SalesforceClient, SObjectDescribe } from '@cti/salesforce';
 import type { BrowserTokenOutcome, CtiClient } from '../ai-calls/cti-client.js';
 import { placeDueAiCalls } from '../ai-calls/pace.js';
+import type { MapsClient } from '../appointments/maps.js';
 import { CrmNotConnectedError } from '../crm/client-factory.js';
 import { seedAiCall, seedAiCallRequest } from './ai-call-seed.js';
 import { seedAiCallCampaign } from './call-plan-seed.js';
+import { describeOf } from './fake-sf-client.js';
+import { rowsWhere } from './fake-soql-where.js';
 import { seedConnection, TEST_FIELD_MAP } from './outreach-fixtures.js';
 
 type Row = Record<string, unknown>;
@@ -28,27 +32,61 @@ export interface FakeSfState {
   error: Error | null;
   /** Thrown by the Task and Event queries only when set. */
   activityError: Error | null;
-  /** Plan 1D: what the appointment owner list's User query answers. */
+  /** The User table the offer's User query reads (the region reps and the high-priority rep). */
   users: Row[];
-  /** Plan 1D: the owner's busy Events (the offer's calendar read, not the CF-1 activity check). */
+  /** The reps' Events the offer's busy read keeps (each with its OwnerId; not the CF-1 activity check). */
   busy: Row[];
   /** Thrown by the User query only when set. */
   userError: Error | null;
+  /** The seller's consultation Events (the offer's consultations read), or the error it throws. */
+  consultations: Row[] | Error;
+  /** Fields the offer's record read answers over the default row: the property address. */
+  recordFields: Row;
   soql: string[];
+  /** Every sobject described, in order. */
+  described: string[];
+}
+
+/** An Opportunity describe with the property address fields the offer's record read probes for. */
+const OPPORTUNITY_DESCRIBE: SObjectDescribe = describeOf('Opportunity', [['Id', 'id'], ['Name'], ['Street__c'], ['City__c'], ['State__c'], ['Zipcode__c']]);
+
+const RECORD_READ = /FROM (?:Lead|Opportunity) WHERE Id = '([A-Za-z0-9]{15,18})'/;
+
+/** The default record row for `id` with the test's fields over it; none when the test says Salesforce does not return it. */
+function recordRows(state: FakeSfState, ids: readonly string[], extra: Row = {}): Row[] {
+  return ids.flatMap((id) => {
+    const over = state.records.get(id);
+    if (over === null) return [];
+    return [{ Id: id, Name: 'Pat Seller', OwnerId: '005000000000001AAA', Owner: { Name: 'Rep One' }, LastModifiedDate: '2026-10-01T12:00:00.000+0000', IsConverted: false, MobilePhone: '+15125550100', DoNotCall: false, [CONSENT_FIELD]: true, ...extra, ...over }];
+  });
 }
 
 export function fakePaceSalesforce(): { client: SalesforceClient; state: FakeSfState } {
-  const state: FakeSfState = { records: new Map(), tasks: [], events: [], error: null, activityError: null, users: [], busy: [], userError: null, soql: [] };
+  const state: FakeSfState = {
+    records: new Map(), tasks: [], events: [], error: null, activityError: null, users: [], busy: [], userError: null, consultations: [], recordFields: {}, soql: [], described: [],
+  };
   const client = {
     async query(q: string): Promise<Row[]> {
       state.soql.push(q);
       if (state.error) throw state.error;
+      if (/Subject LIKE '%Consultation%'/.test(q)) {
+        if (state.consultations instanceof Error) throw state.consultations;
+        return state.consultations;
+      }
       if (/ FROM User /.test(q)) {
         if (state.userError) throw state.userError;
-        return state.users;
+        return rowsWhere(q, state.users);
       }
-      if (/ FROM Event /.test(q)) return state.busy;
+      if (/ FROM Event WHERE OwnerId /.test(q)) return rowsWhere(q, state.busy);
+      const record = RECORD_READ.exec(q);
+      if (record) return recordRows(state, [record[1]!], state.recordFields);
       throw new Error(`fakePaceSalesforce: no query route for ${q}`);
+    },
+    async describe(name: string): Promise<SObjectDescribe> {
+      state.described.push(name);
+      if (state.error) throw state.error;
+      if (name !== 'Opportunity') throw new Error(`fakePaceSalesforce: no describe for ${name}`);
+      return OPPORTUNITY_DESCRIBE;
     },
     async queryAll(q: string): Promise<Row[]> {
       state.soql.push(q);
@@ -56,12 +94,7 @@ export function fakePaceSalesforce(): { client: SalesforceClient; state: FakeSfS
       if (state.activityError && / FROM (Task|Event) /.test(q)) throw state.activityError;
       if (/ FROM Task /.test(q)) return state.tasks;
       if (/ FROM Event /.test(q)) return state.events;
-      const ids = [...q.matchAll(/'([A-Za-z0-9]{15,18})'/g)].map((m) => m[1]!);
-      return ids.flatMap((id) => {
-        const over = state.records.get(id);
-        if (over === null) return [];
-        return [{ Id: id, Name: 'Pat Seller', OwnerId: '005000000000001AAA', Owner: { Name: 'Rep One' }, LastModifiedDate: '2026-10-01T12:00:00.000+0000', IsConverted: false, MobilePhone: '+15125550100', DoNotCall: false, [CONSENT_FIELD]: true, ...over }];
-      });
+      return recordRows(state, [...q.matchAll(/'([A-Za-z0-9]{15,18})'/g)].map((m) => m[1]!));
     },
   } as unknown as SalesforceClient;
   return { client, state };
@@ -216,12 +249,16 @@ export interface LogEntry {
  * One tenant with an active ai_call campaign and a Salesforce connection, and `run(now)` for one tick. The tick sees every
  * tenant in the test database; any tenant but this one has no Salesforce here (CrmNotConnectedError), so it is skipped.
  */
-export async function paceHarness(db: Db, settings: Record<string, unknown> = {}, opts: { defaultSpecialists?: readonly string[] } = {}) {
+export async function paceHarness(
+  db: Db,
+  settings: Record<string, unknown> = {},
+  opts: { defaultSpecialists?: readonly string[]; maps?: MapsClient | null } = {},
+) {
   const base = await seedAiCallCampaign(db, 'active');
   await db.update(schema.organizations).set({ settings }).where(eq(schema.organizations.id, base.orgId));
   await seedConnection(db, base.orgId, {
-    ...TEST_FIELD_MAP,
     Lead: { ...TEST_FIELD_MAP.Lead, skipOnDialer: 'Skip_On_Dialer__c', consent: CONSENT_FIELD },
+    Opportunity: { ...TEST_FIELD_MAP.Opportunity, consent: CONSENT_FIELD },
   });
   const sf = fakePaceSalesforce();
   const cti = fakeCti(db);
@@ -239,7 +276,7 @@ export async function paceHarness(db: Db, settings: Record<string, unknown> = {}
   };
   const run = (now: Date) => {
     cti.now = now;
-    return placeDueAiCalls({ db, clients, cti: cti.cti, now, log, clock: () => 0, defaultSpecialists: opts.defaultSpecialists ?? [] });
+    return placeDueAiCalls({ db, clients, cti: cti.cti, now, log, clock: () => 0, defaultSpecialists: opts.defaultSpecialists ?? [], maps: opts.maps ?? null });
   };
   return {
     base,

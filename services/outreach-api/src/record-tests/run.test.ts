@@ -11,8 +11,10 @@ import { collectAiCallResults } from '../ai-calls/results.js';
 import { runWritebacks } from '../writeback/run.js';
 import { ctxOf, seedUser } from '../test/call-plan-seed.js';
 import { validPlan } from '../test/call-plan-fixtures.js';
+import { BLAKE, CHANCE, fakeMaps, SD_LEAD_ADDRESS, SETH, THOMAS, USERS, usersWithInactive } from '../test/fake-offer.js';
 import { fakeCti } from '../test/fake-pace.js';
 import { fakeSfWrites } from '../test/fake-sf-writes.js';
+import { rowsWhere } from '../test/fake-soql-where.js';
 import { seedOrg } from '../test/outreach-fixtures.js';
 import { createTestDb, pgLane } from '../test/pg.js';
 import { RT_LEAD } from '../test/record-test-org.js';
@@ -21,17 +23,28 @@ import { startRecordTestCall } from './run.js';
 import { insertRecordTest, loadRecordTestCalls } from './store.js';
 
 const TEST_NUMBER = '+15125550111';
-/** Tue Oct 6, 9:00 AM PT: the default phone hours leave free times today and tomorrow. */
+/** Tue Oct 6, 9:00 AM PT: the San Diego region leaves free times today and on the next days. */
 const NOW = new Date('2026-10-06T16:00:00.000Z');
+const SD_REPS = [SETH, THOMAS];
+const CONTACT = '0038X00000BcdeFQAR';
+
+type Row = Record<string, unknown>;
+interface OrgOptions {
+  users?: Row[];
+  consultations?: Row[];
+}
 /** The slots cti-api stored on the call (ai_calls.offered_slots): the booked one names its specialist. */
 const OFFERED = [{ id: 'p1', kind: 'phone', start: PHONE_BOOKING.start, end: PHONE_BOOKING.end, specialistSfUserId: GRANT, specialistFirstName: 'Grant', timeZone: 'America/Los_Angeles' }];
 const identityOf = (userId: string, nonce = 'a1b2c3d4e5f6') => `aitest_${userId.replace(/-/g, '')}_${nonce}`;
 
-function readOnlyOrg() {
+/** The offer's reads only: the reps' User rows and calendars, the seller's consultations and a made-up San Diego address. */
+function readOnlyOrg(o: OrgOptions = {}) {
   return fakeSfWrites({
     queries: [
-      [/^SELECT Id, FirstName, Name, IsActive, TimeZoneSidKey FROM User/, [{ Id: GRANT, FirstName: 'Grant', Name: 'Grant Golden', IsActive: true, TimeZoneSidKey: 'America/Los_Angeles' }]],
+      [/Subject LIKE '%Consultation%'/, o.consultations ?? []],
+      [/^SELECT Id, FirstName, Name, IsActive, TimeZoneSidKey FROM User/, (q: string) => rowsWhere(q, o.users ?? USERS)],
       [/^SELECT StartDateTime, EndDateTime, IsAllDayEvent, ActivityDate, OwnerId, Location, Subject FROM Event/, []],
+      [/ FROM Lead WHERE Id = /, [{ Name: 'Pat Seller', OwnerId: '005000000000001AAA', IsConverted: false, ...SD_LEAD_ADDRESS }]],
     ],
   });
 }
@@ -46,17 +59,17 @@ describe.skipIf(!pgLane)('running a record test call (real Postgres)', () => {
     await drop?.();
   });
 
-  async function setup(o: { status?: 'running' | 'ready' | 'failed'; plan?: CallPlan; settings?: Record<string, unknown> } = {}) {
+  async function setup(o: { status?: 'running' | 'ready' | 'failed'; plan?: CallPlan; settings?: Record<string, unknown>; research?: unknown } & OrgOptions = {}) {
     const orgId = await seedOrg(db, o.settings ?? {});
     const admin = await seedUser(db, orgId);
     const testId = await insertRecordTest(db, { orgId, requestedBy: admin, sfObject: 'Lead', sfRecordId: RT_LEAD });
     await db.update(schema.aiRecordTests)
-      .set({ status: o.status ?? 'ready', plan: o.plan ?? validPlan, planText: 'stored text is never sent', name: 'Pat Seller', completedAt: NOW })
+      .set({ status: o.status ?? 'ready', plan: o.plan ?? validPlan, planText: 'stored text is never sent', name: 'Pat Seller', completedAt: NOW, research: o.research ?? null })
       .where(eq(schema.aiRecordTests.id, testId));
     const cti = fakeCti(db);
     cti.available = { available: true, testNumbers: [TEST_NUMBER], browserCalls: true };
-    const sf = readOnlyOrg();
-    const deps = { db, clients: async () => sf.client, cti: cti.cti, now: NOW, log: quiet, defaultSpecialists: [GRANT] };
+    const sf = readOnlyOrg(o);
+    const deps = { db, clients: async () => sf.client, cti: cti.cti, now: NOW, log: quiet, defaultSpecialists: [GRANT], maps: fakeMaps().maps };
     // As requireContext builds it: the tenant is the org row, settings included.
     const [tenant] = await db.select().from(schema.organizations).where(eq(schema.organizations.id, orgId));
     return { orgId, admin, testId, cti, sf, deps, ctx: { ...ctxOf(orgId, admin, true), tenant: tenant! } };
@@ -144,13 +157,13 @@ describe.skipIf(!pgLane)('running a record test call (real Postgres)', () => {
     expect(b.cti.requests).toHaveLength(0);
   });
 
-  it("8: with a specialist named the trigger carries the owner's free times, read only, whatever the switches; nobody named sends none", async () => {
+  it("8: the trigger carries the region's free times, read only, whatever the switches; no active rep and nobody named sends none", async () => {
     const s = await setup();
     await startRecordTestCall(s.deps, s.ctx, s.testId, { mode: 'browser', identity: identityOf(s.admin) });
     const target = s.cti.requests[0]!.target;
     if (target.kind !== 'practice_browser') throw new Error('not a browser target');
     expect(target.slots?.length).toBeGreaterThan(0);
-    expect(target.slots!.every((slot) => slot.specialistSfUserId === GRANT)).toBe(true);
+    expect(target.slots!.every((slot) => slot.region === 'SD' && SD_REPS.includes(slot.specialistSfUserId))).toBe(true);
     expect(s.sf.log.every((entry) => entry === 'query')).toBe(true);
     const booking = {
       enabled: false, specialists: [GRANT], convertLeads: true, days: [1, 2, 3, 4, 5],
@@ -163,10 +176,28 @@ describe.skipIf(!pgLane)('running a record test call (real Postgres)', () => {
     const offTarget = off.cti.requests[0]!.target;
     if (offTarget.kind !== 'practice') throw new Error('not a practice target');
     expect(offTarget.slots?.length).toBeGreaterThan(0);
-    expect(offTarget.slots!.every((slot) => slot.specialistSfUserId === GRANT)).toBe(true);
-    const nobody = await setup({ settings: { aiCallBooking: { ...booking, enabled: true, specialists: [] } } });
+    expect(offTarget.slots!.every((slot) => SD_REPS.includes(slot.specialistSfUserId))).toBe(true);
+    const nobody = await setup({ settings: { aiCallBooking: { ...booking, enabled: true, specialists: [] } }, users: usersWithInactive(CHANCE, BLAKE, SETH, THOMAS) });
     await startRecordTestCall({ ...nobody.deps, defaultSpecialists: [] }, nobody.ctx, nobody.testId, { mode: 'phone', to: TEST_NUMBER });
     expect(nobody.cti.requests[0]!.target).not.toHaveProperty('slots');
+    expect(nobody.cti.requests[0]!.target).not.toHaveProperty('priority');
+  });
+
+  it('8b: the trigger carries the seller\'s consultations, read from the record and the records its research found, and Grant\'s high-priority offer', async () => {
+    const research = { records: [{ relation: 'converted_contact', sfObject: 'Contact', id: CONTACT, role: null, fields: [] }] };
+    const s = await setup({ research, consultations: [{ StartDateTime: '2026-03-12T17:00:00.000+0000', Subject: 'Property Consultation', Owner: { Name: 'Blake Person' } }] });
+    await startRecordTestCall(s.deps, s.ctx, s.testId, { mode: 'phone', to: TEST_NUMBER });
+    const target = s.cti.requests[0]!.target;
+    if (target.kind !== 'practice') throw new Error('not a practice target');
+    expect(target.context).toEqual({
+      returning: false,
+      consultations: { last: { start: '2026-03-12T17:00:00.000Z', kind: 'in_person', ownerName: 'Blake Person' }, next: null },
+    });
+    // Wednesday 09:00 PDT: the next booking day after Tuesday.
+    expect(target.priority).toEqual({ specialistSfUserId: GRANT, specialistFirstName: 'Grant', timeZone: 'America/Los_Angeles', defaultStart: '2026-10-07T16:00:00.000Z' });
+    const consultationsRead = s.sf.soql.find((q) => /Subject LIKE '%Consultation%'/.test(q))!;
+    expect(consultationsRead).toContain(RT_LEAD);
+    expect(consultationsRead).toContain(CONTACT);
   });
 
   it('9: a transport failure (or a 409) is cti_unreachable and the row keeps a null result', async () => {

@@ -17,6 +17,7 @@ import { DescribeCache } from '../research/describe.js';
 import { ResearchSnapshot } from '../research/snapshot.js';
 import { validPlan } from '../test/call-plan-fixtures.js';
 import { seedUser } from '../test/call-plan-seed.js';
+import { fakeMaps, SD_LEAD_ADDRESS, SETH, THOMAS, USERS } from '../test/fake-offer.js';
 import { seedConnection, seedOrg } from '../test/outreach-fixtures.js';
 import { createTestDb, pgLane } from '../test/pg.js';
 import { FEBRUARY_CALL, recordTestOrg, RT_FIELD_MAP, RT_LEAD, RT_OPP } from '../test/record-test-org.js';
@@ -24,13 +25,15 @@ import { GRANT, quiet } from '../test/writeback-harness.js';
 import { runPreview, type PreviewDeps } from './preview.js';
 import { insertRecordTest, loadRecordTest, toRecordTest } from './store.js';
 
-/** Tue Oct 6, 9:00 AM PT: the default phone hours leave free times today and tomorrow. */
+/** Tue Oct 6, 9:00 AM PT: the San Diego region leaves free times today and on the next days. */
 const NOW = new Date('2026-10-06T16:00:00.000Z');
 const MODEL = 'claude-sonnet-5-5';
 const LEAD = RT_LEAD;
 const OPP = RT_OPP;
 const FIELD_MAP = RT_FIELD_MAP;
 const salesforce = recordTestOrg;
+/** Every rep and Grant active, and the Lead at a made-up San Diego address: the routed offer has times. */
+const routedOrg = () => recordTestOrg({ users: [...USERS], lead: { ...SD_LEAD_ADDRESS } });
 
 type FakeModel = CallPlanModel & { plan: ReturnType<typeof vi.fn> };
 const fakeModel = (plan: CallPlan = validPlan): FakeModel => ({
@@ -58,7 +61,7 @@ describe.skipIf(!pgLane)('runPreview (real Postgres)', () => {
     return { orgId, admin, testId };
   }
   const deps = (sf: { client: SalesforceClient }, model: CallPlanModel, over: Partial<PreviewDeps> = {}): PreviewDeps => ({
-    db, clients: async () => sf.client, model, describes: new DescribeCache(), now: () => NOW, log: quiet, defaultSpecialists: [GRANT], ...over,
+    db, clients: async () => sf.client, model, describes: new DescribeCache(), now: () => NOW, log: quiet, defaultSpecialists: [GRANT], maps: fakeMaps().maps, ...over,
   });
   const stored = async (id: string) => (await db.select().from(schema.aiRecordTests).where(eq(schema.aiRecordTests.id, id)))[0]!;
   const orgCount = async (table: string, orgId: string) =>
@@ -97,12 +100,15 @@ describe.skipIf(!pgLane)('runPreview (real Postgres)', () => {
     expect(ResearchSnapshot.parse(row.research).consent).toBe('no');
   });
 
-  it('3: a specialist with free time (booking and write-back at their 1D defaults, off): the times, their owner, and no note', async () => {
+  it('3: the region\'s reps with free time (booking and write-back at their 1D defaults, off): the times, the first one\'s rep, and no note', async () => {
     const t = await tenant();
-    await runPreview(deps(salesforce(), fakeModel()), t.testId);
+    await runPreview(deps(routedOrg(), fakeModel()), t.testId);
     const row = await stored(t.testId);
-    expect((row.slots as unknown[]).length).toBeGreaterThan(0);
-    expect(row.ownerSfUserId).toBe(GRANT);
+    const slots = row.slots as Array<{ region?: string; specialistSfUserId: string }>;
+    expect(slots.length).toBeGreaterThan(0);
+    expect(slots.every((s) => s.region === 'SD')).toBe(true);
+    expect(row.ownerSfUserId).toBe(slots[0]!.specialistSfUserId);
+    expect([SETH, THOMAS]).toContain(row.ownerSfUserId);
     expect(row.offerNote).toBeNull();
   });
 
@@ -113,17 +119,23 @@ describe.skipIf(!pgLane)('runPreview (real Postgres)', () => {
       walkthrough: { enabled: true, durationMinutes: 60, startHour: 9, endHour: 17, stepMinutes: 60, minLeadMinutes: 1200, horizonBusinessDays: 5, bufferMinutes: 30, maxOffered: 6 },
     };
     const t = await tenant({ settings: { aiCallBooking: booking, aiCallWriteback: false } });
-    await runPreview(deps(salesforce(), fakeModel(), { defaultSpecialists: [] }), t.testId);
+    await runPreview(deps(routedOrg(), fakeModel(), { defaultSpecialists: [] }), t.testId);
     const row = await stored(t.testId);
     expect((row.slots as unknown[]).length).toBeGreaterThan(0);
-    expect(row).toMatchObject({ ownerSfUserId: GRANT, offerNote: null });
+    expect([SETH, THOMAS]).toContain(row.ownerSfUserId);
+    expect(row.offerNote).toBeNull();
   });
 
-  it('3b: nobody on the appointment list: no times and the note, still ready', async () => {
+  it('3b: no active rep for the region and nobody on the list: no times and the note, still ready', async () => {
     const t = await tenant();
-    await runPreview(deps(salesforce(), fakeModel(), { defaultSpecialists: [] }), t.testId);
-    // R2: booking is active while a region has a rep, so the empty list now reaches the owner lookup and says no_owner.
-    expect(await stored(t.testId)).toMatchObject({ status: 'ready', slots: [], offerNote: 'no_owner', ownerSfUserId: null });
+    await runPreview(deps(salesforce({ lead: { ...SD_LEAD_ADDRESS } }), fakeModel(), { defaultSpecialists: [] }), t.testId);
+    expect(await stored(t.testId)).toMatchObject({ status: 'ready', slots: [], offerNote: 'no_reps', ownerSfUserId: null });
+  });
+
+  it('3c: a record with no property address: no times and the note, still ready', async () => {
+    const t = await tenant();
+    await runPreview(deps(recordTestOrg({ users: [...USERS] }), fakeModel()), t.testId);
+    expect(await stored(t.testId)).toMatchObject({ status: 'ready', slots: [], offerNote: 'no_address', ownerSfUserId: null });
   });
 
   it('4 (G-5): plan text the agent may not get is stored as null with its words, and the preview is still ready', async () => {

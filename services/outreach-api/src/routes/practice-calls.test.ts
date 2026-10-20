@@ -3,8 +3,12 @@ import type { FastifyInstance } from 'fastify';
 import type { CtiClient } from '../ai-calls/cti-client.js';
 import type { PracticeError } from '../ai-calls/practice.js';
 import { buildApp } from '../app.js';
+import { fakeMaps } from '../test/fake-offer.js';
 import { fakeDb, testConfig } from '../test/harness.js';
 import { registerPracticeCallRoutes } from './practice-calls.js';
+
+/** The server's one Google Maps client: the route hands it to startPractice. */
+const MAPS = fakeMaps().maps;
 
 const state = vi.hoisted(() => ({ session: null as Record<string, unknown> | null }));
 vi.mock('@cti/auth', async (importOriginal) => ({
@@ -36,7 +40,7 @@ async function build(c: CtiClient | null, campaign: Record<string, unknown> | nu
   return buildApp({
     cfg: testConfig(),
     readiness: async () => ({ dbOk: true, jobsOk: true }),
-    apiRoutes: [(scope) => registerPracticeCallRoutes(scope, { db, clients: async () => { throw new Error('unused'); }, cti: c, defaultSpecialists: [] })],
+    apiRoutes: [(scope) => registerPracticeCallRoutes(scope, { db, clients: async () => { throw new Error('unused'); }, cti: c, defaultSpecialists: [], maps: MAPS })],
   });
 }
 const post = (payload: unknown = { version: 2, to: '+15125550111' }, id = ENROLLMENT_ID) =>
@@ -70,7 +74,7 @@ describe('practice call routes', () => {
     expect(res.statusCode).toBe(200);
     expect(res.json()).toEqual({ result: 'placed', aiCallId: '55555555-5555-4555-8555-555555555555' });
     expect(practice.startPractice).toHaveBeenCalledWith(
-      expect.objectContaining({ cti, defaultSpecialists: [] }),
+      expect.objectContaining({ cti, defaultSpecialists: [], maps: MAPS }),
       expect.objectContaining({ orgId: 'O1' }),
       ENROLLMENT_ID,
       { version: 2, to: '+15125550111' },

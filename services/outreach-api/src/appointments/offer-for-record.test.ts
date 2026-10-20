@@ -4,8 +4,8 @@ import { SalesforceApiError } from '@cti/salesforce';
 import { DEFAULT_AI_CALL_BOOKING, DEFAULT_BOOKING_ROUTING } from '../settings.js';
 import { fakeBookedDb, fakeMaps, GRANT, offerSalesforce, SETH, THOMAS, usersWithInactive } from '../test/fake-offer.js';
 import { describeOf, type QueryRoute } from '../test/fake-sf-client.js';
-import { readOfferCalendars, type OfferCalendars } from './offer.js';
-import { offerForRecord, type RecordOfferInput } from './offer-for-record.js';
+import { noOffer, readOfferCalendars, type Offer, type OfferCalendars } from './offer.js';
+import { offerForRecord, offerTargetFields, researchAround, type RecordOfferInput } from './offer-for-record.js';
 
 type Row = Record<string, unknown>;
 
@@ -148,5 +148,57 @@ describe('offerForRecord', () => {
     };
     const { offer } = await offerForRecord(deps, { orgId: ORG, booking: booking(), now: NOW, record: { sfObject: 'Lead', sfRecordId: LEAD }, around: [] });
     expect(offer.note).toBe('salesforce_error');
+  });
+});
+
+describe('researchAround', () => {
+  it('is the snapshot\'s records as sfObject and id, in order, and nothing else of them', () => {
+    const snapshot = {
+      version: 1,
+      records: [
+        { relation: 'self', sfObject: 'Lead', id: LEAD, role: null, fields: [{ name: 'Street', label: 'Street', value: '123 Palm Ave' }] },
+        { relation: 'converted_contact', sfObject: 'Contact', id: CONTACT, role: null, fields: [] },
+        { relation: 'converted_opportunity', sfObject: 'Opportunity', id: OPP, role: null, fields: [] },
+      ],
+    };
+    expect(researchAround(snapshot)).toEqual([
+      { sfObject: 'Lead', id: LEAD },
+      { sfObject: 'Contact', id: CONTACT },
+      { sfObject: 'Opportunity', id: OPP },
+    ]);
+  });
+
+  it('is empty when the snapshot does not have that shape', () => {
+    for (const snapshot of [null, undefined, 'x', {}, { records: 'x' }, { records: [{ sfObject: 'Lead' }] }, { records: [{ sfObject: 1, id: LEAD }] }]) {
+      expect(researchAround(snapshot)).toEqual([]);
+    }
+  });
+});
+
+describe('offerTargetFields', () => {
+  const slot = {
+    id: 'w1', kind: 'walkthrough' as const, start: '2026-10-20T19:00:00.000Z', end: '2026-10-20T20:00:00.000Z',
+    specialistSfUserId: SETH, specialistFirstName: 'Seth', timeZone: 'America/Los_Angeles', region: 'SD',
+  };
+  const priority = { specialistSfUserId: GRANT, specialistFirstName: 'Grant', timeZone: 'America/Los_Angeles', defaultStart: '2026-10-20T16:00:00.000Z' };
+  const consultations = { last: { start: '2026-10-01T17:00:00.000Z', kind: 'in_person' as const, ownerName: 'Seth Person' }, next: null };
+  const offer = (over: Partial<Offer> = {}): Offer => ({ slots: [slot], priority, region: 'SD', ownerSfUserId: SETH, note: null, ...over });
+
+  it('carries the consultations, the slots and the priority offer', () => {
+    expect(offerTargetFields(true, { offer: offer(), consultations })).toEqual({ context: { returning: true, consultations }, slots: [slot], priority });
+  });
+
+  it('a note never hides the priority offer (no_reps with Grant): priority and no slots key', () => {
+    const fields = offerTargetFields(false, { offer: { ...noOffer('no_reps', 'SD'), priority }, consultations });
+    expect(fields).toEqual({ context: { returning: false, consultations }, priority });
+    expect('slots' in fields).toBe(false);
+  });
+
+  it('consultations that could not be read, no slots and no priority: the returning flag alone', () => {
+    expect(offerTargetFields(false, { offer: noOffer('salesforce_error'), consultations: null })).toEqual({ context: { returning: false } });
+  });
+
+  it('nothing offered (a kept key re-sent): the returning flag alone', () => {
+    expect(offerTargetFields(true, null)).toEqual({ context: { returning: true } });
   });
 });

@@ -8,6 +8,7 @@ import { PracticeCallRequest } from '@cti/contracts';
 import type { Db } from '@cti/db';
 import type { CtiClient } from '../ai-calls/cti-client.js';
 import { listPracticeCalls, startPractice, type PracticeError } from '../ai-calls/practice.js';
+import type { MapsClient } from '../appointments/maps.js';
 import { DECISION_WORDS } from '../call-plans/decisions.js';
 import type { SalesforceClientFactory } from '../crm/client-factory.js';
 import { sendError } from '../http/errors.js';
@@ -20,8 +21,10 @@ export interface PracticeRouteDeps {
   db: Db;
   clients: SalesforceClientFactory;
   cti: CtiClient | null;
-  /** AI_CALL_DEFAULT_SPECIALISTS (the offer's appointment owner list when a tenant saved none). */
+  /** AI_CALL_DEFAULT_SPECIALISTS (the specialists list when a tenant saved none). */
   defaultSpecialists: readonly string[];
+  /** The server's Google Maps client for the routed offer; null without GOOGLE_MAPS_API_KEY. */
+  maps: MapsClient | null;
   now?: () => Date;
 }
 
@@ -44,7 +47,7 @@ function sendPracticeError(reply: FastifyReply, error: PracticeError, words: rea
 }
 
 export async function registerPracticeCallRoutes(app: FastifyInstance, deps: PracticeRouteDeps): Promise<void> {
-  const { db, clients, cti, defaultSpecialists } = deps;
+  const { db, clients, cti, defaultSpecialists, maps } = deps;
   const now = deps.now ?? (() => new Date());
 
   app.post('/call-plans/:enrollmentId/practice', async (req, reply) => {
@@ -55,7 +58,7 @@ export async function registerPracticeCallRoutes(app: FastifyInstance, deps: Pra
     const body = PracticeCallRequest.safeParse(req.body ?? {});
     if (!body.success) return sendError(reply, 400, 'INVALID_BODY', 'Pick a plan version and one of the test numbers.');
     if (!cti) return sendError(reply, 503, 'AI_CALLS_NOT_CONFIGURED', 'AI calls are not set up on this server yet.');
-    const out = await startPractice({ db, clients, cti, now: now(), log: req.log, defaultSpecialists }, ctx, params.data.enrollmentId, body.data);
+    const out = await startPractice({ db, clients, cti, now: now(), log: req.log, defaultSpecialists, maps }, ctx, params.data.enrollmentId, body.data);
     if (!out.ok) return sendPracticeError(reply, out.error, out.words);
     return out.response;
   });

@@ -36,6 +36,8 @@ export const SD_PROPERTY = '123 Palm Ave, San Diego, CA 92101';
 export const OC_PROPERTY = '456 Fake Oak Ave, Irvine, CA 92614';
 export const IMPERIAL_PROPERTY = '789 Desert Rd, El Centro, CA 92243';
 export const SD_CITY_ONLY = 'San Diego, CA';
+/** SD_PROPERTY split as a Lead holds it (the record read joins it back to SD_PROPERTY). */
+export const SD_LEAD_ADDRESS: Readonly<Row> = { Street: '123 Palm Ave', City: 'San Diego', State: 'CA', PostalCode: '92101' };
 export const ANAHEIM = '100 Main St, Anaheim, CA 92805';
 
 const at = (lat: number, lng: number, county: string): Geocoded => ({ point: { lat, lng }, county, state: 'CA' });
