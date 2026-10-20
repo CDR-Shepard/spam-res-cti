@@ -58,6 +58,12 @@ export function createVoicemailAudio(o: VoicemailAudioOptions): VoicemailAudio {
   /** By call id; insertion order is age, so the first key is the oldest. */
   const held = new Map<string, Held>();
   const callOf = new Map<string, string>();
+  /**
+   * Renders run one at a time: the ElevenLabs account also speaks the live calls (AI_VOICE_TTS=elevenlabs), whose
+   * requests a burst of renders must not crowd out. A render takes ~3 s and a phone rings for longer, so a short queue
+   * is still ready by the beep; one that isn't gets `<Say>`.
+   */
+  let lastRender: Promise<void> = Promise.resolve();
 
   const forget = (aiCallId: string): void => {
     const cur = held.get(aiCallId);
@@ -81,6 +87,7 @@ export function createVoicemailAudio(o: VoicemailAudioOptions): VoicemailAudio {
     const token = randomBytes(32).toString('hex');
     const startedAt = Date.now();
     const finish = async (): Promise<void> => {
+      if (held.get(aiCallId)?.token !== token) return; // the call ended (or was dropped) while queued: nothing to render
       let wav: Buffer;
       try {
         wav = await o.render(text);
@@ -93,11 +100,10 @@ export function createVoicemailAudio(o: VoicemailAudioOptions): VoicemailAudio {
       settle(aiCallId, token, { state: 'ready', wav });
       o.log.info({ aiCallId, ms: Date.now() - startedAt, bytes: wav.length }, 'ai-voice: voicemail audio ready');
     };
-    // The entry is set below before `finish` runs (a microtask later). Only a throwing logger can reach the catch, after
-    // the entry is settled: there is nowhere left to report it, and the beep must not see it.
-    const done = Promise.resolve()
-      .then(finish)
-      .catch(() => {});
+    // The entry is set below before `finish` runs (a microtask later at the earliest). Only a throwing logger can reach
+    // the catch, after the entry is settled: there is nowhere left to report it, and the beep must not see it.
+    const done = lastRender.then(finish).catch(() => {});
+    lastRender = done;
     const timer = setTimeout(() => forget(aiCallId), o.ttlMs);
     timer.unref?.();
     held.set(aiCallId, { text, token, state: 'pending', wav: null, done, timer });
@@ -122,16 +128,19 @@ export function createVoicemailAudio(o: VoicemailAudioOptions): VoicemailAudio {
         o.log.error({ aiCallId, err: errText(e) }, 'ai-voice: voicemail audio could not start — the call will use <Say>');
       }
     },
+    // The beep comes once: whatever it does not take is dropped, so a render it gave up on is never sent (or kept).
     async playUrl(aiCallId, text, waitMs = VOICEMAIL_READY_WAIT_MS) {
       const first = held.get(aiCallId);
       if (!first || first.text !== text) {
         o.log.info({ aiCallId, reason: first ? 'other_text' : 'none' }, 'ai-voice: voicemail audio not used');
+        forget(aiCallId);
         return null;
       }
       if (first.state === 'pending') await within(first.done, waitMs);
       const now = held.get(aiCallId);
       if (now?.token === first.token && now.state === 'ready') return `${o.apiPublicUrl}${VOICEMAIL_AUDIO_PATH}/${now.token}`;
       o.log.info({ aiCallId, reason: now?.state ?? 'expired' }, 'ai-voice: voicemail audio not used');
+      if (now?.token === first.token) forget(aiCallId);
       return null;
     },
     wav(token) {

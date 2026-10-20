@@ -163,11 +163,13 @@ describe('createVoicemailAudio — each call’s voicemail audio, held in memory
   });
 
   it('forget during a render: the late result is not brought back', async () => {
-    const d = deferred<Buffer>();
-    render.mockReturnValueOnce(d.promise);
+    const first = deferred<Buffer>();
+    render.mockReturnValueOnce(first.promise);
     audio.prepare(A, TEXT);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(render).toHaveBeenCalledTimes(1); // in flight
     audio.forget(A);
-    d.resolve(WAV_A);
+    first.resolve(WAV_A);
     await vi.advanceTimersByTimeAsync(0);
     expect(await audio.playUrl(A, TEXT, 0)).toBeNull();
   });
@@ -190,28 +192,56 @@ describe('createVoicemailAudio — each call’s voicemail audio, held in memory
 
   it('a stale render finishing late never lands on a newer entry for the same call', async () => {
     const first = deferred<Buffer>();
-    render.mockReturnValueOnce(first.promise);
-    audio.prepare(A, TEXT);
-    await vi.advanceTimersByTimeAsync(TTL_MS); // the first entry expires while its render is running
-    render.mockResolvedValueOnce(WAV_B);
+    render.mockReturnValueOnce(first.promise).mockReturnValueOnce(deferred<Buffer>().promise);
     audio.prepare(A, TEXT);
     await vi.advanceTimersByTimeAsync(0);
-    first.resolve(WAV_A);
+    expect(render).toHaveBeenCalledTimes(1); // the first render is in flight
+    audio.forget(A);
+    audio.prepare(A, TEXT); // the same call again: a new entry, its render queued behind the first
+    first.resolve(WAV_A); // the stale render lands; the new one is still running
     await vi.advanceTimersByTimeAsync(0);
-    const url = await audio.playUrl(A, TEXT, 0);
-    expect(audio.wav(tokenOf(url!))).toEqual(WAV_B);
+    expect(render).toHaveBeenCalledTimes(2);
+    const peek = audio.playUrl(A, TEXT, 0);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(await peek).toBeNull(); // never the stale audio
   });
 
   it('a beep waiting on a render whose entry is dropped meanwhile gets null, never the old audio', async () => {
     const small = make(1);
     const first = deferred<Buffer>();
-    render.mockReturnValueOnce(first.promise);
+    render.mockReturnValueOnce(first.promise).mockResolvedValueOnce(WAV_B);
     small.prepare(A, TEXT);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(render).toHaveBeenCalledTimes(1); // A's render is in flight
     const url = small.playUrl(A, TEXT, 1_500);
-    render.mockResolvedValueOnce(WAV_B);
     small.prepare(B, TEXT); // drops A (maxHeld 1)
     first.resolve(WAV_A);
     expect(await url).toBeNull();
+  });
+
+  it('a call forgotten and prepared again while queued renders once, for the new entry', async () => {
+    const first = deferred<Buffer>();
+    render.mockReturnValueOnce(first.promise).mockResolvedValue(WAV_B);
+    audio.prepare(A, TEXT);
+    audio.prepare(B, TEXT); // queued behind A
+    audio.forget(B);
+    audio.prepare(B, TEXT); // queued again: a new entry
+    first.resolve(WAV_A);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(render).toHaveBeenCalledTimes(2);
+  });
+
+  it('what the beep did not take is dropped: a render it gave up on is never sent', async () => {
+    const first = deferred<Buffer>();
+    render.mockReturnValueOnce(first.promise);
+    audio.prepare(A, TEXT);
+    audio.prepare(B, TEXT); // queued behind A
+    const url = audio.playUrl(B, TEXT, 0);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(await url).toBeNull(); // B's beep came first: it gets <Say>
+    first.resolve(WAV_A);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(render).toHaveBeenCalledTimes(1);
   });
 
   it("a dropped entry's own timer does not cut short the same call prepared again", async () => {
@@ -231,6 +261,39 @@ describe('createVoicemailAudio — each call’s voicemail audio, held in memory
     audio.prepare(A, TEXT);
     await audio.playUrl(A, TEXT, 1_500);
     expect(vi.getTimerCount()).toBe(1);
+  });
+
+  it('renders one voicemail at a time (ElevenLabs also speaks the live calls)', async () => {
+    const first = deferred<Buffer>();
+    render.mockReturnValueOnce(first.promise).mockResolvedValueOnce(WAV_B);
+    audio.prepare(A, TEXT);
+    audio.prepare(B, `${TEXT} B`);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(render).toHaveBeenCalledTimes(1);
+    first.resolve(WAV_A);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(render).toHaveBeenCalledTimes(2);
+    expect(render).toHaveBeenLastCalledWith(`${TEXT} B`);
+    expect(await audio.playUrl(B, `${TEXT} B`, 0)).toMatch(URL_RE);
+  });
+
+  it('a queued render whose call ended before its turn is never sent (no credits for nothing)', async () => {
+    const first = deferred<Buffer>();
+    render.mockReturnValueOnce(first.promise);
+    audio.prepare(A, TEXT);
+    audio.prepare(B, TEXT);
+    audio.forget(B);
+    first.resolve(WAV_A);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(render).toHaveBeenCalledTimes(1);
+  });
+
+  it('a failed render does not hold up the next one', async () => {
+    render.mockRejectedValueOnce(new Error('ElevenLabs voicemail 500')).mockResolvedValueOnce(WAV_B);
+    audio.prepare(A, TEXT);
+    audio.prepare(B, TEXT);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(await audio.playUrl(B, TEXT, 0)).toMatch(URL_RE);
   });
 
   it('two calls never share audio', async () => {
