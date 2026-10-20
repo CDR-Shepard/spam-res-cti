@@ -15,6 +15,7 @@ export * from './agent-plan-text.js';
 export * from './agent-prompts.js';
 export * from './call-subjects.js';
 export * from './contact-words.js';
+export * from './conversations.js';
 export * from './record-tests.js';
 export * from './testing.js';
 export * from './version.js';

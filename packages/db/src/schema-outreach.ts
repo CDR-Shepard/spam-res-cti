@@ -423,3 +423,6 @@ export * from './schema-outreach-ai-prompts.js';
 
 // Test phones (migration 0061): the per-org list of phones that get the AI agent on an inbound call.
 export * from './schema-outreach-ai-test-phones.js';
+
+// Sam's email channel and the per-seller conversation (migration 0062): conversations, timeline events, the email outbox, suppressions and Resend webhooks.
+export * from './schema-outreach-conversations.js';
