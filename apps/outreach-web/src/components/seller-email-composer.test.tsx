@@ -6,6 +6,7 @@ import type { EmailBlock } from '@cti/contracts';
 import { renderWithProviders } from '../test/render';
 import { SELLER_ID } from '../test/seller-fixtures';
 import { respond, stubApi } from '../test/stub-api';
+import { PREVIEW_WORDS } from '../lib/seller-words';
 import { SellerEmailComposer } from './seller-email-composer';
 
 afterEach(() => vi.unstubAllGlobals());
@@ -256,11 +257,28 @@ describe('SellerEmailComposer: when Sam may not email', () => {
     expect(await screen.findByRole('status')).toHaveTextContent('Practice copy queued for admin@gg.co.');
   });
 
-  it.each(['paused', 'disabled', 'not_configured'] as const)('%s (the switch or the server setup) turns off both, with the words shown once', (block) => {
-    open(block);
+  it('not_configured (the server setup) turns off both, with the words shown once', () => {
+    open('not_configured');
     expect(screen.getByRole('button', { name: 'Write draft' })).toBeDisabled();
     expect(screen.getByRole('button', { name: PRACTICE })).toBeDisabled();
-    expect(screen.getAllByText(/^(Email from Sam is paused after a spam complaint|Email from Sam is turned off|Email is not set up on this server yet)$/)).toHaveLength(1);
+    expect(screen.getAllByText('Email is not set up on this server yet')).toHaveLength(1);
+    expect(screen.queryByText(PREVIEW_WORDS)).not.toBeInTheDocument();
+  });
+
+  it.each([
+    ['disabled', 'Email from Sam is turned off'],
+    ['paused', 'Email from Sam is paused after a spam complaint'],
+  ] as const)('%s (the switch): Write draft still shows what Sam would send, and its Send stays off (owner, 2026-10-20)', async (block, words) => {
+    const calls = stubApi({ [DRAFT]: draftBody });
+    open(block);
+    expect(screen.getByRole('button', { name: PRACTICE })).toBeDisabled();
+    expect(screen.getByText(words)).toBeInTheDocument();
+    expect(screen.getByText(PREVIEW_WORDS)).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: 'Write draft' }));
+    expect(await screen.findByLabelText('Body')).toHaveValue(draftBody.body);
+    expect(calls[0]).toEqual({ url: `${BASE}/email/draft`, method: 'POST', body: { practice: false } });
+    expect(screen.getByRole('button', { name: 'Send' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Send' })).toHaveAccessibleDescription(words);
   });
 
   it('a block that turns up while a real draft is open turns its Send off with the words; Discard then leaves only the practice copy', async () => {

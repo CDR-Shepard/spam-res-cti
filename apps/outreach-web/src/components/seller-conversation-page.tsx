@@ -8,7 +8,7 @@ import { Button } from '@/components/ui/button';
 import { useAuth } from '@/lib/auth';
 import { getSellerConversation, outreachKeys, setSellerHandler } from '@/lib/outreach-api';
 import { errorText } from '@/lib/outreach-words';
-import { EMAIL_BLOCK_WORDS, practiceAllowed, sellerStatus } from '@/lib/seller-words';
+import { EMAIL_BLOCK_WORDS, isSwitchBlock, practiceAllowed, sellerStatus } from '@/lib/seller-words';
 import { SellerEmailComposer } from './seller-email-composer';
 import { SellerTimeline } from './seller-timeline';
 
@@ -47,7 +47,10 @@ export function SellerConversationPage({ sfRecordId, focusEventId = null }: { sf
           <>
             {view.mayChangeHandler && <HandoverButton view={view} busy={handover.isPending} onChange={(handler) => handover.mutate(handler)} />}
             {isAdmin && (
-              <Button size="sm" disabled={!view.mayEmail} aria-describedby={block ? blockId : undefined} onClick={() => setComposing(true)}>Email from Sam</Button>
+              // With only the switch in the way, the button opens the composer to read Sam's draft; its Send stays off.
+              <Button size="sm" disabled={!view.mayEmail && !isSwitchBlock(block)} aria-describedby={block ? blockId : undefined} onClick={() => setComposing(true)}>
+                {isSwitchBlock(block) ? "Preview Sam's email" : 'Email from Sam'}
+              </Button>
             )}
             {/* A seller block keeps the real email off but not the practice copy (it goes only to the admin); the composer has it too once open. */}
             {isAdmin && block !== null && practiceAllowed(block) && !composing && (

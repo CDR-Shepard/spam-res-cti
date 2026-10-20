@@ -47,6 +47,17 @@ export const EMAIL_BLOCK_WORDS: Record<EmailBlock, string> = {
   daily_cap: 'Sam already sent 3 emails today',
 };
 
+/**
+ * The tenant's switch, off or paused: it stops every send but never a draft, so an admin can read what Sam would send before
+ * turning email on (owner, 2026-10-20). The server skips it for drafts too (seller-view.ts BlockUse).
+ */
+const SWITCH_BLOCKS: ReadonlySet<EmailBlock> = new Set<EmailBlock>(['disabled', 'paused']);
+
+export const isSwitchBlock = (block: EmailBlock | null): boolean => block !== null && SWITCH_BLOCKS.has(block);
+
+/** Shown with the switch's words when Sam's draft can still be read. */
+export const PREVIEW_WORDS = 'Sam can still write a draft for you to read. Nothing is sent while email is off.';
+
 /** The blocks that stop a practice copy too: the server has no email setup, or the tenant's switch is off or paused. */
 const PRACTICE_BLOCKS: ReadonlySet<EmailBlock> = new Set<EmailBlock>(['not_configured', 'disabled', 'paused']);
 

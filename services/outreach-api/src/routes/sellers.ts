@@ -6,7 +6,9 @@
  * Who may do what: the record's owner in Salesforce or an admin sees the page and changes the handler (the same
  * rule as Needs Review and call plans, tenancy/record-owner.ts); only admins draft and send. A PRACTICE draft or
  * send is the same email to the admin's own sign-in address, on the admin's own practice conversation: the seller's
- * blocks do not apply (nothing reaches the seller), the server setup and the tenant's switch do.
+ * blocks do not apply (nothing reaches the seller), the server setup and the tenant's switch do. A DRAFT, real or
+ * practice, is only shown to the admin, so the switch (off or paused) never stops it: an admin can read what Sam would
+ * send before turning email on (owner, 2026-10-20). Only a send needs the switch on.
  *
  * The send queues; it never sends. When the email is due, the send tick (email/send.ts, outbox.ts `sendBlock`) checks
  * again: the tenant's switch and pause, that the seller still has a call plan a person approved and an open record,
@@ -32,6 +34,7 @@ import {
   practiceEmailBlock,
   realConversation,
   sellerEmailBlock,
+  type BlockUse,
   type EmailSetup,
   type SellerRecord,
 } from '../conversations/seller-view.js';
@@ -111,13 +114,16 @@ export async function registerSellerRoutes(app: FastifyInstance, deps: SellerRou
   const view = (s: Loaded<unknown>) =>
     conversationView(db, setupOf(s.ctx), { orgId: s.ctx.orgId, record: s.record, isAdmin: isAdmin(s.ctx), mayChangeHandler: true });
 
-  /** The seller's address after every block (a real email), or the admin's own address after the setup checks (practice). */
-  async function target(s: Loaded<unknown>, practice: boolean): Promise<Target> {
+  /**
+   * The seller's address after every block (a real email), or the admin's own address after the setup checks (practice).
+   * `use` 'draft' skips the tenant's switch (BlockUse).
+   */
+  async function target(s: Loaded<unknown>, practice: boolean, use: BlockUse): Promise<Target> {
     const setup = setupOf(s.ctx);
     const to = practice ? await ownAddress(db, s.ctx.session.userId) : s.record.address;
     const block = practice
-      ? practiceEmailBlock(setup, to)
-      : await sellerEmailBlock(db, setup, { orgId: s.ctx.orgId, record: s.record, conversation: await realConversation(db, s.ctx.orgId, s.record.id) });
+      ? practiceEmailBlock(setup, to, use)
+      : await sellerEmailBlock(db, setup, { orgId: s.ctx.orgId, record: s.record, conversation: await realConversation(db, s.ctx.orgId, s.record.id) }, use);
     // A null writer or address is already a block (not_configured, no_address); the second test only narrows the types.
     if (block !== null || writer === null || to === null) return { block: block ?? 'not_configured' };
     return { to, writer };
@@ -142,7 +148,7 @@ export async function registerSellerRoutes(app: FastifyInstance, deps: SellerRou
   app.post('/sellers/:sfRecordId/email/draft', async (req, reply) => {
     const s = await load(req, reply, { adminOnly: true, body: EmailDraftRequest });
     if (!s) return reply;
-    const t = await target(s, s.body.practice);
+    const t = await target(s, s.body.practice, 'draft');
     if ('block' in t) return sendError(reply, 409, t.block, SELLER_WORDS.BLOCKED);
     const at = now();
     // A practice draft is the seller's real first email (their real history), only addressed to the admin.
@@ -168,7 +174,7 @@ export async function registerSellerRoutes(app: FastifyInstance, deps: SellerRou
     const { subject, body, practice } = s.body;
     const issues = draftIssues({ subject, body });
     if (issues.length > 0) return sendError(reply, 422, 'DRAFT_INVALID', SELLER_WORDS.DRAFT_INVALID, issues);
-    const t = await target(s, practice);
+    const t = await target(s, practice, 'send');
     if ('block' in t) return sendError(reply, 409, t.block, SELLER_WORDS.BLOCKED);
     const at = now();
     const userId = s.ctx.session.userId;

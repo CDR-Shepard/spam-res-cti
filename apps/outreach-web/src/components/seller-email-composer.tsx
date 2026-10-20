@@ -7,7 +7,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
 import { draftSellerEmail, outreachKeys, sendSellerEmail } from '@/lib/outreach-api';
-import { EMAIL_BLOCK_WORDS, emailErrorWords, practiceAllowed, sendAfterWords } from '@/lib/seller-words';
+import { EMAIL_BLOCK_WORDS, emailErrorWords, isSwitchBlock, practiceAllowed, PREVIEW_WORDS, sendAfterWords } from '@/lib/seller-words';
 import { cn } from '@/lib/utils';
 import { ConfirmAction } from './confirm-action';
 
@@ -27,7 +27,8 @@ const isSendable = (d: Draft): boolean =>
  *
  * `emailBlock` is the page's current reason Sam may not email (null = she may), and it can change while the composer is
  * open (a hand-over, the daily cap). The real Write draft and Send follow it; the practice copy goes only to the admin, so
- * only the server setup and the tenant's switch stop it (`practiceAllowed`). A draft already written stays on screen.
+ * only the server setup and the tenant's switch stop it (`practiceAllowed`). The switch alone leaves Write draft on as a
+ * preview whose Send stays off (`isSwitchBlock`). A draft already written stays on screen.
  */
 export function SellerEmailComposer({ sfRecordId, emailBlock, onClose }: { sfRecordId: string; emailBlock: EmailBlock | null; onClose: () => void }) {
   const qc = useQueryClient();
@@ -91,15 +92,17 @@ function StartPanel({ writing, error, emailBlock, onWrite }: { writing: boolean;
   const hintId = useId();
   const realWords = blockWords(emailBlock, false);
   const practiceWords = blockWords(emailBlock, true);
+  const preview = isSwitchBlock(emailBlock);
   return (
     <div className="space-y-3">
       <p className="text-sm text-muted-foreground">Sam writes a first draft. You can edit it before anything is sent.</p>
       <div className="flex flex-wrap items-center gap-2">
-        <Button disabled={writing || realWords !== null} aria-describedby={realWords ? hintId : undefined} onClick={() => onWrite(false)}>Write draft</Button>
+        <Button disabled={writing || (realWords !== null && !preview)} aria-describedby={realWords ? hintId : undefined} onClick={() => onWrite(false)}>Write draft</Button>
         <Button variant="outline" disabled={writing || practiceWords !== null} aria-describedby={practiceWords ? hintId : undefined} onClick={() => onWrite(true)}>Send a practice copy to me</Button>
       </div>
       {/* One reason is shown: the real draft's, which is also the practice copy's whenever the practice copy is off too. */}
       {realWords && <p id={hintId} className="text-sm text-muted-foreground">{realWords}</p>}
+      {preview && <p className="text-sm text-muted-foreground">{PREVIEW_WORDS}</p>}
       {writing && <p role="status" className="text-sm text-muted-foreground">Sam is writing a draft…</p>}
       {error !== null && <ErrorBlock error={error} />}
     </div>

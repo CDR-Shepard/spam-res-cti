@@ -93,14 +93,21 @@ export interface EmailSetup {
   settings: unknown;
 }
 
-/** Why Sam may not send this seller a first email now, or null when she may (see the module comment for the order). */
+/**
+ * What a block is checked for. A `draft` is only shown to the admin, so the tenant's switch (off, or paused after a
+ * complaint), which stops sending, does not stop it: an admin may read what Sam would write before turning email on.
+ */
+export type BlockUse = 'send' | 'draft';
+
+/** Why Sam may not send (or draft, `use`) this seller a first email now, or null when she may (the order: the module comment). */
 export async function sellerEmailBlock(
   db: Db,
   setup: EmailSetup,
   i: { orgId: string; record: SellerRecord; conversation: ConversationState | null },
+  use: BlockUse = 'send',
 ): Promise<EmailBlock | null> {
   if (!setup.configured) return 'not_configured';
-  const off = switchBlock(setup.settings);
+  const off = use === 'send' ? switchBlock(setup.settings) : null;
   if (off) return off;
   const { record, conversation } = i;
   if (record.address === null) return 'no_address';
@@ -121,11 +128,12 @@ export async function sellerEmailBlock(
 
 /**
  * Why an admin's practice email (to their own address) may not be drafted or sent: the seller's own blocks do not
- * apply (nothing reaches the seller), the server setup and the tenant's switch do, and the admin needs an address.
+ * apply (nothing reaches the seller), the server setup does, the tenant's switch does for a send (`BlockUse`), and the
+ * admin needs an address.
  */
-export function practiceEmailBlock(setup: EmailSetup, adminAddress: string | null): EmailBlock | null {
+export function practiceEmailBlock(setup: EmailSetup, adminAddress: string | null, use: BlockUse = 'send'): EmailBlock | null {
   if (!setup.configured) return 'not_configured';
-  return switchBlock(setup.settings) ?? (adminAddress === null ? 'no_address' : null);
+  return (use === 'send' ? switchBlock(setup.settings) : null) ?? (adminAddress === null ? 'no_address' : null);
 }
 
 /** The signed-in person's own address (users.email), trimmed; null when it is blank or not an address. */

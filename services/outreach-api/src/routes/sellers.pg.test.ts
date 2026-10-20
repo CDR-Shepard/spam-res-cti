@@ -339,6 +339,32 @@ describe.skipIf(!pgLane)('seller conversation routes (real Postgres)', () => {
       expect(none.json().code).toBe('not_configured');
     });
 
+    it('with Sam\'s email off or paused an admin can still read the draft (real or practice); sending stays refused (owner, 2026-10-20)', async () => {
+      for (const settings of [{}, { samEmail: { enabled: false } }, { samEmail: { enabled: true, pausedAt: NOW.toISOString(), pausedReason: 'complaint' } }]) {
+        const s = await seedSeller({ settings });
+        sessionFor(s.orgId, s.admin.id, true);
+        const real = await draft(s.sfRecordId);
+        expect(real.statusCode).toBe(200);
+        expect(real.json()).toEqual({ subject: SEND.subject, body: SEND.body, to: SELLER_EMAIL });
+        expect((await draft(s.sfRecordId, true)).json()).toEqual({ subject: SEND.subject, body: SEND.body, to: s.admin.email });
+        for (const practice of [false, true]) {
+          const sent = await send(s.sfRecordId, practice);
+          expect(sent.statusCode).toBe(409);
+          expect(['disabled', 'paused']).toContain(sent.json().code);
+        }
+        expect(await conversationsOf(s.crmRecordId)).toEqual([]);
+      }
+    });
+
+    it('with the switch off, a seller block still refuses the real draft', async () => {
+      const s = await seedSeller({ planStatus: 'proposed', settings: {} });
+      sessionFor(s.orgId, s.admin.id, true);
+      const res = await draft(s.sfRecordId);
+      expect(res.statusCode).toBe(409);
+      expect(res.json().code).toBe('not_approved');
+      expect(write).not.toHaveBeenCalled();
+    });
+
     it('only admins may ask for a draft', async () => {
       const s = await seedSeller();
       sessionFor(s.orgId, s.owner.id, false);

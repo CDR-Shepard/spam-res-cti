@@ -220,11 +220,22 @@ describe('SellerConversationPage: Email from Sam', () => {
     ]);
   });
 
-  it.each(['paused', 'disabled', 'not_configured'] as const)('%s (the switch or the server setup) offers no practice copy either', async (emailBlock) => {
-    stubApi({ [`GET ${CONV}`]: sellerView({ mayEmail: false, emailBlock }) });
+  it('not_configured (the server setup): the button is off and there is no practice copy either', async () => {
+    stubApi({ [`GET ${CONV}`]: sellerView({ mayEmail: false, emailBlock: 'not_configured' }) });
     page(null, { isAdmin: true });
     expect(await screen.findByRole('button', { name: 'Email from Sam' })).toBeDisabled();
     expect(screen.queryByRole('button', { name: 'Send a practice copy to me' })).not.toBeInTheDocument();
+  });
+
+  it.each(['paused', 'disabled'] as const)("%s (the switch): \"Preview Sam's email\" opens the composer to read a draft; no practice copy", async (emailBlock) => {
+    stubApi({ [`GET ${CONV}`]: sellerView({ mayEmail: false, emailBlock }) });
+    page(null, { isAdmin: true });
+    const preview = await screen.findByRole('button', { name: "Preview Sam's email" });
+    expect(preview).toBeEnabled();
+    expect(screen.queryByRole('button', { name: 'Email from Sam' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Send a practice copy to me' })).not.toBeInTheDocument();
+    await userEvent.click(preview);
+    expect(screen.getByRole('button', { name: 'Write draft' })).toBeEnabled();
   });
 
   it('while the composer is open, a hand-over turns the real Send off with the block in words (the draft stays)', async () => {
