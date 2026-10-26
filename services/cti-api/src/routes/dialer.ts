@@ -69,7 +69,7 @@ import {
   isValidSfId,
 } from '../dialer/handoff-store.js';
 import { sfFetch } from '../salesforce/client.js';
-import { parseListViews, parseListViewResultIds } from '../salesforce/listviews.js';
+import { fetchListViewRecordIds, parseListViews } from '../salesforce/listviews.js';
 
 /**
  * The POST /dialer/sessions body schema — exported so src/routes/dialer.test.ts
@@ -334,19 +334,15 @@ export async function registerDialerRoutes(app: FastifyInstance): Promise<void> 
       .safeParse(req.body);
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.flatten() });
     const { object, listViewId } = parsed.data;
+    // The WHOLE list (up to LIST_FETCH_CAP), not its first 200: the run takes
+    // the next window of it after the last record dialed (create-session.ts
+    // LIST_RUN_WINDOW). Read as the rep, so it is their view of the list.
     let recordIds: string[];
     try {
-      const res = await sfFetch(
-        authed.userId,
-        `/sobjects/${object}/listviews/${listViewId}/results`,
-        { query: { limit: '200' } },
-      );
-      if (res.status < 200 || res.status >= 300) {
-        return reply.code(502).send({ error: 'Salesforce list-view results fetch failed', status: res.status });
-      }
-      recordIds = parseListViewResultIds(res.json);
-    } catch {
-      return reply.code(502).send({ error: 'Could not reach Salesforce — is the rep signed in?' });
+      recordIds = await fetchListViewRecordIds((path, init) => sfFetch(authed.userId, path, init), object, listViewId);
+    } catch (err) {
+      req.log.warn({ err: (err as Error).message, listViewId }, 'list-view read failed');
+      return reply.code(502).send({ error: 'Could not read that list view from Salesforce — is the rep signed in?' });
     }
     if (recordIds.length === 0) {
       return reply.code(422).send({ error: 'That list view has no records to dial.' });

@@ -45,3 +45,84 @@ export function parseListViewResultIds(json: unknown): string[] {
   }
   return ids;
 }
+
+/** The most records one list-view run reads (5 query pages). */
+export const LIST_FETCH_CAP = 10_000;
+
+/** The old read, kept as the fallback: /results won't return more per call. */
+const RESULTS_FALLBACK_LIMIT = '2000';
+
+/** `sfFetch` bound to one rep (paths are relative to /services/data/vXX). */
+export type SfFetcher = (
+  path: string,
+  init?: { query?: Record<string, string> },
+) => Promise<{ status: number; json: unknown }>;
+
+const ok = (status: number): boolean => status >= 200 && status < 300;
+
+/**
+ * A list view's own SOQL (from its describe) selecting Id only: the view's
+ * FROM, USING SCOPE, WHERE and ORDER BY are kept exactly, so the ids come back
+ * in the list's own order. Null when it doesn't read as SELECT … FROM ….
+ */
+export function listViewIdQuery(soql: string): string | null {
+  const m = /^\s*SELECT\s+[\s\S]+?\s(FROM\s[\s\S]*)$/i.exec(soql);
+  return m ? `SELECT Id ${m[1]}` : null;
+}
+
+/** `/services/data/v62.0/query/01g…-2000` → `/query/01g…-2000` (sfFetch adds the prefix). */
+function queryMorePath(nextRecordsUrl: string): string {
+  const m = /^\/services\/data\/v[\d.]+(\/query\/.+)$/.exec(nextRecordsUrl);
+  if (!m) throw new Error(`unexpected nextRecordsUrl: ${nextRecordsUrl}`);
+  return m[1]!;
+}
+
+async function idsThroughViewQuery(fetcher: SfFetcher, object: string, listViewId: string, cap: number): Promise<string[]> {
+  const described = await fetcher(`/sobjects/${object}/listviews/${listViewId}/describe`);
+  if (!ok(described.status)) throw new Error(`describe answered ${described.status}`);
+  const soql = (described.json as { query?: unknown } | null)?.query;
+  const q = typeof soql === 'string' ? listViewIdQuery(soql) : null;
+  if (!q) throw new Error('describe returned no usable query');
+  const ids: string[] = [];
+  let res = await fetcher('/query', { query: { q } });
+  for (;;) {
+    if (!ok(res.status)) throw new Error(`query answered ${res.status}`);
+    const body = res.json as { records?: Array<{ Id?: unknown } | null>; done?: unknown; nextRecordsUrl?: unknown } | null;
+    for (const r of body?.records ?? []) {
+      if (typeof r?.Id === 'string' && r.Id) ids.push(r.Id);
+      if (ids.length >= cap) return ids;
+    }
+    if (body?.done !== false || typeof body.nextRecordsUrl !== 'string') return ids;
+    res = await fetcher(queryMorePath(body.nextRecordsUrl));
+  }
+}
+
+/**
+ * Every record id in a list view, in its own order, up to `cap`.
+ *
+ * 2026-10-26 (Matt): this used to be `/results?limit=200`, so a list longer
+ * than 200 never got past its first 200 — each later run re-dialed them. And
+ * /results can't page past offset 2000. So the list is read through its own
+ * SOQL instead, run as the rep (their sharing, their "mine" scope), paged
+ * with nextRecordsUrl. Should that path fail — a view the describe can't give
+ * a query for, a query Salesforce refuses — it falls back to /results with
+ * its 2000 maximum, which still beats the old 200. Throws only when that
+ * fails too.
+ */
+export async function fetchListViewRecordIds(
+  fetcher: SfFetcher,
+  object: string,
+  listViewId: string,
+  cap: number = LIST_FETCH_CAP,
+): Promise<string[]> {
+  try {
+    return await idsThroughViewQuery(fetcher, object, listViewId, cap);
+  } catch (err) {
+    console.warn(
+      `[listviews] reading list "${listViewId}" through its query failed — falling back to its first ${RESULTS_FALLBACK_LIMIT}: ${(err as Error).message}`,
+    );
+  }
+  const res = await fetcher(`/sobjects/${object}/listviews/${listViewId}/results`, { query: { limit: RESULTS_FALLBACK_LIMIT } });
+  if (!ok(res.status)) throw new Error(`list-view results fetch answered ${res.status}`);
+  return parseListViewResultIds(res.json).slice(0, cap);
+}

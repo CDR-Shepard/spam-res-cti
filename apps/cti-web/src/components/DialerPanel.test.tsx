@@ -870,7 +870,7 @@ describe('ConfirmBlock (SSR)', () => {
       />,
     );
     // renderToStaticMarkup HTML-escapes the apostrophe as `&#x27;`.
-    expect(html).toContain('Garrett is on this list (record 87 of 220) — you&#x27;ll start from 88.');
+    expect(html).toContain('Garrett is on this list (record 87) — you&#x27;ll start from 88.');
     expect(html.indexOf('187 will be dialed')).toBeLessThan(html.indexOf('Garrett is on this list'));
   });
   it('omits the shared-list line with no listContext, or when startedFrom is 0 (wrapped to the top)', () => {
@@ -891,26 +891,34 @@ describe('ConfirmBlock (SSR)', () => {
  * its inputs.
  */
 describe('confirmContextLine', () => {
-  it('one other rep: "Garrett is on this list (record 87 of 220) — you\'ll start from 88."', () => {
+  // 2026-10-26: a run is now the next 200 of a list read in full (5,646 on LA
+  // Hunt Queue), so `total` (this run's own people) can be far smaller than
+  // the record number — no "of N", which would read "record 2001 of 200".
+  it('a run deep in a long list never says "of" its own size', () => {
+    expect(confirmContextLine({ total: 200, startedFrom: 2000, workedBy: ['Matt'] }))
+      .toBe("Matt is on this list (record 2000) — you'll start from 2001.");
+  });
+
+  it('one other rep: "Garrett is on this list (record 87) — you\'ll start from 88."', () => {
     expect(confirmContextLine({ total: 220, startedFrom: 87, workedBy: ['Garrett'] }))
-      .toBe("Garrett is on this list (record 87 of 220) — you'll start from 88.");
+      .toBe("Garrett is on this list (record 87) — you'll start from 88.");
   });
 
   it('two other reps: "Garrett and Danny are on this list …"', () => {
     expect(confirmContextLine({ total: 220, startedFrom: 87, workedBy: ['Garrett', 'Danny'] }))
-      .toBe("Garrett and Danny are on this list (record 87 of 220) — you'll start from 88.");
+      .toBe("Garrett and Danny are on this list (record 87) — you'll start from 88.");
   });
 
   it('three or more: a comma list with "and" before the last name', () => {
     expect(confirmContextLine({ total: 220, startedFrom: 87, workedBy: ['Garrett', 'Danny', 'Priya'] }))
-      .toBe("Garrett, Danny and Priya are on this list (record 87 of 220) — you'll start from 88.");
+      .toBe("Garrett, Danny and Priya are on this list (record 87) — you'll start from 88.");
     expect(confirmContextLine({ total: 220, startedFrom: 87, workedBy: ['Garrett', 'Danny', 'Priya', 'Sam'] }))
-      .toBe("Garrett, Danny, Priya and Sam are on this list (record 87 of 220) — you'll start from 88.");
+      .toBe("Garrett, Danny, Priya and Sam are on this list (record 87) — you'll start from 88.");
   });
 
   it('only the requesting rep has dialed it (workedBy empty, startedFrom > 0): the self-only copy', () => {
     expect(confirmContextLine({ total: 50, startedFrom: 12, workedBy: [] }))
-      .toBe("You're on this list (record 12 of 50) — you'll start from 13.");
+      .toBe("You're on this list (record 12) — you'll start from 13.");
   });
 
   it('startedFrom 0 (wrapped to the top, or nobody has dialed it): no line', () => {

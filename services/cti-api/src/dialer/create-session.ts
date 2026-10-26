@@ -372,6 +372,16 @@ async function resolveListStartPosition(
   }
 }
 
+/**
+ * One run over a list view takes the next this-many people of it, starting
+ * right after the last record anyone dialed (list-position.ts). The list is
+ * read in full (salesforce/listviews.ts) so the start can be found anywhere
+ * in it, but numbers are resolved for the window only — one Salesforce read
+ * per record. 200 is what a run always was: the list itself used to be read
+ * 200 deep, which is why a longer list never got past its first 200.
+ */
+export const LIST_RUN_WINDOW = 200;
+
 export async function createDialerSession(
   deps: CreateSessionDeps,
   args: { userId: string; orgId: string; objectType: DialerRunObject; recordIds: string[]; listViewId?: string },
@@ -390,13 +400,18 @@ export async function createDialerSession(
     ? await resolveListStartPosition(deps, args.orgId, args.listViewId, args.recordIds)
     : null;
   const rotation = args.listViewId ? rotateAfter(args.recordIds, startIndex) : null;
-  const orderedRecordIds = rotation ? rotation.ordered : args.recordIds;
+  // A list-view run is the next LIST_RUN_WINDOW of the rotated list; near the
+  // end that window laps onto the top, as the rotation always has.
+  const window = rotation
+    ? { ordered: rotation.ordered.slice(0, LIST_RUN_WINDOW), positions: rotation.positions.slice(0, LIST_RUN_WINDOW) }
+    : null;
+  const orderedRecordIds = window ? window.ordered : args.recordIds;
 
   const named = await withContactNames(
     deps, args.userId, await resolveRows(deps, args.userId, args.objectType, orderedRecordIds),
   );
-  const withListPositions = rotation
-    ? named.map((r, i) => ({ ...r, listPosition: rotation.positions[i] }))
+  const withListPositions = window
+    ? named.map((r, i) => ({ ...r, listPosition: window.positions[i] }))
     : named;
   const resolved = await withPreferredNumbers(deps, args.orgId, withListPositions);
   // Created READY: the queue is built and nothing dials. `advanceSession`

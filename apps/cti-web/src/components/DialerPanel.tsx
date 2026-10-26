@@ -226,23 +226,25 @@ function joinNames(names: readonly string[]): string {
 
 /**
  * Pure — the confirm block's "two reps, one list" line (spec §4), e.g.
- * "Garrett is on this list (record 87 of 220) — you'll start from 88." Shown
+ * "Garrett is on this list (record 87) — you'll start from 88." Shown
  * only when a start position exists (`startedFrom > 0` — a wrap to the top,
- * or no list-view run at all, means nothing to say). `startedFrom`/`total`
- * are the 0-based figures the server counts with; the rep-facing copy is
- * 1-based throughout ("record 87" = the 88th record is next).
+ * or no list-view run at all, means nothing to say). `startedFrom` is the
+ * 0-based figure the server counts with; the rep-facing copy is 1-based
+ * throughout ("record 87" = the 88th record is next). No "of N": `total` is
+ * this run's own people (a 200-person window of a list that can run to
+ * thousands, 2026-10-26), not the list's size.
  */
 export function confirmContextLine(
   ctx: { total: number; startedFrom: number; workedBy: string[] } | null | undefined,
 ): string | null {
   if (!ctx || ctx.startedFrom <= 0) return null;
-  const { total, startedFrom, workedBy } = ctx;
+  const { startedFrom, workedBy } = ctx;
   const nextRecord = startedFrom + 1;
   if (workedBy.length === 0) {
-    return `You're on this list (record ${startedFrom} of ${total}) — you'll start from ${nextRecord}.`;
+    return `You're on this list (record ${startedFrom}) — you'll start from ${nextRecord}.`;
   }
   const verb = workedBy.length === 1 ? 'is' : 'are';
-  return `${joinNames(workedBy)} ${verb} on this list (record ${startedFrom} of ${total}) — you'll start from ${nextRecord}.`;
+  return `${joinNames(workedBy)} ${verb} on this list (record ${startedFrom}) — you'll start from ${nextRecord}.`;
 }
 
 /** Miss reason → rep-facing words, in the order the miss line lists them.

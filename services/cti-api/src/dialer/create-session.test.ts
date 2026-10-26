@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { schema } from '@cti/db';
-import { BUILD_SKIP_OUTCOMES, buildQueueRows, createDialerSession } from './create-session.js';
+import { BUILD_SKIP_OUTCOMES, buildQueueRows, createDialerSession, LIST_RUN_WINDOW } from './create-session.js';
 import { nextEligiblePendingItem } from './state.js';
 import type { DialerItem } from './session-store.js';
 import { pairKey } from './contact-history.js';
@@ -1215,3 +1215,61 @@ describe('createDialerSession — two reps, one list (rotation)', () => {
     ]);
   });
 });
+
+// 2026-10-26, Matt: a list view now reads in full (5,646 on LA Hunt Queue),
+// so a run takes the NEXT window of it — 200 people, right after the last
+// record anyone dialed — and resolves numbers for those 200 only (number
+// resolution is one Salesforce read per record).
+describe('createDialerSession — a long list is worked one window at a time', () => {
+  const LIST = Array.from({ length: 450 }, (_, i) => `00Q${String(i).padStart(12, '0')}`);
+  const resolver = () => vi.fn(async (_u: string, _o: string, recordId: string) => ({
+    e164: `+1619555${recordId.slice(-4)}`, fallbackE164: null, skipOnDialer: false,
+  }));
+  const deps = (db: unknown, resolveDialNumber: unknown, listStartPosition: unknown) => ({
+    db, resolveDialNumber, fetchTasks: async () => [], fetchContactNames: async () => new Map<string, string>(),
+    salesforceUserId: async () => 'sf1', workedRecently: async () => new Set<string>(),
+    consentBlocked: async () => new Map(), preferredNumbers: async () => new Map<string, string>(),
+    listStartPosition,
+  });
+
+  it('is 200 people', () => {
+    expect(LIST_RUN_WINDOW).toBe(200);
+  });
+
+  it('nobody on the list yet: the first 200, positions 0-199, and only those 200 are resolved', async () => {
+    const db = fakeDb(); const resolveDialNumber = resolver();
+    await createDialerSession(deps(db, resolveDialNumber, async () => null) as never,
+      { userId: 'U1', orgId: 'O1', objectType: 'Lead', recordIds: LIST, listViewId: '00B1' });
+    expect(db._itemRows).toHaveLength(200);
+    expect(db._itemRows.map((x) => x.listPosition)).toEqual(Array.from({ length: 200 }, (_, i) => i));
+    expect(resolveDialNumber).toHaveBeenCalledTimes(200);
+  });
+
+  it('the last dial was record 200 (position 199): this run is records 201-400 (positions 200-399)', async () => {
+    const db = fakeDb(); const resolveDialNumber = resolver();
+    const start = async () => ({ position: 199, key: LIST[199], earlier: [] });
+    await createDialerSession(deps(db, resolveDialNumber, start) as never,
+      { userId: 'U1', orgId: 'O1', objectType: 'Lead', recordIds: LIST, listViewId: '00B1' });
+    expect(db._itemRows.map((x) => x.listPosition)).toEqual(Array.from({ length: 200 }, (_, i) => 200 + i));
+    expect(db._itemRows[0]).toMatchObject({ recordId: LIST[200], ordinal: 0 });
+    expect(resolveDialNumber).toHaveBeenCalledTimes(200);
+  });
+
+  it('near the end the window runs off the list and laps to the top', async () => {
+    const db = fakeDb();
+    const start = async () => ({ position: 399, key: LIST[399], earlier: [] });
+    await createDialerSession(deps(db, resolver(), start) as never,
+      { userId: 'U1', orgId: 'O1', objectType: 'Lead', recordIds: LIST, listViewId: '00B1' });
+    expect(db._itemRows.map((x) => x.listPosition)).toEqual([
+      ...Array.from({ length: 50 }, (_, i) => 400 + i), ...Array.from({ length: 150 }, (_, i) => i),
+    ]);
+  });
+
+  it('a run of selected records (no list view) is not windowed', async () => {
+    const db = fakeDb();
+    await createDialerSession(deps(db, resolver(), async () => null) as never,
+      { userId: 'U1', orgId: 'O1', objectType: 'Lead', recordIds: LIST.slice(0, 300) });
+    expect(db._itemRows).toHaveLength(300);
+  });
+});
+
