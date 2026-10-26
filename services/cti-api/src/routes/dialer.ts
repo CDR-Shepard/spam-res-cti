@@ -338,8 +338,11 @@ export async function registerDialerRoutes(app: FastifyInstance): Promise<void> 
     // the next window of it after the last record dialed (create-session.ts
     // LIST_RUN_WINDOW). Read as the rep, so it is their view of the list.
     let recordIds: string[];
+    let listPerRep: boolean;
     try {
-      recordIds = await fetchListViewRecordIds((path, init) => sfFetch(authed.userId, path, init), object, listViewId);
+      ({ ids: recordIds, perRep: listPerRep } = await fetchListViewRecordIds(
+        (path, init) => sfFetch(authed.userId, path, init), object, listViewId,
+      ));
     } catch (err) {
       req.log.warn({ err: (err as Error).message, listViewId }, 'list-view read failed');
       return reply.code(502).send({ error: 'Could not read that list view from Salesforce — is the rep signed in?' });
@@ -354,9 +357,9 @@ export async function registerDialerRoutes(app: FastifyInstance): Promise<void> 
         workedRecently: (orgId, numbers) => workedRecentlySafe(db, orgId, numbers),
         consentBlocked: (orgId, numbers) => blockedTargetsSafe(db, orgId, numbers),
         preferredNumbers: (orgId, pairs) => preferredNumbersFor(db, orgId, pairs),
-        listStartPosition: (orgId, listViewIdArg, now) => listRunStart(db, orgId, listViewIdArg, now),
+        listStartPosition: (orgId, listViewIdArg, now, windowMs, ownerUserId) => listRunStart(db, orgId, listViewIdArg, now, windowMs, ownerUserId),
       },
-      { userId: authed.userId, orgId: authed.orgId, objectType: object, recordIds, listViewId },
+      { userId: authed.userId, orgId: authed.orgId, objectType: object, recordIds, listViewId, listPerRep },
     );
     return { ...result, recordCount: recordIds.length };
   });
@@ -375,7 +378,7 @@ export async function registerDialerRoutes(app: FastifyInstance): Promise<void> 
         workedRecently: (orgId, numbers) => workedRecentlySafe(db, orgId, numbers),
         consentBlocked: (orgId, numbers) => blockedTargetsSafe(db, orgId, numbers),
         preferredNumbers: (orgId, pairs) => preferredNumbersFor(db, orgId, pairs),
-        listStartPosition: (orgId, listViewIdArg, now) => listRunStart(db, orgId, listViewIdArg, now),
+        listStartPosition: (orgId, listViewIdArg, now, windowMs, ownerUserId) => listRunStart(db, orgId, listViewIdArg, now, windowMs, ownerUserId),
       },
       {
         userId: authed.userId,

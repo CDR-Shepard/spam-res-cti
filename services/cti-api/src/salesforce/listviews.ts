@@ -77,10 +77,27 @@ function queryMorePath(nextRecordsUrl: string): string {
   return m[1]!;
 }
 
-async function idsThroughViewQuery(fetcher: SfFetcher, object: string, listViewId: string, cap: number): Promise<string[]> {
-  const described = await fetcher(`/sobjects/${object}/listviews/${listViewId}/describe`);
-  if (!ok(described.status)) throw new Error(`describe answered ${described.status}`);
-  const soql = (described.json as { query?: unknown } | null)?.query;
+/** A list view's records, and whether each rep sees their own (`listViewIsPerRep`). */
+export interface ListViewRecords {
+  ids: string[];
+  perRep: boolean;
+}
+
+/**
+ * Whether a list view shows each rep their OWN records, from its describe's
+ * `scope`. `everything` and `entity` (one queue's or one owner's records, the
+ * same for everyone — LA Hunt Queue is `entity`) are shared: reps working one
+ * share its place. Anything else (`mine` "My Leads", the Task view "Today",
+ * `team`, `mru`, `delegated`, …) differs per rep, so each keeps their own
+ * place — one rep's last record is never in another's list (review of
+ * eacba2c0, N1). Unknown (no describe) counts as per rep: a rep's own place
+ * can never steer someone else's.
+ */
+export function listViewIsPerRep(scope: unknown): boolean {
+  return scope !== 'everything' && scope !== 'entity';
+}
+
+async function idsThroughQuery(fetcher: SfFetcher, soql: unknown, cap: number): Promise<string[]> {
   const q = typeof soql === 'string' ? listViewIdQuery(soql) : null;
   if (!q) throw new Error('describe returned no usable query');
   const ids: string[] = [];
@@ -98,25 +115,32 @@ async function idsThroughViewQuery(fetcher: SfFetcher, object: string, listViewI
 }
 
 /**
- * Every record id in a list view, in its own order, up to `cap`.
+ * Every record id in a list view, in its own order, up to `cap`, and whether
+ * the view is per rep.
  *
  * 2026-10-26 (Matt): this used to be `/results?limit=200`, so a list longer
  * than 200 never got past its first 200 — each later run re-dialed them. And
  * /results can't page past offset 2000. So the list is read through its own
- * SOQL instead, run as the rep (their sharing, their "mine" scope), paged
- * with nextRecordsUrl. Should that path fail — a view the describe can't give
- * a query for, a query Salesforce refuses — it falls back to /results with
- * its 2000 maximum, which still beats the old 200. Throws only when that
- * fails too.
+ * SOQL instead (from the view's describe), run as the rep (their sharing,
+ * their "mine" scope), paged with nextRecordsUrl. Should that path fail — a
+ * view the describe can't give a query for, a query Salesforce refuses — it
+ * falls back to /results with its 2000 maximum, which still beats the old 200.
+ * Throws only when that fails too.
  */
 export async function fetchListViewRecordIds(
   fetcher: SfFetcher,
   object: string,
   listViewId: string,
   cap: number = LIST_FETCH_CAP,
-): Promise<string[]> {
+): Promise<ListViewRecords> {
+  // The describe's scope, once it answers; undefined (→ per rep) until then.
+  let scope: unknown;
   try {
-    return await idsThroughViewQuery(fetcher, object, listViewId, cap);
+    const described = await fetcher(`/sobjects/${object}/listviews/${listViewId}/describe`);
+    if (!ok(described.status)) throw new Error(`describe answered ${described.status}`);
+    const body = described.json as { query?: unknown; scope?: unknown } | null;
+    scope = body?.scope;
+    return { ids: await idsThroughQuery(fetcher, body?.query, cap), perRep: listViewIsPerRep(scope) };
   } catch (err) {
     console.warn(
       `[listviews] reading list "${listViewId}" through its query failed — falling back to its first ${RESULTS_FALLBACK_LIMIT}: ${(err as Error).message}`,
@@ -124,5 +148,5 @@ export async function fetchListViewRecordIds(
   }
   const res = await fetcher(`/sobjects/${object}/listviews/${listViewId}/results`, { query: { limit: RESULTS_FALLBACK_LIMIT } });
   if (!ok(res.status)) throw new Error(`list-view results fetch answered ${res.status}`);
-  return parseListViewResultIds(res.json).slice(0, cap);
+  return { ids: parseListViewResultIds(res.json).slice(0, cap), perRep: listViewIsPerRep(scope) };
 }

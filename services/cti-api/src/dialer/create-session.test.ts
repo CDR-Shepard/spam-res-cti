@@ -1106,7 +1106,8 @@ describe('createDialerSession — two reps, one list (rotation)', () => {
       '+16195550103', '+16195550104', '+16195550105', '+16195550101', '+16195550102',
     ]);
     expect(db._sessionInsert).toMatchObject({ listViewId: '00B1' });
-    expect(listStartPosition).toHaveBeenCalledWith('O1', '00B1', expect.any(Date));
+    // A Lead list keeps its place for 7 days (ruling 2026-10-26; listShareWindowMs).
+    expect(listStartPosition).toHaveBeenCalledWith('O1', '00B1', expect.any(Date), 7 * 24 * 60 * 60_000, null);
     expect(result).toEqual({ sessionId: 'S1', total: 5 });
   });
 
@@ -1204,7 +1205,8 @@ describe('createDialerSession — two reps, one list (rotation)', () => {
       { ...deps(db, vi.fn(async () => ({ e164: '+16195550100', fallbackE164: null })), listStartPosition), fetchTasks } as never,
       { userId: 'U1', orgId: 'O1', objectType: 'Task', recordIds: fresh, listViewId: '00B1' },
     );
-    expect(listStartPosition).toHaveBeenCalledWith('O1', '00B1', expect.any(Date));
+    // A Task list keeps the 12 h window (ruling 2026-10-26; listShareWindowMs).
+    expect(listStartPosition).toHaveBeenCalledWith('O1', '00B1', expect.any(Date), 12 * 60 * 60_000, null);
     const rows = db._itemRows;
     expect(rows[0]).toMatchObject({ taskId: TASKS[100], recordId: `00Q-FOR-${TASKS[100]}`, ordinal: 0, listPosition: 20 });
     expect(rows.slice(0, 100).map((x) => x.taskId)).toEqual(TASKS.slice(100));
@@ -1263,6 +1265,30 @@ describe('createDialerSession — a long list is worked one window at a time', (
     expect(db._itemRows.map((x) => x.listPosition)).toEqual([
       ...Array.from({ length: 50 }, (_, i) => 400 + i), ...Array.from({ length: 150 }, (_, i) => i),
     ]);
+  });
+
+  it('a Task view keeps the 12 h window (today\'s tasks change every day); a Lead view 7 days', async () => {
+    const taskStart = vi.fn(async () => null);
+    await createDialerSession(deps(fakeDb(), resolver(), taskStart) as never,
+      { userId: 'U1', orgId: 'O1', objectType: 'Task', recordIds: ['00T000000000001'], listViewId: '00B2' });
+    expect(taskStart).toHaveBeenCalledWith('O1', '00B2', expect.any(Date), 12 * 60 * 60_000, null);
+    const leadStart = vi.fn(async () => null);
+    await createDialerSession(deps(fakeDb(), resolver(), leadStart) as never,
+      { userId: 'U1', orgId: 'O1', objectType: 'Lead', recordIds: LIST, listViewId: '00B1' });
+    expect(leadStart).toHaveBeenCalledWith('O1', '00B1', expect.any(Date), 7 * 24 * 60 * 60_000, null);
+  });
+
+  // Review of eacba2c0 (N1): a view that shows each rep their own records
+  // ("My Leads", the Task view "Today") keeps each rep's own place.
+  it('a per-rep view reads this rep\'s own place; a shared view everyone\'s', async () => {
+    const perRep = vi.fn(async () => null);
+    await createDialerSession(deps(fakeDb(), resolver(), perRep) as never,
+      { userId: 'U1', orgId: 'O1', objectType: 'Lead', recordIds: LIST, listViewId: '00B1', listPerRep: true });
+    expect(perRep).toHaveBeenCalledWith('O1', '00B1', expect.any(Date), 7 * 24 * 60 * 60_000, 'U1');
+    const shared = vi.fn(async () => null);
+    await createDialerSession(deps(fakeDb(), resolver(), shared) as never,
+      { userId: 'U1', orgId: 'O1', objectType: 'Lead', recordIds: LIST, listViewId: '00B1', listPerRep: false });
+    expect(shared).toHaveBeenCalledWith('O1', '00B1', expect.any(Date), 7 * 24 * 60 * 60_000, null);
   });
 
   it('a run of selected records (no list view) is not windowed', async () => {

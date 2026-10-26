@@ -31,9 +31,22 @@ import { schema } from '@cti/db';
 
 type Db = ReturnType<typeof getDb>;
 
-/** The share window: an attempt older than this doesn't count as "still
- *  working this list" — a run from yesterday must not rotate today's. */
+/** The share window for a Task view: an attempt older than this doesn't
+ *  count as "still working this list". A Task view ("today's tasks") is a
+ *  different list every day, so yesterday's place means nothing in it. */
 export const LIST_SHARE_WINDOW_MS = 12 * 60 * 60_000;
+
+/** The share window for a Lead or Opportunity view (user ruling 2026-10-26):
+ *  those are worked over days, so the next morning's run continues where the
+ *  last one stopped. Reps stop ~6 PM and start ~8 AM, past the 12 h window,
+ *  so LA Hunt Queue (5,646 leads) used to restart at record 1 every day. A
+ *  list nobody has dialed for a week starts over at the top. */
+export const LIST_SHARE_WINDOW_LONG_MS = 7 * 24 * 60 * 60_000;
+
+/** How long a list of this object type keeps its place. */
+export function listShareWindowMs(objectType: string): number {
+  return objectType === 'Task' ? LIST_SHARE_WINDOW_MS : LIST_SHARE_WINDOW_LONG_MS;
+}
 
 /**
  * Rotate `records` to begin right after `position` (its ORIGINAL index),
@@ -79,14 +92,19 @@ export function listRecordKey(
   return sessionObjectType === 'Task' ? row.taskId : row.recordId;
 }
 
-/** Dials on THIS list view, by any rep, inside the share window. */
-function listScope(orgId: string, listViewId: string, now: Date): SQL | undefined {
+/**
+ * Dials on THIS list view inside the share window — by any rep for a shared
+ * view (`ownerUserId` null), by that one rep for a view that shows each rep
+ * their own records (salesforce/listviews.ts `listViewIsPerRep`).
+ */
+function listScope(orgId: string, listViewId: string, now: Date, windowMs: number, ownerUserId: string | null): SQL | undefined {
   const a = schema.dialerDialAttempts;
   const s = schema.dialerSessions;
   return and(
     eq(s.orgId, orgId),
     eq(s.listViewId, listViewId),
-    gte(a.dialedAt, new Date(now.getTime() - LIST_SHARE_WINDOW_MS)),
+    gte(a.dialedAt, new Date(now.getTime() - windowMs)),
+    ownerUserId == null ? undefined : eq(s.userId, ownerUserId),
   );
 }
 
@@ -99,7 +117,14 @@ function listScope(orgId: string, listViewId: string, now: Date): SQL | undefine
  * null filter: a row with no stamped position (an end-of-run retry, a run
  * with no list view) was never part of a list-view build and cannot anchor.
  */
-export function listFrontierQuery(db: Pick<Db, 'select'>, orgId: string, listViewId: string, now: Date) {
+export function listFrontierQuery(
+  db: Pick<Db, 'select'>,
+  orgId: string,
+  listViewId: string,
+  now: Date,
+  windowMs: number,
+  ownerUserId: string | null,
+) {
   const a = schema.dialerDialAttempts;
   const i = schema.dialerQueueItems;
   const s = schema.dialerSessions;
@@ -108,7 +133,7 @@ export function listFrontierQuery(db: Pick<Db, 'select'>, orgId: string, listVie
     .from(a)
     .innerJoin(i, eq(i.id, a.itemId))
     .innerJoin(s, eq(s.id, a.sessionId))
-    .where(and(listScope(orgId, listViewId, now), isNotNull(i.listPosition)))
+    .where(and(listScope(orgId, listViewId, now, windowMs, ownerUserId), isNotNull(i.listPosition)))
     .orderBy(desc(a.dialedAt), desc(a.id))
     .limit(1);
 }
@@ -126,8 +151,10 @@ async function readFrontier(
   orgId: string,
   listViewId: string,
   now: Date,
+  windowMs: number,
+  ownerUserId: string | null,
 ): Promise<{ position: number; anchor: ListAnchor } | null> {
-  const [row] = await listFrontierQuery(db, orgId, listViewId, now);
+  const [row] = await listFrontierQuery(db, orgId, listViewId, now, windowMs, ownerUserId);
   if (!row || row.position == null) return null;
   return {
     position: row.position,
@@ -158,8 +185,10 @@ export async function listStartPosition(
   orgId: string,
   listViewId: string,
   now: Date,
+  windowMs: number,
+  ownerUserId: string | null,
 ): Promise<{ position: number; anchor: ListAnchor; workedBy: ListWorker[] } | null> {
-  const frontier = await readFrontier(db, orgId, listViewId, now);
+  const frontier = await readFrontier(db, orgId, listViewId, now, windowMs, ownerUserId);
   if (!frontier) return null;
   const a = schema.dialerDialAttempts;
   const i = schema.dialerQueueItems;
@@ -173,7 +202,7 @@ export async function listStartPosition(
     .innerJoin(i, eq(i.id, a.itemId))
     .innerJoin(s, eq(s.id, a.sessionId))
     .innerJoin(u, eq(u.id, s.userId))
-    .where(listScope(orgId, listViewId, now))
+    .where(listScope(orgId, listViewId, now, windowMs, ownerUserId))
     .groupBy(u.id, u.displayName);
   return {
     ...frontier,
@@ -223,8 +252,10 @@ export async function listRunStart(
   orgId: string,
   listViewId: string,
   now: Date,
+  windowMs: number,
+  ownerUserId: string | null,
 ): Promise<ListRunStart | null> {
-  const frontier = await readFrontier(db, orgId, listViewId, now);
+  const frontier = await readFrontier(db, orgId, listViewId, now, windowMs, ownerUserId);
   if (!frontier) return null;
   const { anchor, position } = frontier;
   const rows = await listTrailQuery(db, anchor.sessionId, position);
@@ -277,13 +308,13 @@ export function listStartIndex(recordIds: readonly string[], start: ListRunStart
  */
 export async function listContextFor(
   db: Db,
-  session: { orgId: string; listViewId: string | null; status: string; runSize?: number | null },
+  session: { orgId: string; listViewId: string | null; status: string; runSize?: number | null; objectType: string },
   items: ReadonlyArray<{ attempt: number; ordinal: number; listPosition: number | null; redialOf?: string | null }>,
   requestingUserId: string,
   now: Date = new Date(),
   // Only `workedBy` is read here — the anchor is run creation's business.
   readShared: (
-    db: Db, orgId: string, listViewId: string, now: Date,
+    db: Db, orgId: string, listViewId: string, now: Date, windowMs: number, ownerUserId: string | null,
   ) => Promise<{ workedBy: ReadonlyArray<ListWorker> } | null> = listStartPosition,
 ): Promise<{ total: number; startedFrom: number; workedBy: string[] } | null> {
   if (!session.listViewId) return null;
@@ -308,7 +339,11 @@ export async function listContextFor(
   let workedBy: string[] = [];
   if (session.status === 'ready') {
     try {
-      const shared = await readShared(db, session.orgId, session.listViewId, now);
+      const windowMs = listShareWindowMs(session.objectType);
+      // Read as a shared view: the session doesn't record whether its view is
+      // per rep, so on a "My Leads"-type view this names other reps too — the
+      // display only; the run's own start (create-session.ts) is per rep.
+      const shared = await readShared(db, session.orgId, session.listViewId, now, windowMs, null);
       workedBy = shared ? shared.workedBy.filter((w) => w.userId !== requestingUserId).map((w) => w.name) : [];
     } catch (err) {
       console.warn('[list-position] confirm-block lookup failed — showing no workedBy:', (err as Error).message);

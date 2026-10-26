@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { fetchListViewRecordIds, listViewIdQuery, parseListViews, parseListViewResultIds, type SfFetcher } from './listviews.js';
+import { fetchListViewRecordIds, listViewIdQuery, listViewIsPerRep, parseListViews, parseListViewResultIds, type SfFetcher } from './listviews.js';
 
 describe('parseListViews', () => {
   it('extracts id/label/developerName and sorts by label', () => {
@@ -96,7 +96,7 @@ describe('fetchListViewRecordIds', () => {
       page(ids(2000, 2000), '/services/data/v62.0/query/01gXX-4000'),
       page(ids(4000, 1646)),
     ]);
-    const got = await fetchListViewRecordIds(fetcher, 'Lead', '00B000000000001');
+    const got = (await fetchListViewRecordIds(fetcher, 'Lead', '00B000000000001')).ids;
     expect(got.length).toBe(5646);
     expect(got[0]).toBe(ids(0, 1)[0]);
     expect(got[5645]).toBe(ids(5645, 1)[0]);
@@ -109,7 +109,7 @@ describe('fetchListViewRecordIds', () => {
       page(ids(0, 2000), '/services/data/v62.0/query/01gXX-2000'),
       page(ids(2000, 2000), '/services/data/v62.0/query/01gXX-4000'),
     ]);
-    const got = await fetchListViewRecordIds(fetcher, 'Lead', '00B000000000001', 3000);
+    const got = (await fetchListViewRecordIds(fetcher, 'Lead', '00B000000000001', 3000)).ids;
     expect(got).toEqual(ids(0, 3000));
     expect(calls).toHaveLength(3); // describe + 2 pages; the 3rd page is never asked for
   });
@@ -128,7 +128,7 @@ describe('fetchListViewRecordIds', () => {
         if (path.endsWith('/results')) return { status: 200, json: results };
         return { status: 500, json: [] };
       };
-      expect(await fetchListViewRecordIds(fetcher, 'Lead', '00B000000000001')).toEqual(ids(0, 3));
+      expect((await fetchListViewRecordIds(fetcher, 'Lead', '00B000000000001')).ids).toEqual(ids(0, 3));
       expect(calls.at(-1)).toBe('/sobjects/Lead/listviews/00B000000000001/results?limit=2000');
     }
   });
@@ -141,12 +141,62 @@ describe('fetchListViewRecordIds', () => {
       if (path.endsWith('/results')) return { status: 200, json: results };
       return { status: 500, json: [{ errorCode: 'QUERY_TIMEOUT' }] };
     };
-    expect(await fetchListViewRecordIds(fetcher, 'Lead', '00B000000000001')).toEqual(ids(0, 2));
+    expect((await fetchListViewRecordIds(fetcher, 'Lead', '00B000000000001')).ids).toEqual(ids(0, 2));
   });
 
   it('throws when the results endpoint fails too (the route answers 502)', async () => {
     const fetcher: SfFetcher = async () => ({ status: 500, json: [] });
     await expect(fetchListViewRecordIds(fetcher, 'Lead', '00B000000000001')).rejects.toThrow(/500/);
+  });
+});
+
+// Review of eacba2c0 (N1): a list's place is shared by every rep who dials
+// it — right for a queue everyone works together, wrong for a view that
+// shows each rep their OWN records ("My Leads", the Task view "Today"):
+// one rep's last record is never in another's list, so the start fell back
+// to an index and two reps pinned each other on the same 200. The describe's
+// `scope` says which kind a view is.
+describe('listViewIsPerRep', () => {
+  it('a view everyone sees the same way is shared: everything, entity (a queue or one owner)', () => {
+    expect(listViewIsPerRep('everything')).toBe(false);
+    expect(listViewIsPerRep('entity')).toBe(false);
+  });
+
+  it('a view that shows each rep their own records is per rep: mine, team, mru, delegated, …', () => {
+    for (const scope of ['mine', 'team', 'mru', 'delegated', 'queue_mine']) expect(listViewIsPerRep(scope)).toBe(true);
+  });
+
+  it('unknown (the describe never answered) is per rep: one rep\'s place never steers another\'s', () => {
+    expect(listViewIsPerRep(undefined)).toBe(true);
+    expect(listViewIsPerRep(null)).toBe(true);
+  });
+});
+
+describe('fetchListViewRecordIds — which kind of view', () => {
+  const VIEW_SOQL = "SELECT Name, Id FROM Lead WHERE OwnerId = '00G' ORDER BY Id ASC NULLS FIRST";
+  const one = { status: 200, json: { done: true, records: [{ Id: '00Q000000000001' }] } };
+  const results = { status: 200, json: { records: [{ columns: [{ fieldNameOrPath: 'Id', value: '00Q000000000001' }] }] } };
+
+  it('reports the describe\'s scope on the query path', async () => {
+    for (const [scope, perRep] of [['entity', false], ['mine', true]] as const) {
+      const fetcher: SfFetcher = async (path) =>
+        path.endsWith('/describe') ? { status: 200, json: { query: VIEW_SOQL, scope } } : one;
+      expect(await fetchListViewRecordIds(fetcher, 'Lead', '00B000000000001')).toEqual({ ids: ['00Q000000000001'], perRep });
+    }
+  });
+
+  it('keeps the describe\'s scope when only the query failed and the results endpoint answered', async () => {
+    const fetcher: SfFetcher = async (path) => {
+      if (path.endsWith('/describe')) return { status: 200, json: { query: VIEW_SOQL, scope: 'everything' } };
+      if (path.endsWith('/results')) return results;
+      return { status: 500, json: [] };
+    };
+    expect(await fetchListViewRecordIds(fetcher, 'Lead', '00B000000000001')).toEqual({ ids: ['00Q000000000001'], perRep: false });
+  });
+
+  it('a describe that failed leaves the kind unknown: per rep', async () => {
+    const fetcher: SfFetcher = async (path) => (path.endsWith('/results') ? results : { status: 404, json: [] });
+    expect(await fetchListViewRecordIds(fetcher, 'Lead', '00B000000000001')).toEqual({ ids: ['00Q000000000001'], perRep: true });
   });
 });
 

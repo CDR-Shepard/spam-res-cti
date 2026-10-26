@@ -1,7 +1,7 @@
 import { getDb, schema } from '@cti/db';
 import type { ConsentBlock } from './consent-check.js';
 import { pairKey } from './contact-history.js';
-import { listStartIndex, rotateAfter, type ListRunStart } from './list-position.js';
+import { listShareWindowMs, listStartIndex, rotateAfter, type ListRunStart } from './list-position.js';
 import { isNonUsNumber, NON_US_OUTCOME, usOnlyPair } from './us-only.js';
 import { fetchContactNames, resolveDialNumber } from '../salesforce/record-phone.js';
 import { fetchTasks, resolveTaskTarget } from '../salesforce/task-targets.js';
@@ -181,7 +181,8 @@ export interface CreateSessionDeps {
    *  order. */
   preferredNumbers: (orgId: string, pairs: ReadonlyArray<readonly [string, string]>) => Promise<Map<string, string>>;
   /** Two reps, one list (spec §4): the MOST RECENT dial any rep made on this
-   *  SAME Salesforce list view in the last 12h — its record, its index, and
+   *  SAME Salesforce list view inside its share window (`listShareWindowMs`:
+   *  7 days for a Lead/Opportunity view, 12 h for a Task view) — its record, its index, and
    *  that run's records below it (live: `list-position.ts#listRunStart`) — so
    *  a second run over it rotates to start right after that RECORD instead of
    *  re-dialing the top (`listStartIndex`). Injected RAW, on the same
@@ -193,6 +194,11 @@ export interface CreateSessionDeps {
     orgId: string,
     listViewId: string,
     now: Date,
+    /** How far back a dial still marks the list's place (`listShareWindowMs`). */
+    windowMs: number,
+    /** This rep, for a view that shows each rep their own records; null for a
+     *  shared view (a queue), whose place every rep on it shares. */
+    ownerUserId: string | null,
   ) => Promise<ListRunStart | null>;
   db: ReturnType<typeof getDb>;
 }
@@ -360,9 +366,11 @@ async function resolveListStartPosition(
   orgId: string,
   listViewId: string,
   recordIds: readonly string[],
+  objectType: DialerRunObject,
+  ownerUserId: string | null,
 ): Promise<number | null> {
   try {
-    const shared = await deps.listStartPosition(orgId, listViewId, new Date());
+    const shared = await deps.listStartPosition(orgId, listViewId, new Date(), listShareWindowMs(objectType), ownerUserId);
     return listStartIndex(recordIds, shared);
   } catch (err) {
     console.warn(
@@ -384,7 +392,12 @@ export const LIST_RUN_WINDOW = 200;
 
 export async function createDialerSession(
   deps: CreateSessionDeps,
-  args: { userId: string; orgId: string; objectType: DialerRunObject; recordIds: string[]; listViewId?: string },
+  args: {
+    userId: string; orgId: string; objectType: DialerRunObject; recordIds: string[]; listViewId?: string;
+    /** The view shows each rep their own records (salesforce/listviews.ts
+     *  `listViewIsPerRep`): this rep keeps their own place in it. */
+    listPerRep?: boolean;
+  },
 ): Promise<{ sessionId: string; total: number }> {
   const sfOwnerId = await deps.salesforceUserId(args.userId);
 
@@ -397,7 +410,9 @@ export async function createDialerSession(
   // nobody has dialed it in the share window: the start index is null, and
   // the list's own order is the dial order, exactly as before this feature.
   const startIndex = args.listViewId
-    ? await resolveListStartPosition(deps, args.orgId, args.listViewId, args.recordIds)
+    ? await resolveListStartPosition(
+      deps, args.orgId, args.listViewId, args.recordIds, args.objectType, args.listPerRep ? args.userId : null,
+    )
     : null;
   const rotation = args.listViewId ? rotateAfter(args.recordIds, startIndex) : null;
   // A list-view run is the next LIST_RUN_WINDOW of the rotated list; near the

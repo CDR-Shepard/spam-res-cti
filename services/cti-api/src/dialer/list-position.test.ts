@@ -5,8 +5,10 @@ import { PgDialect } from 'drizzle-orm/pg-core';
 import { Pool } from 'pg';
 import { schema } from '@cti/db';
 import {
+  LIST_SHARE_WINDOW_LONG_MS,
   LIST_SHARE_WINDOW_MS,
   listContextFor,
+  listShareWindowMs,
   listFrontierQuery,
   listRecordKey,
   listRunStart,
@@ -118,7 +120,7 @@ describe('listStartPosition', () => {
     // second (workers) query — both reads are what this test pins.
     const { db, wheres, orderBys, limits } = fakeDb({ latest: [{ position: 5 }] });
 
-    await listStartPosition(db, 'ORG-1', '00B000000000001AAA', now);
+    await listStartPosition(db, 'ORG-1', '00B000000000001AAA', now, LIST_SHARE_WINDOW_MS, null);
 
     // Two queries now, not one: the frontier (most-recent-dial) lookup, then
     // the distinct-reps lookup. Both share the same WHERE scope.
@@ -147,7 +149,7 @@ describe('listStartPosition', () => {
 
   it('the frontier query orders by dialed_at DESC with a stable tiebreak', async () => {
     const { db, orderBys } = fakeDb({});
-    await listStartPosition(db, 'O1', 'L1', new Date());
+    await listStartPosition(db, 'O1', 'L1', new Date(), LIST_SHARE_WINDOW_MS, null);
     expect(orderBys).toHaveLength(1);
     const rendered = orderBys[0]!.map((c) => new PgDialect().sqlToQuery(c as SQL).sql);
     expect(rendered).toEqual(['"dialer_dial_attempts"."dialed_at" desc', '"dialer_dial_attempts"."id" desc']);
@@ -158,7 +160,7 @@ describe('listStartPosition', () => {
       latest: [{ position: 40, sessionId: 'S-9', objectType: 'Lead', recordId: '00Q40', taskId: null }],
       workers: [{ userId: 'U-GARRETT', name: 'Garrett' }, { userId: 'U-DANNY', name: 'Danny' }],
     });
-    const got = await listStartPosition(db, 'O1', 'L1', new Date());
+    const got = await listStartPosition(db, 'O1', 'L1', new Date(), LIST_SHARE_WINDOW_MS, null);
     expect(got).toEqual({
       position: 40,
       anchor: { sessionId: 'S-9', objectType: 'Lead', key: '00Q40' },
@@ -171,7 +173,7 @@ describe('listStartPosition', () => {
       latest: [{ position: 99, sessionId: 'S-1', objectType: 'Task', recordId: '00Q-PERSON', taskId: '00T99' }],
       workers: [{ userId: 'U1', name: 'Garrett' }],
     });
-    expect((await listStartPosition(db, 'O1', 'L1', new Date()))?.anchor).toEqual({
+    expect((await listStartPosition(db, 'O1', 'L1', new Date(), LIST_SHARE_WINDOW_MS, null))?.anchor).toEqual({
       sessionId: 'S-1', objectType: 'Task', key: '00T99',
     });
   });
@@ -181,7 +183,7 @@ describe('listStartPosition', () => {
       latest: [{ position: 5, sessionId: 'S-1', objectType: 'Lead', recordId: '00Q5', taskId: null }],
       workers: [{ userId: 'U1', name: null }],
     });
-    expect(await listStartPosition(db, 'O1', 'L1', new Date())).toEqual({
+    expect(await listStartPosition(db, 'O1', 'L1', new Date(), LIST_SHARE_WINDOW_MS, null)).toEqual({
       position: 5,
       anchor: { sessionId: 'S-1', objectType: 'Lead', key: '00Q5' },
       workedBy: [{ userId: 'U1', name: 'Someone' }],
@@ -190,12 +192,12 @@ describe('listStartPosition', () => {
 
   it('nobody dialed this list in the window → null (queue starts at the top)', async () => {
     const { db } = fakeDb({ latest: [], workers: [] });
-    expect(await listStartPosition(db, 'O1', 'L1', new Date())).toBeNull();
+    expect(await listStartPosition(db, 'O1', 'L1', new Date(), LIST_SHARE_WINDOW_MS, null)).toBeNull();
   });
 
   it('the one row in the window has a null position (no positioned items) → null, ignored before the workers read even matters', async () => {
     const { db } = fakeDb({ latest: [], workers: [{ userId: 'U1', name: 'Garrett' }] });
-    expect(await listStartPosition(db, 'O1', 'L1', new Date())).toBeNull();
+    expect(await listStartPosition(db, 'O1', 'L1', new Date(), LIST_SHARE_WINDOW_MS, null)).toBeNull();
   });
 
   // -------------------------------------------------------------------------
@@ -219,7 +221,7 @@ describe('listStartPosition', () => {
       };
       const nextStart = async () => {
         const { db } = fakeDbFromAttempts(attempts);
-        const got = await listStartPosition(db, 'O1', 'L1', new Date(clock + 60_000));
+        const got = await listStartPosition(db, 'O1', 'L1', new Date(clock + 60_000), LIST_SHARE_WINDOW_MS, null);
         return rotateAfter(Array.from({ length: LIST_LEN }, (_, i) => i), got?.position ?? null).startedFrom;
       };
 
@@ -239,7 +241,7 @@ describe('listStartPosition', () => {
         position: k, userId: 'U1', name: 'Rep', dialedAt: new Date(Date.UTC(2026, 8, 23, 6, 0, k)),
       }));
       const { db } = fakeDbFromAttempts(attempts);
-      const got = await listStartPosition(db, 'O1', 'L1', new Date('2026-09-23T07:00:00Z'));
+      const got = await listStartPosition(db, 'O1', 'L1', new Date('2026-09-23T07:00:00Z'), LIST_SHARE_WINDOW_MS, null);
       expect(got?.position).toBe(149);
       expect(rotateAfter(Array.from({ length: 200 }, (_, i) => i), got!.position).startedFrom).toBe(150);
     });
@@ -251,7 +253,7 @@ describe('listStartPosition', () => {
         { position: 40, userId: 'U-B', name: 'Rep B', dialedAt: new Date('2026-09-23T06:00:00Z') },
       ];
       const { db } = fakeDbFromAttempts(attempts);
-      const got = await listStartPosition(db, 'O1', 'L1', new Date('2026-09-23T06:30:00Z'));
+      const got = await listStartPosition(db, 'O1', 'L1', new Date('2026-09-23T06:30:00Z'), LIST_SHARE_WINDOW_MS, null);
       expect(got?.position).toBe(40);
       expect(got?.workedBy).toEqual([
         { userId: 'U-A', name: 'Rep A' }, { userId: 'U-B', name: 'Rep B' },
@@ -260,7 +262,7 @@ describe('listStartPosition', () => {
 
     it('no dials in the window → null, so rotateAfter starts at 0', async () => {
       const { db } = fakeDbFromAttempts([]);
-      const got = await listStartPosition(db, 'O1', 'L1', new Date());
+      const got = await listStartPosition(db, 'O1', 'L1', new Date(), LIST_SHARE_WINDOW_MS, null);
       expect(got).toBeNull();
       expect(rotateAfter(Array.from({ length: 200 }, (_, i) => i), null).startedFrom).toBe(0);
     });
@@ -299,7 +301,7 @@ describe('the list-anchor SQL Postgres receives', () => {
 
   it('the frontier: the most recent positioned dial on this list in 12 h, with its run, that run\'s object type, and the row\'s record + task ids', () => {
     const { sql, params } = new PgDialect().sqlToQuery(
-      listFrontierQuery(renderDb, 'ORG-1', '00B000000000001AAA', now).getSQL(),
+      listFrontierQuery(renderDb, 'ORG-1', '00B000000000001AAA', now, LIST_SHARE_WINDOW_MS, null).getSQL(),
     );
     expect(sql).toBe(
       'select "dialer_queue_items"."list_position", "dialer_sessions"."id", "dialer_sessions"."object_type", ' +
@@ -352,7 +354,7 @@ function runStartDb(opts: { frontier: FrontierRow[]; trail?: TrailRow[] }) {
 describe('listRunStart — what a new run needs to decide where it starts', () => {
   it('nobody dialed the list in 12 h → null, and neither the trail nor the who-worked-it join is read', async () => {
     const { db, raw } = runStartDb({ frontier: [] });
-    expect(await listRunStart(db, 'O1', 'L1', new Date())).toBeNull();
+    expect(await listRunStart(db, 'O1', 'L1', new Date(), LIST_SHARE_WINDOW_MS, null)).toBeNull();
     expect(raw.selectDistinct).not.toHaveBeenCalled();
     expect(raw.select).toHaveBeenCalledOnce(); // the frontier only — run creation never shows workedBy
   });
@@ -365,7 +367,7 @@ describe('listRunStart — what a new run needs to decide where it starts', () =
         { position: 97, recordId: '00T97', taskId: '00T97' }, // unresolvable Task row
       ],
     });
-    expect(await listRunStart(db, 'O1', 'L1', new Date())).toEqual({
+    expect(await listRunStart(db, 'O1', 'L1', new Date(), LIST_SHARE_WINDOW_MS, null)).toEqual({
       position: 99,
       key: '00T99',
       earlier: [{ position: 98, key: '00T98' }, { position: 97, key: '00T97' }],
@@ -379,7 +381,7 @@ describe('listRunStart — what a new run needs to decide where it starts', () =
       frontier: [{ position: 3, sessionId: 'S-2', objectType: 'Lead', recordId: '00Q3', taskId: null }],
       trail: [{ position: 2, recordId: '00Q2', taskId: null }],
     });
-    expect(await listRunStart(db, 'O1', 'L1', new Date())).toEqual({
+    expect(await listRunStart(db, 'O1', 'L1', new Date(), LIST_SHARE_WINDOW_MS, null)).toEqual({
       position: 3, key: '00Q3', earlier: [{ position: 2, key: '00Q2' }],
     });
   });
@@ -389,7 +391,7 @@ describe('listRunStart — what a new run needs to decide where it starts', () =
       frontier: [{ position: 3, sessionId: 'S-2', objectType: 'Lead', recordId: '00Q3', taskId: null }],
       trail: [{ position: null, recordId: '00Q-X', taskId: null }, { position: 1, recordId: '00Q1', taskId: null }],
     });
-    expect((await listRunStart(db, 'O1', 'L1', new Date()))?.earlier).toEqual([{ position: 1, key: '00Q1' }]);
+    expect((await listRunStart(db, 'O1', 'L1', new Date(), LIST_SHARE_WINDOW_MS, null))?.earlier).toEqual([{ position: 1, key: '00Q1' }]);
   });
 });
 
@@ -531,7 +533,7 @@ function dial(w: World, rows: ReadonlyArray<{ id: string }>, at: () => Date) {
 }
 
 async function nextRunOrder(w: World, fresh: readonly string[]): Promise<string[]> {
-  const start = await listRunStart(worldDb(w), 'O1', 'L1', new Date('2026-09-28T23:00:00Z'));
+  const start = await listRunStart(worldDb(w), 'O1', 'L1', new Date('2026-09-28T23:00:00Z'), LIST_SHARE_WINDOW_MS, null);
   return rotateAfter(fresh, listStartIndex(fresh, start)).ordered;
 }
 
@@ -624,7 +626,7 @@ describe('where the next run starts — record-anchored, end to end', () => {
     for (const stoppedAt of [0, 1, 17, 48, 49]) {
       const w = newWorld();
       dial(w, addRun(w, { sessionId: 'S1', objectType, user: GARRETT, list: RECORDS }).slice(0, stoppedAt + 1), clock());
-      const start = await listRunStart(worldDb(w), 'O1', 'L1', new Date('2026-09-28T23:00:00Z'));
+      const start = await listRunStart(worldDb(w), 'O1', 'L1', new Date('2026-09-28T23:00:00Z'), LIST_SHARE_WINDOW_MS, null);
       expect(listStartIndex(RECORDS, start)).toBe(stoppedAt);
       expect(rotateAfter(RECORDS, listStartIndex(RECORDS, start))).toEqual(rotateAfter(RECORDS, stoppedAt));
     }
@@ -635,7 +637,7 @@ describe('where the next run starts — record-anchored, end to end', () => {
     const w = newWorld();
     // Started after #29: dials #30–#49, wraps, #0–#9.
     dial(w, addRun(w, { sessionId: 'S1', objectType: 'Lead', user: GARRETT, list: LEADS, startAfter: 29 }).slice(0, 30), clock());
-    const start = await listRunStart(worldDb(w), 'O1', 'L1', new Date('2026-09-28T23:00:00Z'));
+    const start = await listRunStart(worldDb(w), 'O1', 'L1', new Date('2026-09-28T23:00:00Z'), LIST_SHARE_WINDOW_MS, null);
     expect(listStartIndex(LEADS, start)).toBe(9);
   });
 
@@ -658,7 +660,7 @@ describe('where the next run starts — record-anchored, end to end', () => {
 
     // Garrett's #109 left; his run's nearest earlier record still open is #104.
     expect((await nextRunOrder(w, fresh))[0]).toBe(TASKS[110]);
-    const shared = await listStartPosition(worldDb(w), 'O1', 'L1', new Date('2026-09-28T23:00:00Z'));
+    const shared = await listStartPosition(worldDb(w), 'O1', 'L1', new Date('2026-09-28T23:00:00Z'), LIST_SHARE_WINDOW_MS, null);
     expect(shared?.anchor).toEqual({ sessionId: 'S-G', objectType: 'Task', key: TASKS[109] });
     expect(shared?.workedBy).toEqual([{ userId: 'U-NORAH', name: 'Norah' }, { userId: 'U-GARRETT', name: 'Garrett' }]);
   });
@@ -677,7 +679,7 @@ describe('listContextFor', () => {
   it('no list view on the session → null, no read attempted', async () => {
     const readShared = vi.fn();
     const got = await listContextFor(
-      {} as never, { orgId: 'O1', listViewId: null, status: 'ready' }, items, 'U-ME', new Date(), readShared,
+      {} as never, { orgId: 'O1', listViewId: null, status: 'ready', objectType: 'Lead' }, items, 'U-ME', new Date(), readShared,
     );
     expect(got).toBeNull();
     expect(readShared).not.toHaveBeenCalled();
@@ -689,7 +691,7 @@ describe('listContextFor', () => {
       workedBy: [{ userId: 'U-GARRETT', name: 'Garrett' }, { userId: 'U-ME', name: 'Me' }],
     }));
     const got = await listContextFor(
-      {} as never, { orgId: 'O1', listViewId: 'L1', status: 'ready' }, items, 'U-ME', new Date(), readShared,
+      {} as never, { orgId: 'O1', listViewId: 'L1', status: 'ready', objectType: 'Lead' }, items, 'U-ME', new Date(), readShared,
     );
     expect(got).toEqual({ total: 3, startedFrom: 87, workedBy: ['Garrett'] });
     expect(readShared).toHaveBeenCalledOnce();
@@ -703,7 +705,7 @@ describe('listContextFor', () => {
   // the plain row-based ordinal count, limited run or not.
   it("total stays the row-based ordinal count, even when the session carries a runSize", async () => {
     const got = await listContextFor(
-      {} as never, { orgId: 'O1', listViewId: 'L1', status: 'ready', runSize: 2 }, items, 'U-ME', new Date(), vi.fn(async () => null),
+      {} as never, { orgId: 'O1', listViewId: 'L1', status: 'ready', runSize: 2, objectType: 'Lead' }, items, 'U-ME', new Date(), vi.fn(async () => null),
     );
     expect(got).toEqual({ total: 3, startedFrom: 87, workedBy: [] });
   });
@@ -711,7 +713,7 @@ describe('listContextFor', () => {
   it('a redial copy (attempt 1, redialOf set) is excluded from `total` — Task 11 fix-round-1 Minor: it is not part of the queue creation built, same as an attempt-2 retry', async () => {
     const withRedial = [...items, { attempt: 1, ordinal: 4, listPosition: 87, redialOf: 'i1' }];
     const got = await listContextFor(
-      {} as never, { orgId: 'O1', listViewId: 'L1', status: 'ready' }, withRedial, 'U-ME', new Date(), vi.fn(async () => null),
+      {} as never, { orgId: 'O1', listViewId: 'L1', status: 'ready', objectType: 'Lead' }, withRedial, 'U-ME', new Date(), vi.fn(async () => null),
     );
     expect(got).toEqual({ total: 3, startedFrom: 87, workedBy: [] });
   });
@@ -724,7 +726,7 @@ describe('listContextFor', () => {
   it('a take-callback requeue copy shares its ordinal with its cancelled original — counted once, not twice', async () => {
     const withCallback = [...items, { attempt: 1, ordinal: 2, listPosition: 0, outcome: 'canceled' }];
     const got = await listContextFor(
-      {} as never, { orgId: 'O1', listViewId: 'L1', status: 'ready' }, withCallback, 'U-ME', new Date(), vi.fn(async () => null),
+      {} as never, { orgId: 'O1', listViewId: 'L1', status: 'ready', objectType: 'Lead' }, withCallback, 'U-ME', new Date(), vi.fn(async () => null),
     );
     expect(got).toEqual({ total: 3, startedFrom: 87, workedBy: [] });
   });
@@ -739,7 +741,7 @@ describe('listContextFor', () => {
   it.each(['active', 'paused', 'stopped', 'done'])('status %s: never runs the join — workedBy is empty, no read', async (status) => {
     const readShared = vi.fn();
     const got = await listContextFor(
-      {} as never, { orgId: 'O1', listViewId: 'L1', status }, items, 'U-ME', new Date(), readShared,
+      {} as never, { orgId: 'O1', listViewId: 'L1', status, objectType: 'Lead' }, items, 'U-ME', new Date(), readShared,
     );
     expect(got).toEqual({ total: 3, startedFrom: 87, workedBy: [] });
     expect(readShared).not.toHaveBeenCalled();
@@ -748,7 +750,7 @@ describe('listContextFor', () => {
   it('a start position exists but only the requesting rep dialed it: workedBy is empty (not "someone")', async () => {
     const readShared = vi.fn(async () => ({ position: 87, workedBy: [{ userId: 'U-ME', name: 'Me' }] }));
     const got = await listContextFor(
-      {} as never, { orgId: 'O1', listViewId: 'L1', status: 'ready' }, items, 'U-ME', new Date(), readShared,
+      {} as never, { orgId: 'O1', listViewId: 'L1', status: 'ready', objectType: 'Lead' }, items, 'U-ME', new Date(), readShared,
     );
     expect(got).toEqual({ total: 3, startedFrom: 87, workedBy: [] });
   });
@@ -756,7 +758,7 @@ describe('listContextFor', () => {
   it('nobody has dialed the list in the window (readShared → null): workedBy is empty', async () => {
     const readShared = vi.fn(async () => null);
     const got = await listContextFor(
-      {} as never, { orgId: 'O1', listViewId: 'L1', status: 'ready' }, items, 'U-ME', new Date(), readShared,
+      {} as never, { orgId: 'O1', listViewId: 'L1', status: 'ready', objectType: 'Lead' }, items, 'U-ME', new Date(), readShared,
     );
     expect(got).toEqual({ total: 3, startedFrom: 87, workedBy: [] });
   });
@@ -766,7 +768,7 @@ describe('listContextFor', () => {
     try {
       const readShared = vi.fn(async () => { throw new Error('pg down'); });
       const got = await listContextFor(
-        {} as never, { orgId: 'O1', listViewId: 'L1', status: 'ready' }, items, 'U-ME', new Date(), readShared,
+        {} as never, { orgId: 'O1', listViewId: 'L1', status: 'ready', objectType: 'Lead' }, items, 'U-ME', new Date(), readShared,
       );
       expect(got).toEqual({ total: 3, startedFrom: 87, workedBy: [] });
       expect(warn).toHaveBeenCalledOnce();
@@ -777,8 +779,78 @@ describe('listContextFor', () => {
 
   it('no ordinal-0 row (an empty/odd queue): startedFrom defaults to 0', async () => {
     const got = await listContextFor(
-      {} as never, { orgId: 'O1', listViewId: 'L1', status: 'active' }, [], 'U-ME', new Date(), vi.fn(),
+      {} as never, { orgId: 'O1', listViewId: 'L1', status: 'active', objectType: 'Lead' }, [], 'U-ME', new Date(), vi.fn(),
     );
     expect(got).toEqual({ total: 0, startedFrom: 0, workedBy: [] });
   });
 });
+
+// User ruling 2026-10-26: a Lead/Opportunity list keeps its place for 7 days,
+// so the next morning's run continues where yesterday's stopped (reps stop
+// ~6 PM and start ~8 AM — 14 h, past the old 12 h window — so LA Hunt Queue
+// restarted at record 1 every day). A Task view ("today's tasks") changes
+// every day, so it keeps the 12 h window.
+describe('list share window per object type', () => {
+  it('Lead and Opportunity lists remember their place for 7 days; Task lists for 12 h', () => {
+    expect(LIST_SHARE_WINDOW_LONG_MS).toBe(7 * 24 * 60 * 60_000);
+    expect(listShareWindowMs('Lead')).toBe(LIST_SHARE_WINDOW_LONG_MS);
+    expect(listShareWindowMs('Opportunity')).toBe(LIST_SHARE_WINDOW_LONG_MS);
+    expect(listShareWindowMs('Task')).toBe(LIST_SHARE_WINDOW_MS);
+  });
+
+  it('listStartPosition reads back the window it is given, in BOTH queries', async () => {
+    const now = new Date('2026-10-27T15:00:00Z');
+    const { db, wheres } = fakeDb({ latest: [{ position: 5 }] });
+    await listStartPosition(db, 'ORG-1', '00B000000000001AAA', now, LIST_SHARE_WINDOW_LONG_MS, null);
+    expect(wheres).toHaveLength(2);
+    for (const w of wheres) {
+      expect(new PgDialect().sqlToQuery(w).params).toEqual(['ORG-1', '00B000000000001AAA', '2026-10-20T15:00:00.000Z']);
+    }
+  });
+
+  it('listRunStart reads back the window it is given', async () => {
+    const now = new Date('2026-10-27T15:00:00Z');
+    const { db, wheres } = fakeDb({ latest: [] });
+    await listRunStart(db, 'ORG-1', '00B000000000001AAA', now, LIST_SHARE_WINDOW_LONG_MS, null);
+    expect(new PgDialect().sqlToQuery(wheres[0]!).params).toEqual(['ORG-1', '00B000000000001AAA', '2026-10-20T15:00:00.000Z']);
+  });
+
+  it('listContextFor asks for the window of the session\'s own object type', async () => {
+    const readShared = vi.fn(async () => ({ workedBy: [] }));
+    const items = [{ attempt: 1, ordinal: 0, listPosition: 3 }];
+    await listContextFor({} as never, { orgId: 'O1', listViewId: 'L1', status: 'ready', objectType: 'Lead' }, items, 'U-ME', new Date(), readShared);
+    await listContextFor({} as never, { orgId: 'O1', listViewId: 'L1', status: 'ready', objectType: 'Task' }, items, 'U-ME', new Date(), readShared);
+    expect(readShared.mock.calls.map((c) => (c as unknown[])[4])).toEqual([LIST_SHARE_WINDOW_LONG_MS, LIST_SHARE_WINDOW_MS]);
+  });
+});
+
+// Review of eacba2c0 (N1): a view that shows each rep their own records keeps
+// each rep's own place; a shared view (a queue) keeps one place for everyone.
+describe('list place per rep, for a per-rep view', () => {
+  it('a per-rep read scopes BOTH queries to that rep\'s own runs', async () => {
+    const now = new Date('2026-10-27T15:00:00Z');
+    const { db, wheres } = fakeDb({ latest: [{ position: 5 }] });
+    await listStartPosition(db, 'ORG-1', '00B000000000001AAA', now, LIST_SHARE_WINDOW_MS, 'U-MATT');
+    expect(wheres).toHaveLength(2);
+    for (const w of wheres) {
+      const { sql, params } = new PgDialect().sqlToQuery(w);
+      expect(sql).toContain('"dialer_sessions"."user_id" = $4');
+      expect(params).toEqual(['ORG-1', '00B000000000001AAA', '2026-10-27T03:00:00.000Z', 'U-MATT']);
+    }
+  });
+
+  it('a shared read (null) has no rep in it', async () => {
+    const { db, wheres } = fakeDb({ latest: [] });
+    await listRunStart(db, 'ORG-1', '00B000000000001AAA', new Date('2026-10-27T15:00:00Z'), LIST_SHARE_WINDOW_MS, null);
+    const { sql, params } = new PgDialect().sqlToQuery(wheres[0]!);
+    expect(sql).not.toContain('user_id');
+    expect(params).toHaveLength(3);
+  });
+
+  it('listRunStart passes the rep through', async () => {
+    const { db, wheres } = fakeDb({ latest: [] });
+    await listRunStart(db, 'ORG-1', '00B000000000001AAA', new Date('2026-10-27T15:00:00Z'), LIST_SHARE_WINDOW_LONG_MS, 'U-MATT');
+    expect(new PgDialect().sqlToQuery(wheres[0]!).params).toEqual(['ORG-1', '00B000000000001AAA', '2026-10-20T15:00:00.000Z', 'U-MATT']);
+  });
+});
+
