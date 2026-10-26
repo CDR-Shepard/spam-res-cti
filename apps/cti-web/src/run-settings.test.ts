@@ -80,11 +80,17 @@ describe('run settings on Ready to dial (spec 2026-09-28)', () => {
     expect(runSettingsLine({ passes: 1, maxRecords: 100, rolloverBusinessDays: 1 })).toBe('Once · first 100 · missed → next business day');
   });
 
+  // 2026-10-26: a full run is a 200-person batch of a list read in full, so its
+  // list position can run past 2000 — "record 2001", never "record 2001 of 200".
+  it('recordPositionLine: a full run deep in a long list shows the record number alone', () => {
+    expect(recordPositionLine({ ordinal: 0, attempt: 1, listPosition: 2000 }, { runSize: null, listTotal: 200 })).toBe('record 2001');
+  });
+
   it('recordPositionLine: a limited run counts its own queue; a retry has no place in it; a full run keeps the list position', () => {
     expect(recordPositionLine({ ordinal: 2, attempt: 1, listPosition: 150 }, { runSize: 100, listTotal: 100 })).toBe('record 3 of 100');
     expect(recordPositionLine({ ordinal: 100, attempt: 2, listPosition: null }, { runSize: 100, listTotal: 100 })).toBeNull();
     expect(recordPositionLine({ attempt: 1, listPosition: 86 }, { runSize: 100, listTotal: 100 })).toBeNull(); // older server: no ordinal
-    expect(recordPositionLine({ ordinal: 2, attempt: 1, listPosition: 86 }, { runSize: null, listTotal: 220 })).toBe('record 87 of 220');
+    expect(recordPositionLine({ ordinal: 2, attempt: 1, listPosition: 86 }, { runSize: null, listTotal: 220 })).toBe('record 87');
     expect(recordPositionLine({ ordinal: 2, attempt: 1, listPosition: null }, { runSize: null, listTotal: 220 })).toBeNull();
   });
 
@@ -105,7 +111,7 @@ describe('run settings on Ready to dial (spec 2026-09-28)', () => {
     // Never shows X > N, even if the server sent something inconsistent.
     expect(recordPositionLine({ runPosition: 105, ordinal: 2, attempt: 1, listPosition: 150 }, { runSize: 100, listTotal: 100 })).toBe('record 100 of 100');
     // No runSize (unlimited run): runPosition is ignored, list position rules as before.
-    expect(recordPositionLine({ runPosition: 3, listPosition: 86 }, { runSize: null, listTotal: 220 })).toBe('record 87 of 220');
+    expect(recordPositionLine({ runPosition: 3, listPosition: 86 }, { runSize: null, listTotal: 220 })).toBe('record 87');
   });
 
   // Coordinator update to Minor fix 1: runPosition counts PEOPLE and is null

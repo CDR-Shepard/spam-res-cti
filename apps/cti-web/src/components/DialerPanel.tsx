@@ -190,7 +190,7 @@ export function confirmLine(
     // count — see wholeListLine for the list-wide breakdown.
     return `${maxRecords} will be dialed`;
   }
-  const wholeListSuffix = maxRecords !== null ? ' — the whole list' : '';
+  const wholeListSuffix = maxRecords !== null ? ' — this whole batch' : '';
   const parts = [`${q.dialing} will be dialed${wholeListSuffix}`, ...leftOutParts(q)];
   return parts.join(' · ');
 }
@@ -198,8 +198,8 @@ export function confirmLine(
 /**
  * Pure — the confirm block's SECOND line (review fix, Important 2 / ruling
  * S9), shown only when a limit actually shrinks the run below what the list
- * can dial: "Whole list: 187 dialable · 9 called in the last 3 h · 4 no
- * number · 2 blocked". Clearly labelled "Whole list:" so these figures never
+ * can dial: "This batch: 187 dialable · 9 called in the last 3 h · 4 no
+ * number · 2 blocked". Clearly labelled "This batch:" so these figures never
  * read as if they belong to the run confirmLine just named. Null whenever
  * confirmLine already says it all on one line (no limit, or a limit that
  * doesn't reduce anything — see Important 1).
@@ -213,7 +213,7 @@ export function wholeListLine(
   if (maxRecords === null) return null;
   const q = queueParts(firstPassTotal, unreachable, breakdown);
   if (maxRecords >= q.dialing) return null;
-  return [`Whole list: ${q.dialing} dialable`, ...leftOutParts(q)].join(' · ');
+  return [`This batch: ${q.dialing} dialable`, ...leftOutParts(q)].join(' · ');
 }
 
 /** Pure — "A, B and C" (no Oxford comma); "A and B" for two; the bare name for

@@ -833,15 +833,15 @@ describe('ConfirmBlock (SSR)', () => {
     // it never reads as if it belongs to the run).
     expect(at('100')).toContain('100 will be dialed');
     expect(at('100')).not.toContain('100 will be dialed · 9 called');
-    expect(at('100')).toContain('Whole list: 187 dialable · 9 called in the last 3 h · 4 no number · 2 blocked');
+    expect(at('100')).toContain('This batch: 187 dialable · 9 called in the last 3 h · 4 no number · 2 blocked');
     // Review fix (Important 1): a limit that does NOT shrink the run (it's >=
     // what the list can dial) reads plainly as the whole list, on one line —
     // no second "Whole list:" line (it would just repeat the first).
-    expect(at('195')).toContain('187 will be dialed — the whole list · 9 called in the last 3 h · 4 no number · 2 blocked');
-    expect(at('195')).not.toContain('Whole list:');
+    expect(at('195')).toContain('187 will be dialed — this whole batch · 9 called in the last 3 h · 4 no number · 2 blocked');
+    expect(at('195')).not.toContain('This batch:');
     // The unlimited line stays byte-for-byte as it always has been.
     expect(at('')).toContain('187 will be dialed · 9 called in the last 3 h · 4 no number · 2 blocked');
-    expect(at('')).not.toContain('Whole list:');
+    expect(at('')).not.toContain('This batch:');
   });
   it('an out-of-range number holds Start dialing back', () => {
     const html = renderToStaticMarkup(
@@ -858,7 +858,7 @@ describe('ConfirmBlock (SSR)', () => {
       <ConfirmBlock view={sixty} busy={false} error={null} onStartDialing={() => {}} onChooseAnother={() => {}} draft={{ passes: 2, rolloverBusinessDays: 1, howMany: '100' }} />,
     );
     expect(html).not.toContain('Enter a whole number');
-    expect(html).toContain('60 will be dialed — the whole list');
+    expect(html).toContain('60 will be dialed — this whole batch');
     expect(html).toContain('<button class="btn primary full">Start dialing</button>');
     expect(html).not.toMatch(/<button class="btn primary full" disabled="">Start dialing<\/button>/);
   });
@@ -935,9 +935,10 @@ describe('confirmContextLine', () => {
 describe('CurrentRecord — the list-position line', () => {
   const item: DialerCurrentItem = { id: 'i1', recordId: '00Q1', objectType: 'Lead', status: 'dialing', toNumber: '+16195551234' };
 
-  it('listPosition + listTotal present: "record 88 of 220" (1-based from a 0-based index)', () => {
+  it('listPosition + listTotal present: "record 88" (1-based from a 0-based index; no "of N" — a run is a batch of the list)', () => {
     const html = renderToStaticMarkup(<CurrentRecord item={{ ...item, listPosition: 87 }} listTotal={220} />);
-    expect(html).toContain('record 88 of 220');
+    expect(html).toContain('record 88');
+    expect(html).not.toContain('record 88 of');
   });
 
   it('no listPosition, or no listTotal: no "record N of M" line (the "Current record" kicker is unaffected)', () => {
@@ -1029,18 +1030,18 @@ describe('confirmLine — a run size (spec 2026-09-28)', () => {
   });
   it('a limit >= what the list can dial has no effect — says so plainly, on one line (Important 1)', () => {
     const b = { already_worked: 9, blocked: 2 };
-    expect(confirmLine(202, 4, b, 195)).toBe('187 will be dialed — the whole list · 9 called in the last 3 h · 4 no number · 2 blocked');
+    expect(confirmLine(202, 4, b, 195)).toBe('187 will be dialed — this whole batch · 9 called in the last 3 h · 4 no number · 2 blocked');
     expect(confirmLine(202, 4, b, null)).toBe('187 will be dialed · 9 called in the last 3 h · 4 no number · 2 blocked');
   });
   it('a limit exactly equal to what the list can dial also reads as the whole list', () => {
-    expect(confirmLine(202, 4, { already_worked: 9, blocked: 2 }, 187)).toBe('187 will be dialed — the whole list · 9 called in the last 3 h · 4 no number · 2 blocked');
+    expect(confirmLine(202, 4, { already_worked: 9, blocked: 2 }, 187)).toBe('187 will be dialed — this whole batch · 9 called in the last 3 h · 4 no number · 2 blocked');
   });
 });
 
 describe('wholeListLine — the list-wide breakdown, on its own line (ruling S9, Important 2)', () => {
   const b = { already_worked: 9, blocked: 2 };
   it('shown only when a limit actually shrinks the run, clearly labelled "Whole list:"', () => {
-    expect(wholeListLine(202, 4, b, 100)).toBe('Whole list: 187 dialable · 9 called in the last 3 h · 4 no number · 2 blocked');
+    expect(wholeListLine(202, 4, b, 100)).toBe('This batch: 187 dialable · 9 called in the last 3 h · 4 no number · 2 blocked');
   });
   it('null when there is no limit — confirmLine already says it all', () => {
     expect(wholeListLine(202, 4, b, null)).toBeNull();
@@ -1059,7 +1060,7 @@ describe('CurrentRecord — a limited run counts its own queue (spec 2026-09-28)
     expect(renderToStaticMarkup(<CurrentRecord item={item} listTotal={104} runSize={104} />)).toContain('record 3 of 104');
   });
   it('a full run keeps the list position, as today', () => {
-    expect(renderToStaticMarkup(<CurrentRecord item={item} listTotal={220} />)).toContain('record 151 of 220');
+    expect(renderToStaticMarkup(<CurrentRecord item={item} listTotal={220} />)).toContain('record 151');
   });
   // Minor fix 1 (spec 2026-09-28 review): prefers the server's own
   // runPosition (already 1-based) over the ordinal estimate.
@@ -1089,6 +1090,6 @@ describe('confirmLine / wholeListLine — non-US numbers', () => {
   });
 
   it('the whole-list line itemizes them too', () => {
-    expect(wholeListLine(50, 0, { non_us: 1 }, 10)).toBe('Whole list: 49 dialable · 1 non-US number');
+    expect(wholeListLine(50, 0, { non_us: 1 }, 10)).toBe('This batch: 49 dialable · 1 non-US number');
   });
 });

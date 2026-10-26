@@ -135,6 +135,9 @@ export function recordPositionLine(
     // as the runPosition branch above.
     return `record ${Math.min(item.ordinal + 1, ctx.runSize)} of ${ctx.runSize}`;
   }
-  if (item.listPosition != null && ctx.listTotal !== null) return `record ${item.listPosition + 1} of ${ctx.listTotal}`;
+  // A full run is a 200-person batch of a list read in full (2026-10-26), so
+  // its list position can run into the thousands: the record number alone,
+  // never "of" the batch's own size ("record 2001 of 200").
+  if (item.listPosition != null && ctx.listTotal !== null) return `record ${item.listPosition + 1}`;
   return null;
 }

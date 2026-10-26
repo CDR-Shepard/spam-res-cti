@@ -74,18 +74,18 @@ describe('Ready to dial — run settings', () => {
     mount();
     const box = await screen.findByLabelText('How many');
     expect(screen.getByText(/^187 will be dialed/)).toBeTruthy();
-    expect(screen.queryByText(/^Whole list:/)).toBeNull();
+    expect(screen.queryByText(/^This batch:/)).toBeNull();
     fireEvent.change(box, { target: { value: '100' } });
     // Review fix (Important 2, ruling S9): a limit that shrinks the run shows
     // its own line, plus a second, clearly labelled list-wide line.
     expect(screen.getByText('100 will be dialed')).toBeTruthy();
-    expect(screen.getByText(/^Whole list: 187 dialable/)).toBeTruthy();
+    expect(screen.getByText(/^This batch: 187 dialable/)).toBeTruthy();
     fireEvent.change(box, { target: { value: '195' } });
-    expect(screen.getByText(/^187 will be dialed — the whole list/)).toBeTruthy();
-    expect(screen.queryByText(/^Whole list:/)).toBeNull();
+    expect(screen.getByText(/^187 will be dialed — this whole batch/)).toBeTruthy();
+    expect(screen.queryByText(/^This batch:/)).toBeNull();
     fireEvent.change(box, { target: { value: '' } });
     expect(screen.getByText(/^187 will be dialed/)).toBeTruthy();
-    expect(screen.queryByText(/^Whole list:/)).toBeNull();
+    expect(screen.queryByText(/^This batch:/)).toBeNull();
   });
 
   it('the box keeps digits only, and an out-of-range number holds Start back with the reason', async () => {
@@ -121,7 +121,7 @@ describe('Ready to dial — run settings', () => {
     vi.spyOn(dialerApi, 'getDialer').mockResolvedValue(SIXTY);
     mount({ runDefaults: { passes: 2, maxRecords: 100, rolloverBusinessDays: 1 } });
     expect((await screen.findByLabelText('How many') as HTMLInputElement).value).toBe('100');
-    expect(screen.getByText('60 will be dialed — the whole list')).toBeTruthy();
+    expect(screen.getByText('60 will be dialed — this whole batch')).toBeTruthy();
     expect(screen.queryByText(/Enter a whole number/)).toBeNull();
     expect(startButton().disabled).toBe(false);
   });
