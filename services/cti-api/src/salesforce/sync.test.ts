@@ -758,6 +758,35 @@ describe("syncOne — create-time recording-link push stamps recording_link_sync
     errSpy.mockRestore();
   });
 
+  it('writes the link into our Call Recording field first, then the package field, as separate PATCHes', async () => {
+    const db = fakeDb(callRow({ recordingUrl: 'https://recordings.example/abc.mp3' }));
+    const updateCallTask = vi.fn(async () => ({ updated: true })) as unknown as SyncOneDeps['updateCallTask'];
+    await syncOne('call-1', syncDeps({ db, updateCallTask }));
+    const url = expect.stringContaining('/recordings/call-1?sig=');
+    expect((updateCallTask as any).mock.calls).toEqual([
+      ['U1', '00TNEW', { CTI_Recording_Link__c: url }],
+      ['U1', '00TNEW', { tdc_cti__Recording_URL__c: url }],
+    ]);
+  });
+
+  it('a rep without the tdc_cti license still gets the link: stamped, a warning, no INVALID_FIELD error', async () => {
+    const db = fakeDb(callRow({ recordingUrl: 'https://recordings.example/abc.mp3' }));
+    const updateCallTask = vi.fn(async (_u: string, _t: string, f: Record<string, unknown>) => ({
+      updated: !('tdc_cti__Recording_URL__c' in f),
+    })) as unknown as SyncOneDeps['updateCallTask'];
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    await syncOne('call-1', syncDeps({ db, updateCallTask }));
+    expect((db as any)._updates).toContainEqual({ patch: expect.objectContaining({ recordingLinkSyncedAt: expect.any(Date) }) });
+    expect(errSpy).not.toHaveBeenCalledWith('[sf-sync] recording link field rejected (INVALID_FIELD)', expect.anything());
+    expect(warnSpy).toHaveBeenCalledWith(
+      '[sf-sync] tdc_cti recording field rejected — the rep has no 360 CTI license; the link is in Call Recording',
+      expect.objectContaining({ callId: 'call-1', taskId: '00TNEW' }),
+    );
+    errSpy.mockRestore();
+    warnSpy.mockRestore();
+  });
+
   it('does NOT stamp when the PATCH fails, and the Task sync still succeeds', async () => {
     const db = fakeDb(callRow({ recordingUrl: 'https://recordings.example/abc.mp3' }));
     const updateCallTask = vi.fn(async () => {
@@ -813,6 +842,47 @@ describe('pushRecordingLinkToTask — the webhook-side push, same stamp-on-succe
     );
     expect((db as any)._updates).toContainEqual({ patch: expect.objectContaining({ recordingLinkSyncedAt: expect.any(Date) }) });
     errSpy.mockRestore();
+  });
+
+  it('writes the link into our Call Recording field first, then the package field, as separate PATCHes', async () => {
+    const db = fakeDb(callRow({ recordingUrl: 'https://recordings.example/abc.mp3', salesforceTaskId: '00T1' }));
+    const updateCallTask = vi.fn(async () => ({ updated: true }));
+    expect(await pushRecordingLinkToTask('call-1', { db, updateCallTask } as any)).toBe('patched');
+    const url = expect.stringContaining('/recordings/call-1?sig=');
+    expect(updateCallTask.mock.calls).toEqual([
+      ['U1', '00T1', { CTI_Recording_Link__c: url }],
+      ['U1', '00T1', { tdc_cti__Recording_URL__c: url }],
+    ]);
+  });
+
+  it('a rep without the tdc_cti license still gets the link: stamped, a warning, no INVALID_FIELD error', async () => {
+    const db = fakeDb(callRow({ recordingUrl: 'https://recordings.example/abc.mp3', salesforceTaskId: '00T1' }));
+    const updateCallTask = vi.fn(async (_u: string, _t: string, f: Record<string, unknown>) => ({
+      updated: !('tdc_cti__Recording_URL__c' in f),
+    }));
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    expect(await pushRecordingLinkToTask('call-1', { db, updateCallTask } as any)).toBe('patched');
+    expect((db as any)._updates).toContainEqual({ patch: expect.objectContaining({ recordingLinkSyncedAt: expect.any(Date) }) });
+    expect(errSpy).not.toHaveBeenCalledWith('[sf-sync] recording link field rejected (INVALID_FIELD)', expect.anything());
+    expect(warnSpy).toHaveBeenCalledWith(
+      '[sf-sync] tdc_cti recording field rejected — the rep has no 360 CTI license; the link is in Call Recording',
+      expect.objectContaining({ callId: 'call-1', taskId: '00T1' }),
+    );
+    errSpy.mockRestore();
+    warnSpy.mockRestore();
+  });
+
+  it('both fields rejected logs only the INVALID_FIELD error — never a warning that the link is in Call Recording', async () => {
+    const db = fakeDb(callRow({ recordingUrl: 'https://recordings.example/abc.mp3', salesforceTaskId: '00T1' }));
+    const updateCallTask = vi.fn(async () => ({ updated: false }));
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    await pushRecordingLinkToTask('call-1', { db, updateCallTask } as any);
+    expect(errSpy).toHaveBeenCalledWith('[sf-sync] recording link field rejected (INVALID_FIELD)', expect.anything());
+    expect(warnSpy).not.toHaveBeenCalled();
+    errSpy.mockRestore();
+    warnSpy.mockRestore();
   });
 
   it('propagates a PATCH failure (caller retries) and does not stamp', async () => {

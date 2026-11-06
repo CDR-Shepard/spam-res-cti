@@ -38,6 +38,7 @@ import { buildRecordingPublicUrl, type RecordingLinkConfig } from '../telephony/
 import type { AppConfig } from '../config.js';
 import { loadConfig } from '../config.js';
 import { MAX_TRIES, buildConnectTaskInput, leaseFor, taskLinks } from './dialer-connect-task.js';
+import { writeRecordingLink } from './recording-link-fields.js';
 
 type Db = ReturnType<typeof getDb>;
 const c = schema.dialerConnects;
@@ -198,9 +199,6 @@ export async function processConnectTask(
   return 'created';
 }
 
-/** The writable recording field click-to-dial Tasks carry (salesforce/sync.ts). */
-export const RECORDING_URL_FIELD = 'tdc_cti__Recording_URL__c';
-
 export function selectDueLinks(db: Db, now: Date) {
   return db
     .select()
@@ -236,26 +234,32 @@ export function claimLink(db: Db, row: Pick<DialerConnect, 'id' | 'linkAttempts'
 }
 
 /**
- * One claimed row → its recording link on its Task, as the rep. The PUBLIC
- * playback URL (GET /recordings/:id?sig=), never the Twilio media URL. A field
- * Salesforce rejects (the rep has no tdc_cti package license — see the
- * recording-links memory) is stamped synced with a loud log, exactly like the
- * click-to-dial sweep: no retry can fix a license.
+ * One claimed row → its recording link on its Task, as the rep, in both
+ * recording fields (salesforce/recording-link-fields.ts). The PUBLIC playback
+ * URL (GET /recordings/:id?sig=), never the Twilio media URL. Our Call
+ * Recording field is the one that counts: rejected (missing from the org, or
+ * hidden by field security) is stamped synced with a loud log, exactly like the
+ * click-to-dial sweep — no retry can fix configuration. The package field
+ * rejected only means the rep has no tdc_cti license: a warning.
  */
 export async function pushConnectLink(row: DialerConnect, deps: DialerConnectDeps): Promise<'synced' | 'rejected' | 'retry' | 'failed'> {
   const url = buildRecordingPublicUrl(row.id, deps.link);
   try {
-    const { updated } = await withTimeout(
-      deps.sf.updateCallTask(row.userId, row.salesforceTaskId!, { [RECORDING_URL_FIELD]: url }),
-      SF_CALL_TIMEOUT_MS,
-      'recording link',
+    const written = await writeRecordingLink(
+      (userId, taskId, fields) => withTimeout(deps.sf.updateCallTask(userId, taskId, fields), SF_CALL_TIMEOUT_MS, 'recording link'),
+      row.userId,
+      row.salesforceTaskId!,
+      url,
     );
     await patchConnect(deps.db, row.id, {
       recordingLinkSyncedAt: deps.now(),
-      lastError: updated ? null : 'recording link field rejected',
+      lastError: written.callRecording ? null : 'recording link field rejected',
     }, deps.now());
-    if (!updated) {
-      console.error(`${LOG} recording link field rejected — check the rep's tdc_cti package license`, { connectId: row.id, userId: row.userId });
+    if (written.callRecording && !written.packageField) {
+      console.warn(`${LOG} tdc_cti recording field rejected — the rep has no 360 CTI license; the link is in Call Recording`, { connectId: row.id, userId: row.userId });
+    }
+    if (!written.callRecording) {
+      console.error(`${LOG} Call Recording field rejected — check CTI_Recording_Link__c exists and the rep's profile can edit it`, { connectId: row.id, userId: row.userId });
       return 'rejected';
     }
     return 'synced';

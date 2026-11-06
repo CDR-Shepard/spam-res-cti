@@ -8,6 +8,7 @@ import { getDb, schema } from '@cti/db';
 import { normalize } from '@cti/phone';
 import { loadConfig } from '../config.js';
 import { buildRecordingPublicUrl } from '../telephony/recording-links.js';
+import { writeRecordingLink, type RecordingLinkWrite } from './recording-link-fields.js';
 import type { RolloverBusinessDays } from '@cti/contracts';
 import { CLICK_TO_DIAL_ROLLOVER_MISSES, rolloverDue, type Dial, type Person } from '../dialer/contact-history.js';
 import { savedRolloverBusinessDays } from '../dialer/run-settings.js';
@@ -453,11 +454,11 @@ export async function syncOne(
     From_Number__c: call.fromNumber,
     To_Number__c: call.toNumber,
     Normalized_To_Number__c: call.normalizedToNumber,
-    // NOTE: the recording link (tdc_cti__Recording_URL__c) is NOT set here —
-    // createCallTask blanket-strips ALL custom fields when the org is missing any
-    // of the generic ones above, which would drop a valid recording field too.
-    // It's attached via a dedicated single-field PATCH after the Task exists
-    // (see the tdc_cti__Recording_URL__c push below and pushRecordingLinkToTask).
+    // NOTE: the recording link is NOT set here — createCallTask blanket-strips
+    // ALL custom fields when the org is missing any of the generic ones above,
+    // which would drop a valid recording field too. It's attached via
+    // dedicated single-field PATCHes after the Task exists (writeRecordingLink,
+    // in the push below and pushRecordingLinkToTask).
     Transcript_URL__c: call.transcriptUrl ?? null,
     Call_Start_Time__c: call.startedAt?.toISOString() ?? null,
     Call_End_Time__c: call.endedAt?.toISOString() ?? null,
@@ -624,15 +625,13 @@ export async function syncOne(
     // not marked" and would PATCH again blind (harmless, but confusing logs).
     let patched = false;
     try {
-      const { updated } = await deps.updateCallTask(call.userId, taskId, { tdc_cti__Recording_URL__c: recUrl });
+      const written = await writeRecordingLink(deps.updateCallTask, call.userId, taskId, recUrl);
       // INVALID_FIELD (Fix 1, 2026-08-26 review): a configuration fact, not a
       // transient failure — retrying can't fix a field missing from the org
       // or hidden from this rep by field-level security. Still stamped below
       // (leaving it unstamped would clog the sweep forever), but logged
       // distinctly so a false "success" doesn't hide silently in the stamp.
-      if (!updated) {
-        console.error('[sf-sync] recording link field rejected (INVALID_FIELD)', { callId: call.id, taskId });
-      }
+      logRejectedRecordingFields(written, { callId: call.id, taskId });
       patched = true;
     } catch (err) {
       console.error('[sf-sync] recording attach failed', {
@@ -653,6 +652,20 @@ export async function syncOne(
         });
       }
     }
+  }
+}
+
+/**
+ * Our Call Recording field rejected is the INVALID_FIELD error (the field is
+ * missing from the org, or this rep's profile cannot edit it). The package
+ * field rejected only means the rep has no tdc_cti license — the link still
+ * landed in ours, so a warning.
+ */
+function logRejectedRecordingFields(written: RecordingLinkWrite, ctx: { callId: string; taskId: string }): void {
+  if (!written.callRecording) {
+    console.error('[sf-sync] recording link field rejected (INVALID_FIELD)', ctx);
+  } else if (!written.packageField) {
+    console.warn('[sf-sync] tdc_cti recording field rejected — the rep has no 360 CTI license; the link is in Call Recording', ctx);
   }
 }
 
@@ -690,16 +703,11 @@ export async function pushRecordingLinkToTask(
   // decides whether/when to retry. recordingLinkSyncedAt is stamped ONLY once
   // the PATCH above has actually succeeded (2026-08-26 incident: this push used
   // to be fire-and-forget with nothing recording whether it landed).
-  const { updated } = await deps.updateCallTask(call.userId, call.salesforceTaskId, { tdc_cti__Recording_URL__c: url });
+  const written = await writeRecordingLink(deps.updateCallTask, call.userId, call.salesforceTaskId, url);
   // INVALID_FIELD (Fix 1, 2026-08-26 review): same handling as syncOne's
   // create-time push above — still stamped below, but logged distinctly so a
   // configuration-rejected PATCH doesn't look identical to a real success.
-  if (!updated) {
-    console.error('[sf-sync] recording link field rejected (INVALID_FIELD)', {
-      callId,
-      taskId: call.salesforceTaskId,
-    });
-  }
+  logRejectedRecordingFields(written, { callId, taskId: call.salesforceTaskId });
   try {
     await db
       .update(schema.calls)

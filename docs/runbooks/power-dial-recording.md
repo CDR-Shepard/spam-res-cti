@@ -3,7 +3,9 @@
 Every power-dial call bridged to a rep gets a row in `dialer_connects`, a
 dual-channel recording of the prospect's leg (from the bridge on), and ONE
 completed Call Task on the screen-popped record with the public recording link
-in `tdc_cti__Recording_URL__c`. Design:
+in `CTI_Recording_Link__c` ("Call Recording", our own field, visible to every
+profile) and in the 360 CTI package's `tdc_cti__Recording_URL__c` (rejected for
+a rep without a tdc_cti license, which only logs a warning). Design:
 `docs/superpowers/specs/2026-10-01-power-dialer-recording-design.md`.
 
 ## Switches (Railway `@cti/api` variables — changing one restarts the service)

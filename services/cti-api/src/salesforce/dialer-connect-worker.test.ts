@@ -5,10 +5,10 @@ import { schema, type DialerConnect } from '@cti/db';
 import { SalesforceUnauthorizedError } from './client.js';
 import { MAX_TRIES } from './dialer-connect-task.js';
 import { buildRecordingPublicUrl } from '../telephony/recording-links.js';
+import { CALL_RECORDING_FIELD, PACKAGE_RECORDING_FIELD } from './recording-link-fields.js';
 import {
   AUTH_RETRY_MS,
   LOOP_INTERVAL_MS,
-  RECORDING_URL_FIELD,
   claimConnectTask,
   claimLink,
   expireStaleConnects,
@@ -237,22 +237,54 @@ describe('pushConnectLink — the recording link on the Task', () => {
   const withTask = (o: Partial<DialerConnect> = {}) =>
     connectRow({ taskState: 'created', salesforceTaskId: '00TNEW000000001', recordingUrl: 'https://api.twilio.com/r.mp3', linkAttempts: 1, ...o });
 
-  it('PATCHes the PUBLIC playback URL (never the Twilio media URL) as the rep, then stamps it synced', async () => {
+  it('PATCHes the PUBLIC playback URL (never the Twilio media URL) as the rep into both fields, then stamps it synced', async () => {
     const h = harness();
+    const url = buildRecordingPublicUrl(withTask().id, h.deps.link);
     expect(await pushConnectLink(withTask(), h.deps)).toBe('synced');
-    expect(h.sf.updateCallTask).toHaveBeenCalledWith('rep-1', '00TNEW000000001', {
-      [RECORDING_URL_FIELD]: buildRecordingPublicUrl(withTask().id, h.deps.link),
-    });
-    expect(RECORDING_URL_FIELD).toBe('tdc_cti__Recording_URL__c');
+    expect(h.sf.updateCallTask).toHaveBeenCalledTimes(2);
+    expect(h.sf.updateCallTask).toHaveBeenNthCalledWith(1, 'rep-1', '00TNEW000000001', { [CALL_RECORDING_FIELD]: url });
+    expect(h.sf.updateCallTask).toHaveBeenNthCalledWith(2, 'rep-1', '00TNEW000000001', { [PACKAGE_RECORDING_FIELD]: url });
     expect(h.writes).toEqual([expect.objectContaining({ recordingLinkSyncedAt: NOW, lastError: null })]);
   });
 
-  it('a rejected field (no tdc_cti license) stamps synced WITH a loud log — no retry can fix a license', async () => {
+  it('a rep without the tdc_cti license still gets the link: our field lands, synced, only a warning', async () => {
+    const h = harness({
+      updateCallTask: vi.fn(async (_u: string, _t: string, f: Record<string, string>) => ({ updated: !(PACKAGE_RECORDING_FIELD in f) })),
+    });
+    expect(await pushConnectLink(withTask(), h.deps)).toBe('synced');
+    expect(h.writes).toEqual([expect.objectContaining({ recordingLinkSyncedAt: NOW, lastError: null })]);
+    expect(error).not.toHaveBeenCalled();
+    expect(warn).toHaveBeenCalledWith(
+      "[dialer-connect-worker] tdc_cti recording field rejected — the rep has no 360 CTI license; the link is in Call Recording",
+      { connectId: withTask().id, userId: 'rep-1' },
+    );
+  });
+
+  it('our field rejected but the package field accepted is still the loud log, and no "the link is in Call Recording" warning', async () => {
+    const h = harness({
+      updateCallTask: vi.fn(async (_u: string, _t: string, f: Record<string, string>) => ({ updated: !(CALL_RECORDING_FIELD in f) })),
+    });
+    expect(await pushConnectLink(withTask(), h.deps)).toBe('rejected');
+    expect(h.writes).toEqual([expect.objectContaining({ recordingLinkSyncedAt: NOW, lastError: 'recording link field rejected' })]);
+    expect(error).toHaveBeenCalledWith(
+      "[dialer-connect-worker] Call Recording field rejected — check CTI_Recording_Link__c exists and the rep's profile can edit it",
+      { connectId: withTask().id, userId: 'rep-1' },
+    );
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it('both fields rejected logs only the error — never a warning that the link is in Call Recording', async () => {
+    const h = harness({ updateCallTask: vi.fn(async () => ({ updated: false })) });
+    expect(await pushConnectLink(withTask(), h.deps)).toBe('rejected');
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it('our field rejected (missing from the org, or hidden by field security) stamps synced WITH a loud log — no retry can fix that', async () => {
     const h = harness({ updateCallTask: vi.fn(async () => ({ updated: false })) });
     expect(await pushConnectLink(withTask(), h.deps)).toBe('rejected');
     expect(h.writes).toEqual([expect.objectContaining({ recordingLinkSyncedAt: NOW, lastError: 'recording link field rejected' })]);
     expect(error).toHaveBeenCalledWith(
-      "[dialer-connect-worker] recording link field rejected — check the rep's tdc_cti package license",
+      "[dialer-connect-worker] Call Recording field rejected — check CTI_Recording_Link__c exists and the rep's profile can edit it",
       { connectId: withTask().id, userId: 'rep-1' },
     );
   });

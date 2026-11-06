@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<CustomField xmlns="http://soap.sforce.com/2006/04/metadata">
+    <fullName>CTI_Recording_Link__c</fullName>
+    <description>Link to the call recording, written by the Callsign CTI on every recorded call. Not part of the 360 CTI package, so it works for reps without a tdc_cti license and anyone who can open the task can see it. Do not edit by hand.</description>
+    <externalId>false</externalId>
+    <inlineHelpText>Opens the recording of this call. Set automatically by the CTI.</inlineHelpText>
+    <label>Call Recording</label>
+    <required>false</required>
+    <trackTrending>false</trackTrending>
+    <type>Url</type>
+</CustomField>
