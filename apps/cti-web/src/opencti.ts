@@ -193,6 +193,13 @@ export function setPanelVisibility(visible: boolean): void {
 }
 
 /**
+ * The softphone panel height reps see in Salesforce: set at Open CTI ready,
+ * it overrides the call center's reqSoftphoneHeight. 750 × 475 since
+ * 2026-11-16 (25% over 600 × 380); keep CallCenter.xml in step.
+ */
+export const SOFTPHONE_PANEL_HEIGHT_PX = 750;
+
+/**
  * Grow the Open CTI softphone panel to fit the full dial screen (circular pad +
  * call button + nav) without clipping. No-op outside Salesforce; Salesforce
  * clamps to the utility bar's allowed range.

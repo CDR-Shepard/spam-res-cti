@@ -44,7 +44,7 @@ import { formatE164 } from './format';
 import { navTabsFor, NAV_OVERFLOW_IDS, type Tab } from './nav';
 import {
   initOpenCti, notifyReady, onClickToDial as onCti, saveCallLog, screenPopRecord, setPanelHeight, setPanelVisibility,
-  type ClickToDialEvent,
+  SOFTPHONE_PANEL_HEIGHT_PX, type ClickToDialEvent,
 } from './opencti';
 import { createSoftphoneCoordinator, browserCoordinatorDeps, type CoordinatorState, type SoftphoneCoordinator } from './softphone-coordinator';
 import { watchCallMedia, watchLocalMic, MEDIA_ISSUE_MESSAGE, type LocalMicCall } from './audio-readiness';
@@ -698,7 +698,7 @@ export function App(): JSX.Element {
           notifyReady();
           // Grow the utility panel so the taller circular dialpad + call button
           // + nav all fit without clipping.
-          setPanelHeight(600);
+          setPanelHeight(SOFTPHONE_PANEL_HEIGHT_PX);
           // After a reset the softphone reloads to the sign-in screen: surface
           // the panel so the rep sees why (spec decision 7) — and for a due
           // sound check too. This is the first moment Open CTI exists: the
