@@ -84,6 +84,25 @@ describe('useTextBadge', () => {
     expect(result.current).toBe(5);
   });
 
+  it('skips the timed check while the page is hidden, and checks the moment it is shown', async () => {
+    let hidden = false;
+    const spy = vi.spyOn(document, 'hidden', 'get').mockImplementation(() => hidden);
+    try {
+      renderHook(() => useTextBadge({ userId: 'u1', active: true }));
+      await flush();
+      expect(fetchNewTextCount).toHaveBeenCalledTimes(1);
+      hidden = true;
+      await act(async () => { await vi.advanceTimersByTimeAsync(TEXTS_BADGE_POLL_MS * 3); });
+      expect(fetchNewTextCount).toHaveBeenCalledTimes(1);
+      hidden = false;
+      document.dispatchEvent(new Event('visibilitychange'));
+      await flush();
+      expect(fetchNewTextCount).toHaveBeenCalledTimes(2);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   it('stops asking once unmounted', async () => {
     const { unmount } = renderHook(() => useTextBadge({ userId: 'u1', active: true }));
     await flush();

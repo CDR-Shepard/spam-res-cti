@@ -2356,7 +2356,7 @@ export function App(): JSX.Element {
   };
   const navItems = navTabsFor(me.user).map((t) => ({ ...t, icon: iconFor[t.id] }));
   // Keep the bottom bar uncrowded: the admin-only tools live under a "More"
-  // overflow (reps have none, so their bar is just the 4 primary tabs).
+  // overflow (reps have none, so their bar is just the primary tabs).
   const primaryItems = navItems.filter((i) => !NAV_OVERFLOW_IDS.includes(i.id));
   const overflowItems = navItems.filter((i) => NAV_OVERFLOW_IDS.includes(i.id));
   const overflowActive = overflowItems.some((i) => i.id === tab);

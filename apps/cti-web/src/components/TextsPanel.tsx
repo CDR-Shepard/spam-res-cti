@@ -101,6 +101,7 @@ export function TextsPanel({ onSeen }: TextsPanelProps): JSX.Element {
   useEffect(() => {
     if (newest === null) return;
     const id = window.setInterval(() => {
+      if (document.hidden) return;
       void fetchNewTextCount(newest)
         .then((n) => { if (n > 0) return load(); })
         .catch(() => { /* try again next tick */ });
