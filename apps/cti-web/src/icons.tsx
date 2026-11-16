@@ -132,6 +132,12 @@ export const ClockIcon = (p: IconProps): JSX.Element => (
   </Svg>
 );
 
+export const MessageIcon = (p: IconProps): JSX.Element => (
+  <Svg {...p}>
+    <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+  </Svg>
+);
+
 export const SettingsIcon = (p: IconProps): JSX.Element => (
   <Svg {...p}>
     <circle cx="12" cy="12" r="3" />

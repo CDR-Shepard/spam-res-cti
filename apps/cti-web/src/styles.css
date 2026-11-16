@@ -208,6 +208,16 @@ input, select, textarea { font: inherit; color: inherit; }
 .nav .tab svg { width: 20px; height: 20px; }
 .nav .tab:hover { color: var(--text-muted); }
 .nav .tab.active { color: var(--accent); }
+.nav .tab .tab-icon { position: relative; display: inline-flex; }
+/* New texts since the rep last opened the Texts tab. */
+.nav .tab .tab-badge {
+  position: absolute; top: -5px; right: -10px;
+  min-width: 16px; height: 16px; padding: 0 4px;
+  border-radius: 8px;
+  background: var(--bad); color: #fff;
+  font-size: 9.5px; font-weight: 700; line-height: 16px; text-align: center;
+  font-variant-numeric: tabular-nums;
+}
 
 /* "More" overflow — admin tools tucked into a popover above the bar. */
 .nav .tab-more { position: relative; flex: 1; display: flex; }
@@ -810,6 +820,23 @@ textarea.field { resize: none; min-height: 70px; line-height: 1.45; }
 .sync { font-size: 10px; font-weight: 600; color: var(--text-dim); }
 .sync.ok { color: var(--good); }
 .sync.warn { color: var(--warn); }
+
+/* Texts tab: a row grows with the message, so it aligns to the top. */
+.list .row-item.text-item { align-items: flex-start; }
+.list .row-item.text-item.tappable:hover { background: var(--surface-2); }
+.text-body {
+  margin-top: 6px;
+  font-size: 13px; line-height: 1.45; color: var(--text);
+  white-space: pre-wrap; overflow-wrap: anywhere;
+}
+.text-tags { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
+.text-tag {
+  font-size: 10px; font-weight: 600;
+  padding: 2px 7px; border-radius: 999px;
+  background: var(--surface-2); color: var(--text-muted);
+}
+.text-tag.stop { color: var(--bad); background: color-mix(in srgb, var(--bad) 12%, transparent); }
+.text-tag.warn { color: var(--warn); background: color-mix(in srgb, var(--warn) 14%, transparent); }
 
 /* ============================================================================ */
 /* Reputation                                                                   */

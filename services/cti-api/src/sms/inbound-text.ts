@@ -37,6 +37,10 @@ export function redactBody(text: string, body: string): string {
   return [twice, once, body].reduce((acc, form) => acc.split(form).join('[message]'), text);
 }
 
+/** The `last_error` a row gets when Salesforce refused the rep's sign-in. The
+ *  Texts tab reads it to tell the rep to sign in again. */
+export const RECONNECT_SALESFORCE = 'reconnect Salesforce';
+
 /** Salesforce's limit on Task.Subject; a longer one fails the whole create. */
 const SUBJECT_MAX = 255;
 const STOP_SUFFIX = ' — asked to STOP';

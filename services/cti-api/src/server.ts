@@ -8,6 +8,7 @@ import { registerHealthRoutes } from './routes/health.js';
 import { registerAuthRoutes } from './routes/auth.js';
 import { registerFirewallRoutes } from './routes/firewall.js';
 import { registerCallRoutes } from './routes/calls.js';
+import { registerTextRoutes } from './routes/texts.js';
 import { registerTelephonyRoutes } from './routes/telephony.js';
 import { registerAdminRoutes } from './routes/admin.js';
 import { registerAdminTalkTimeRoutes } from './routes/admin-talk-time.js';
@@ -121,6 +122,7 @@ async function main(): Promise<void> {
   await registerAuthRoutes(app);
   await registerFirewallRoutes(app);
   await registerCallRoutes(app);
+  await registerTextRoutes(app);
   await registerTelephonyRoutes(app);
   await registerAdminRoutes(app);
   await registerAdminTalkTimeRoutes(app);

@@ -4,13 +4,21 @@ import { navTabsFor, NAV_OVERFLOW_IDS, type Tab } from './nav';
 const rep = { isAdmin: false, powerDialerEnabled: false };
 
 describe('navTabsFor', () => {
-  it('a rep without power dial sees only Dial/Recent/Settings', () => {
-    expect(navTabsFor(rep).map((t) => t.id)).toEqual(['dialer', 'recent', 'settings']);
+  it('a rep without power dial sees Dial/Recent/Texts/Settings', () => {
+    expect(navTabsFor(rep).map((t) => t.id)).toEqual(['dialer', 'recent', 'texts', 'settings']);
+  });
+
+  it('every rep gets Texts right after Recent, in the main bar (never under More)', () => {
+    for (const u of [rep, { ...rep, powerDialerEnabled: true }, { isAdmin: true, powerDialerEnabled: true }]) {
+      const ids = navTabsFor(u).map((t) => t.id);
+      expect(ids.indexOf('texts')).toBe(ids.indexOf('recent') + 1);
+    }
+    expect(NAV_OVERFLOW_IDS).not.toContain('texts');
   });
 
   it('power dial appears only when granted — for reps AND admins', () => {
     expect(navTabsFor({ ...rep, powerDialerEnabled: true }).map((t) => t.id))
-      .toEqual(['dialer', 'powerdial', 'recent', 'settings']);
+      .toEqual(['dialer', 'powerdial', 'recent', 'texts', 'settings']);
     // An admin WITHOUT the grant does not get the tab either (flag ⊥ admin).
     expect(navTabsFor({ isAdmin: true, powerDialerEnabled: false }).map((t) => t.id))
       .not.toContain('powerdial');
@@ -18,7 +26,7 @@ describe('navTabsFor', () => {
 
   it('admins get Team and Talk time in the More overflow, beside Reputation', () => {
     const ids = navTabsFor({ isAdmin: true, powerDialerEnabled: true }).map((t) => t.id);
-    expect(ids).toEqual(['dialer', 'powerdial', 'recent', 'team', 'talktime', 'reputation', 'admin', 'calls', 'settings']);
+    expect(ids).toEqual(['dialer', 'powerdial', 'recent', 'texts', 'team', 'talktime', 'reputation', 'admin', 'calls', 'settings']);
     expect(NAV_OVERFLOW_IDS).toEqual(['team', 'talktime', 'reputation', 'admin', 'calls']);
   });
 
@@ -28,7 +36,7 @@ describe('navTabsFor', () => {
 
   it('labels are stable', () => {
     const byId = Object.fromEntries(navTabsFor({ isAdmin: true, powerDialerEnabled: true }).map((t) => [t.id, t.label]));
-    expect(byId).toMatchObject({ team: 'Team', talktime: 'Talk time', admin: 'Numbers', reputation: 'Reputation', dialer: 'Dial' });
+    expect(byId).toMatchObject({ team: 'Team', talktime: 'Talk time', admin: 'Numbers', reputation: 'Reputation', dialer: 'Dial', texts: 'Texts' });
   });
 
   it('has no AI calls tab: AI calls start from outreach campaigns, not the softphone', () => {

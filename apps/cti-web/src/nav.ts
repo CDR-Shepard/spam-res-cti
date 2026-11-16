@@ -1,4 +1,4 @@
-export type Tab = 'dialer' | 'powerdial' | 'recent' | 'team' | 'talktime' | 'reputation' | 'admin' | 'calls' | 'settings';
+export type Tab = 'dialer' | 'powerdial' | 'recent' | 'texts' | 'team' | 'talktime' | 'reputation' | 'admin' | 'calls' | 'settings';
 
 export interface NavTab {
   id: Tab;
@@ -14,7 +14,7 @@ export const NAV_OVERFLOW_IDS: readonly Tab[] = ['team', 'talktime', 'reputation
 
 /**
  * The bottom-nav tabs, in order, for a given rep. Power Dial is a GRANTED
- * capability independent of admin status — the dialer endpoints 403 without
+ * capability independent of admin status. Texts is every rep's, right after Recent — the dialer endpoints 403 without
  * it, so an admin without the grant doesn't see the tab either. Team, Talk time,
  * Reputation, Numbers (`admin`) and Calls are admin-only.
  */
@@ -23,6 +23,7 @@ export function navTabsFor(user: { isAdmin: boolean; powerDialerEnabled: boolean
     { id: 'dialer', label: 'Dial' },
     ...(user.powerDialerEnabled ? ([{ id: 'powerdial', label: 'Power Dial' }] as NavTab[]) : []),
     { id: 'recent', label: 'Recent' },
+    { id: 'texts', label: 'Texts' },
     ...(user.isAdmin
       ? ([
           { id: 'team', label: 'Team' },

@@ -58,6 +58,7 @@ import { isSalesforceAuthError, withTimeout } from '../salesforce/followup-worke
 import { orgTodayIso } from '../dialer/org-day.js';
 import {
   isOptOutText,
+  RECONNECT_SALESFORCE,
   redactBody,
   salesforceHomeUrl,
   salesforceRecordUrl,
@@ -116,7 +117,7 @@ export const DIGEST_STUCK_AFTER_MS = SF_CREATE_TIMEOUT_MS + 60_000;
 /** Salesforce's Task.Description limit. A text is far shorter; this only keeps a
  *  STRING_TOO_LONG error (which quotes the value) impossible. */
 const DESCRIPTION_MAX = 32_000;
-const RECONNECT = 'reconnect Salesforce';
+const RECONNECT = RECONNECT_SALESFORCE;
 const LOG = '[inbound-text-worker]';
 
 /** Error codes that mean "Salesforce refused the LINK", so the Task is retried

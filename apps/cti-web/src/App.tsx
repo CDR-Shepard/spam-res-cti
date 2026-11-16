@@ -23,6 +23,7 @@ import { SettingsPanel } from './components/SettingsPanel';
 import { SoundCheck } from './components/SoundCheck';
 import { TalkTimePanel } from './components/TalkTimePanel';
 import { TeamPanel } from './components/TeamPanel';
+import { TextsPanel } from './components/TextsPanel';
 import { VerdictPanel, type FirewallVerdict } from './components/VerdictPanel';
 import { WrapupForm } from './components/WrapupForm';
 import { repDialAction } from './checks';
@@ -38,7 +39,7 @@ import {
   type DialerSessionCounts,
 } from './dialer-api';
 import { dialerJoinParams, legAccepted, legRecoveryToast, recentRejoins, recoverDroppedLeg, watchDialerLeg } from './dialer-leg';
-import { ClockIcon, CloudIcon, GridIcon, MoreIcon, PhoneIcon, PhoneOutgoingIcon, SettingsIcon, ShieldIcon, ShieldXIcon, UserIcon, ZapIcon } from './icons';
+import { ClockIcon, CloudIcon, GridIcon, MessageIcon, MoreIcon, PhoneIcon, PhoneOutgoingIcon, SettingsIcon, ShieldIcon, ShieldXIcon, UserIcon, ZapIcon } from './icons';
 import { formatE164 } from './format';
 import { navTabsFor, NAV_OVERFLOW_IDS, type Tab } from './nav';
 import {
@@ -76,6 +77,8 @@ import { HEARTBEAT_UNREACHABLE_TEXT, parkedRunOverAction, startParkedHeartbeat }
 import { playCallbackChime } from './callback-chime';
 import { clearFlag, DeviceRefusedError, isBusyForReset, pageReloader, readFlag, RESET_NOTICE_KEY, RESET_NOTICE_TEXT, RESETTING_TEXT, SOUND_CHECK_DUE_KEY } from './cti-reset';
 import { useCtiReset } from './use-cti-reset';
+import { useTextBadge } from './use-text-badge';
+import { badgeLabel, markTextsSeen } from './texts';
 
 interface MeResponse {
   user: {
@@ -1425,6 +1428,15 @@ export function App(): JSX.Element {
   // this tab AND every peer is idle (use-cti-reset.ts).
   const { onPeerReset } = useCtiReset({ enabled: signedIn && !!me, coordinatorRef, isBusy: resetBusy, teardownDevice, setResetting });
 
+  // The Texts tab's count: texts newer than the newest one this rep has seen.
+  // Asked on a timer (a database read, no Salesforce) except while the rep is
+  // on the Texts tab, which clears it.
+  const textsUserId = me?.user.userId ?? null;
+  const newTexts = useTextBadge({ userId: textsUserId ?? '', active: signedIn && !!textsUserId && tab !== 'texts' });
+  const onTextsSeen = useCallback((receivedAt: string) => {
+    if (textsUserId) markTextsSeen(textsUserId, receivedAt);
+  }, [textsUserId]);
+
   // A Device build that failed for real: callbacks stop arriving, so say so.
   // A refusal on purpose (a reset under way, or a teardown that raced the
   // build) is not a failure and stays quiet — no toast per refusal (C1).
@@ -2233,6 +2245,8 @@ export function App(): JSX.Element {
         whatId: c.salesforceWhatId,
       })}
     />
+  ) : tab === 'texts' ? (
+    <TextsPanel onSeen={onTextsSeen} />
   ) : tab === 'team' ? (
     <TeamPanel />
   ) : tab === 'talktime' ? (
@@ -2332,6 +2346,7 @@ export function App(): JSX.Element {
     dialer: <GridIcon />,
     powerdial: <ZapIcon />,
     recent: <ClockIcon />,
+    texts: <MessageIcon />,
     team: <UserIcon />,
     talktime: <ClockIcon />,
     reputation: <ShieldIcon />,
@@ -2345,6 +2360,7 @@ export function App(): JSX.Element {
   const primaryItems = navItems.filter((i) => !NAV_OVERFLOW_IDS.includes(i.id));
   const overflowItems = navItems.filter((i) => NAV_OVERFLOW_IDS.includes(i.id));
   const overflowActive = overflowItems.some((i) => i.id === tab);
+  const textsBadge = badgeLabel(newTexts);
 
   return (
     <div className="app">
@@ -2389,8 +2405,12 @@ export function App(): JSX.Element {
               <button
                 className={`tab ${tab === i.id ? 'active' : ''}`}
                 onClick={() => { setTab(i.id); setMoreOpen(false); }}
+                aria-label={i.id === 'texts' && textsBadge ? `Texts, ${newTexts} new` : undefined}
               >
-                {i.icon}
+                <span className="tab-icon">
+                  {i.icon}
+                  {i.id === 'texts' && textsBadge && <span className="tab-badge" aria-hidden="true">{textsBadge}</span>}
+                </span>
                 <span>{i.label}</span>
               </button>
             </Fragment>
