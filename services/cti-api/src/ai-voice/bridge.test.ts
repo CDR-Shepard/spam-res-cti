@@ -13,7 +13,9 @@ import {
 } from './bridge.js';
 import { ANSWER_THEM_FIRST, SAY_GOODBYE_FIRST, sayGoodbyeWithNumber } from './bridge-tools.js';
 import { DRAIN_MARGIN_MS } from './bridge-playback.js';
+import { withExternalVoice } from './external-voice.js';
 import { AI_CALL_TOOLS } from './prompt.js';
+import { silentLog } from './testing.js';
 
 type Ev = 'message' | 'close' | 'error' | 'open';
 
@@ -4026,5 +4028,78 @@ describe('fails closed until the session is configured', () => {
     openai.msg({ type: 'error', error: { type: 'x', code: 'y', message: 'z' } });
     expect(hooks.onEnd).not.toHaveBeenCalled();
     expect(hooks.log.warn).toHaveBeenCalledWith(expect.objectContaining({ message: 'z' }), expect.any(String));
+  });
+});
+
+describe('a reply the caller never heard is forgotten', () => {
+  // A cancelled response stays in the conversation, so the model believes it said it (probe 2026-11-16: asked whether
+  // it had told us anything, it quoted the cancelled line; with the line deleted it said nothing was said).
+  const line = (id: string, text: string) => ({ type: 'message', id, role: 'assistant', status: 'incomplete', content: [{ type: 'output_text', text }] });
+  const done = (status: string, ...output: object[]) => ({ type: 'response.done', response: { status, output } });
+  const deletes = (openai: FakeSocket) => openai.sent.filter((m) => m.type === 'conversation.item.delete');
+
+  it('gate: an answer cancelled before a sound of it played is deleted from the conversation', () => {
+    const { openai, bridge } = setup({ bargeIn: 'gate' });
+    bridge.start();
+    openai.msg(READY);
+    openai.msg({ type: 'response.created' });
+    openai.msg({ type: 'input_audio_buffer.speech_started', item_id: 'c1', audio_start_ms: 0 }); // they kept talking
+    expect(openai.types()).toContain('response.cancel');
+    openai.clearSent();
+    openai.msg(done('cancelled', line('m1', 'Sure, no pressure. What is the')));
+    expect(deletes(openai)).toEqual([{ type: 'conversation.item.delete', item_id: 'm1' }]);
+  });
+
+  it('instant: a response OpenAI cancelled before any audio is deleted too', () => {
+    const { openai, bridge } = setup();
+    bridge.start();
+    openai.msg(READY);
+    openai.msg({ type: 'response.created' });
+    openai.clearSent();
+    openai.msg(done('cancelled', line('m1', 'Okay')));
+    expect(deletes(openai)).toEqual([{ type: 'conversation.item.delete', item_id: 'm1' }]);
+  });
+
+  it('with a separate voice (ElevenLabs): a line OpenAI finished writing, dropped before the voice made a sound, is deleted once', () => {
+    const raw = new FakeSocket();
+    const tts = { speak: vi.fn(), finish: vi.fn(), cancel: vi.fn(), close: vi.fn() };
+    const { bridge } = setup({ bargeIn: 'gate', openai: withExternalVoice(raw, () => tts, silentLog) });
+    bridge.start();
+    raw.msg(READY);
+    raw.msg({ type: 'response.created', response: { id: 'r1' } });
+    raw.msg({ type: 'response.output_text.delta', response_id: 'r1', item_id: 'm1', delta: 'Sure, no pressure.' });
+    raw.msg({ type: 'response.output_text.done', response_id: 'r1', item_id: 'm1', text: 'Sure, no pressure.' });
+    // The voice layer holds this done until the voice has spoken, and it has not made a sound yet.
+    raw.msg({ type: 'response.done', response: { id: 'r1', status: 'completed', output: [line('m1', 'Sure, no pressure.')] } });
+    raw.clearSent();
+    raw.msg({ type: 'input_audio_buffer.speech_started', item_id: 'c1', audio_start_ms: 0 }); // they kept talking
+    expect(tts.cancel).toHaveBeenCalledWith('m1');
+    // OpenAI had already ended the response, so no cancel goes to it: the released done is what deletes the line.
+    expect(raw.sent).toEqual([{ type: 'conversation.item.delete', item_id: 'm1' }]);
+  });
+
+  it('a line they heard part of stays: it was said', () => {
+    const { openai, bridge } = setup();
+    bridge.start();
+    openai.msg(READY);
+    openai.msg({ type: 'response.created' });
+    openai.msg({ type: 'response.output_audio.delta', item_id: 'm1', delta: audio(400) });
+    openai.clearSent();
+    openai.msg(done('cancelled', line('m1', 'Okay, what is the address')));
+    expect(deletes(openai)).toEqual([]);
+  });
+
+  it('a finished response with no audio (tools only) keeps its items; a cancelled one keeps its tool calls', async () => {
+    const { openai, bridge } = setup();
+    bridge.start();
+    openai.msg(READY);
+    openai.msg({ type: 'response.created' });
+    openai.clearSent();
+    openai.msg(done('completed', fnCall('save_qualification', '{"other":"x"}', 't1')));
+    await flush();
+    openai.msg({ type: 'response.created' });
+    openai.msg(done('cancelled', fnCall('save_qualification', '{"other":"y"}', 't2')));
+    await flush();
+    expect(deletes(openai)).toEqual([]);
   });
 });

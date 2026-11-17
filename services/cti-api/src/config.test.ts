@@ -127,6 +127,7 @@ describe('AI voice config', () => {
     'OPENAI_API_KEY', 'AI_VOICE', 'AI_VOICE_MODEL', 'AI_VOICE_REASONING',
     'AI_VOICE_VAD_EAGERNESS', 'AI_VOICE_VOICE', 'AI_VOICE_AGENT_NAME',
     'AI_VOICE_BARGE_IN', 'AI_VOICE_TRANSCRIBE_MODEL', 'AI_VOICE_TURN_DETECTION', 'AI_VOICE_SILENCE_MS',
+    'AI_VOICE_LONG_TURN_WAIT_MS', 'AI_VOICE_HESITANT_WAIT_MS',
     'AI_VOICE_OVERLAP_JUDGE', 'AI_VOICE_STOP_MS', 'AI_VOICE_INBOUND', 'AI_VOICE_TEST_TRANSFER',
     'AI_VOICE_TEST_NUMBERS', 'AI_VOICE_MAX_CALL_SECONDS', 'ANTHROPIC_API_KEY',
     'AI_SUMMARY_MODEL', 'OUTREACH_KILL_SWITCH',
@@ -246,6 +247,16 @@ describe('AI voice config', () => {
     for (const bad of ['199', '2001', '0', '-500', '500.5', 'soon']) {
       await expect(loadWith({ AI_VOICE_SILENCE_MS: bad })).rejects.toThrow(/AI_VOICE_SILENCE_MS/);
     }
+  });
+
+  it('the patience waits are integers from 0 (the default: none), up to 2000 and 3000 ms', async () => {
+    const none = await loadWith({ AI_VOICE_LONG_TURN_WAIT_MS: '', AI_VOICE_HESITANT_WAIT_MS: '' });
+    expect([none.AI_VOICE_LONG_TURN_WAIT_MS, none.AI_VOICE_HESITANT_WAIT_MS]).toEqual([0, 0]);
+    const set = await loadWith({ AI_VOICE_LONG_TURN_WAIT_MS: '250', AI_VOICE_HESITANT_WAIT_MS: '700' });
+    expect([set.AI_VOICE_LONG_TURN_WAIT_MS, set.AI_VOICE_HESITANT_WAIT_MS]).toEqual([250, 700]);
+    expect((await loadWith({ AI_VOICE_LONG_TURN_WAIT_MS: '2000', AI_VOICE_HESITANT_WAIT_MS: '3000' })).AI_VOICE_HESITANT_WAIT_MS).toBe(3000);
+    for (const bad of ['-1', '2001', '250.5', 'soon']) await expect(loadWith({ AI_VOICE_LONG_TURN_WAIT_MS: bad })).rejects.toThrow(/AI_VOICE_LONG_TURN_WAIT_MS/);
+    for (const bad of ['-1', '3001', 'soon']) await expect(loadWith({ AI_VOICE_HESITANT_WAIT_MS: bad })).rejects.toThrow(/AI_VOICE_HESITANT_WAIT_MS/);
   });
 
   it('the overlap judge is sound or words, default sound (empty = unset); anything else fails the boot', async () => {

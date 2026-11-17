@@ -9,7 +9,8 @@
  *
  * - committedMs: `input_audio_buffer.committed` for the item.
  * - requestedMs: the first `response.create` the bridge sent after the stop (null: before it, or OpenAI's VAD answered).
- * - deferred: why the first attempt to answer was held — the bridge's own reasons, first one wins.
+ * - deferred: why the first attempt to answer was held — the bridge's own reasons, first one wins; `patience` with
+ *   2+ responses is an answer taken back when the caller's words came in trailing off (turn-patience.ts).
  * - createdMs: the first `response.created` after the stop; `responses` counts those up to the answer.
  * - firstDeltaMs: the answering response's first `response.output_audio.delta`.
  * - forwardedMs: its first audio reaching Twilio. playedMs: Twilio echoing the mark that follows it.
@@ -18,7 +19,7 @@
 import type { TurnDetection } from './bridge-session.js';
 import type { BargeInMode } from './bridge-turn-stats.js';
 
-export type Deferral = 'caller_talking' | 'response_active' | 'tools' | 'overlap_verdict' | 'after_playback';
+export type Deferral = 'caller_talking' | 'response_active' | 'tools' | 'overlap_verdict' | 'after_playback' | 'patience';
 
 export interface TurnTimingLine {
   committedMs: number | null;
@@ -117,6 +118,11 @@ export class TurnTiming {
     const hold = (t: Turn): Turn => (t.deferred === null && t.requestedAt === null ? { ...t, deferred: why } : t);
     if (itemId === undefined) this.pending = this.pending === null ? null : hold(this.pending);
     else this.judged = this.update(this.judged, itemId, hold);
+  }
+
+  /** The answer already asked for was taken back to wait (`why`): that is the hold on this turn, whatever came first. */
+  tookBack(why: Deferral): void {
+    this.pending = this.pending === null ? null : { ...this.pending, deferred: why };
   }
 
   /** These judged overlaps get one answer: the latest is the turn, unless a later stop is already pending. */

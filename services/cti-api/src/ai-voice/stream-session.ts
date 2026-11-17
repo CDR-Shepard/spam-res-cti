@@ -270,6 +270,7 @@ function startBridge(socket: BridgeSocket, entry: ActiveAiCall & { callSid: stri
       transcribeModel: cfg.AI_VOICE_TRANSCRIBE_MODEL,
       turnDetection: cfg.AI_VOICE_TURN_DETECTION,
       silenceMs: cfg.AI_VOICE_SILENCE_MS,
+      patience: { longTurnWaitMs: cfg.AI_VOICE_LONG_TURN_WAIT_MS, hesitantWaitMs: cfg.AI_VOICE_HESITANT_WAIT_MS },
       overlapJudge: cfg.AI_VOICE_OVERLAP_JUDGE,
       stopMs: cfg.AI_VOICE_STOP_MS,
       maxCallMs: Math.max(MIN_CALL_MS, cfg.AI_VOICE_MAX_CALL_SECONDS * 1000),

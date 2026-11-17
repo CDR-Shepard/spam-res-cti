@@ -60,6 +60,7 @@ import { TurnTiming, heldBy } from './bridge-turn-timing.js';
 import { ANSWER_THEM_FIRST, endCallArgs, endCallOutcome, errText, followUpAfterTools, functionCalls, runToolBatch, type BridgeLog, type FunctionCall, type Spoke, type ToolResult } from './bridge-tools.js';
 import { CallerLines, optedOut, waitingOnAnswer } from './caller-question.js';
 import type { ToolName } from './prompt.js';
+import { NO_PATIENCE, answerWaitMs, type Patience } from './turn-patience.js';
 
 export type { BargeInMode, BridgeLog, BridgeSocket, OverlapJudge, ReasoningEffort, ToolResult, TurnDetection, VadEagerness };
 
@@ -144,6 +145,8 @@ export interface BridgeOptions {
   goodbyeBeforeEnd?: boolean;
   /** goodbyeBeforeEnd: how long to wait for the caller's final words before deciding (default FINAL_WORDS_WAIT_MS). */
   finalWordsWaitMs?: number;
+  /** Gate mode: the extra waits before answering a long or trailing-off turn (turn-patience.ts; default none). */
+  patience?: Patience;
   /** goodbyeBeforeEnd: an end_call with outcome not_interested is never answered, only said goodbye to (outbound: a seller who declined). */
   goodbyeOnNotInterested?: boolean;
   /** What a sent-back end_call is answered with (default SAY_GOODBYE_FIRST; outbound: sayGoodbyeWithNumber). */
@@ -195,6 +198,14 @@ export class AiCallBridge {
   private callerTalking = false;
   /** The caller stopped and OpenAI has not committed that item yet: a turn is about to be answered. */
   private awaitingCommit: string | null = null;
+  /** When the caller's current stretch of talk began (null: not talking). */
+  private speechStartedAt: number | null = null;
+  /** How long the caller has talked since the agent last spoke (its first sound, and again when its line has played out), pauses left out (ms): turn-patience.ts' long turn. */
+  private talkSinceAgentMs = 0;
+  /** Gate mode: a committed turn waiting out its patience before it is answered. */
+  private patienceTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Gate mode: the committed turn being answered, until the agent is heard or the caller goes on: words still coming in can change its wait. */
+  private turnInHand: { itemId: string; committedAt: number } | null = null;
   /** The agent called wait_for_user and nobody has spoken since. */
   private holding = false;
   private agentSpoke = false;
@@ -389,6 +400,7 @@ export class AiCallBridge {
         return this.onCallerTurn(str(msg.item_id));
       case 'conversation.item.input_audio_transcription.delta':
         this.callerLines.delta(str(msg.item_id), str(msg.delta));
+        this.onCallerWords(str(msg.item_id));
         return this.gate.onDelta(str(msg.item_id), str(msg.delta));
       case 'response.created':
         return this.onResponseCreated();
@@ -401,6 +413,7 @@ export class AiCallBridge {
         return this.transcript('agent', msg.transcript);
       case 'conversation.item.input_audio_transcription.completed':
         this.callerLines.final(str(msg.item_id), str(msg.transcript));
+        this.onCallerWords(str(msg.item_id));
         this.transcript('caller', msg.transcript);
         return this.onCallerFinal(str(msg.item_id), str(msg.transcript));
       case 'conversation.item.input_audio_transcription.failed':
@@ -474,7 +487,9 @@ export class AiCallBridge {
   private onCallerSpeech(itemId: string): void {
     this.timing.speechStarted();
     this.callerSpoke = true;
+    if (!this.callerTalking) this.speechStartedAt = this.now();
     this.callerTalking = true;
+    this.dropTurnInHand(); // they went on: their next turn end answers all of it
     this.holding = false;
     this.cancelOpener();
     this.silenceCheck.heard();
@@ -489,13 +504,21 @@ export class AiCallBridge {
       return;
     }
     // A response that has not played a sound yet: drop it unheard; their turn gets a fresh one.
-    if (this.responseActive && !this.responseHasAudio) this.cancelResponse();
-    else if (this.responsePending && !this.responseActive) this.cancelWhenCreated = true;
+    this.dropUnheardResponse();
+  }
+
+  /** Drop a response nobody has heard a sound of — active, or still being created. True if this dropped one. */
+  private dropUnheardResponse(): boolean {
+    if (this.responseActive) return !this.responseHasAudio && this.cancelResponse();
+    if (!this.responsePending || this.cancelWhenCreated) return false;
+    this.cancelWhenCreated = true;
+    return true;
   }
 
   /** The caller stopped: a turn is timed from here (`audioEndMs` on OpenAI's input audio clock). */
   private onCallerStopped(itemId: string, audioEndMs: number): void {
     this.callerTalking = false;
+    this.countTalk();
     if (itemId) this.awaitingCommit = itemId;
     this.gate.onSpeechStopped(itemId);
     if (!Number.isFinite(audioEndMs)) return;
@@ -529,7 +552,72 @@ export class AiCallBridge {
     }
     this.stats.overlapsAnswered([itemId]); // an overlap the gate settled before this commit
     this.timing.overlapsAnswered([itemId]);
-    this.requestResponse();
+    this.answerTurn(itemId);
+  }
+
+  /** Add the stretch of talk that just ended to the caller's talk since the agent spoke (server_vad reports the stop its silence wait late). */
+  private countTalk(): void {
+    if (this.speechStartedAt === null) return;
+    const vadWaitMs = this.vad.turnDetection === 'server_vad' ? this.vad.silenceMs : 0;
+    this.talkSinceAgentMs += Math.max(0, this.now() - this.speechStartedAt - vadWaitMs);
+    this.speechStartedAt = null;
+  }
+
+  /** Patience makes up for a short server_vad silence; semantic_vad does its own waiting, and its stop is not timed. */
+  private get patience(): Patience {
+    return this.vad.turnDetection === 'server_vad' ? (this.opts.patience ?? NO_PATIENCE) : NO_PATIENCE;
+  }
+
+  /** The wait a turn's length and its words so far call for, counted from its commit (turn-patience.ts). */
+  private turnWaitMs(itemId: string): number {
+    return answerWaitMs({ speechMs: this.talkSinceAgentMs, words: this.callerLines.text(itemId) }, this.patience);
+  }
+
+  /** Gate mode: answer a committed turn, at once or after its wait. Its words are still coming in: see onCallerWords. */
+  private answerTurn(itemId: string): void {
+    this.turnInHand = { itemId, committedAt: this.now() };
+    const waitMs = this.turnWaitMs(itemId);
+    if (waitMs <= 0) return this.requestResponse();
+    this.timing.deferred('patience');
+    this.answerIn(waitMs);
+  }
+
+  /**
+   * More words of the turn in hand came in (they run 0.1–0.3 s behind its commit): its wait is judged again. Still
+   * waiting: answer now if the line turned out whole, else wait out what is left. Already asked for: take the answer
+   * back if they trailed off ("Um." has no words at its commit) and nobody has heard a sound of it.
+   */
+  private onCallerWords(itemId: string): void {
+    const turn = this.turnInHand;
+    if (turn === null || turn.itemId !== itemId || this.closing || this.ended) return;
+    const leftMs = turn.committedAt + this.turnWaitMs(itemId) - this.now();
+    if (this.patienceTimer !== null) return leftMs > 0 ? this.answerIn(leftMs) : this.requestResponse();
+    if (leftMs <= 0) return;
+    // The wait is set before the drop: with a separate voice the dropped response ends inside the cancel
+    // (external-voice.ts releases the done it held), and by then the turn must count as waiting, not as unanswered.
+    this.answerIn(leftMs);
+    if (!this.dropUnheardResponse()) return this.cancelPatience();
+    this.timing.tookBack('patience');
+  }
+
+  private answerIn(waitMs: number): void {
+    this.cancelPatience();
+    this.patienceTimer = this.setTimer(() => {
+      this.patienceTimer = null;
+      this.requestResponse();
+    }, waitMs);
+  }
+
+  private cancelPatience(): void {
+    if (this.patienceTimer === null) return;
+    this.clearTimer(this.patienceTimer);
+    this.patienceTimer = null;
+  }
+
+  /** The turn in hand is over (the caller went on, or the call is closing): no wait, and its late words change nothing. */
+  private dropTurnInHand(): void {
+    this.turnInHand = null;
+    this.cancelPatience();
   }
 
   /** The gate depends on transcription: log a failure (its code only — never text or audio); the overlap has no words. */
@@ -607,6 +695,7 @@ export class AiCallBridge {
 
   /** Ask the agent to speak — in gate mode one response at a time; the goodbye owed after a sent-back end_call is speech only. */
   private requestResponse(): void {
+    this.cancelPatience(); // any answer covers a turn that was waiting
     if (this.closing || this.ended) return;
     const speechOnly = this.owedEnd === null && !this.answerOwed ? {} : { response: { tool_choice: 'none' } };
     // Instant mode: VAD answers turns; the opener and after-tool creates go out at once, as before the gate.
@@ -656,6 +745,7 @@ export class AiCallBridge {
   /** The agent's queued audio finished playing. */
   private onAgentFinished(): void {
     this.stats.agentFinished(this.now());
+    this.talkSinceAgentMs = 0; // listening sounds over the agent's line are not the start of a long turn
     if (this.ended || this.closing) return;
     // A caller still talking over the end is answering it (spec §4.1) — unless a next response (a tool follow-up) is coming.
     if (!this.responsePending && !(this.responseActive && !this.responseHasAudio)) {
@@ -678,6 +768,7 @@ export class AiCallBridge {
     if (this.bargeIn !== 'gate' || this.ended || this.closing || !this.agentSpoke) return false;
     if (this.callerTalking || this.awaitingCommit !== null || this.judgedTurns.size > 0 || !this.gate.idle) return false;
     if (this.responsePending || this.responseActive || this.toolsRunning || this.wantResponse || this.answerAfterPlayback) return false;
+    if (this.patienceTimer !== null) return false; // a turn waiting out its patience is answered when the wait is up
     return !this.playback.playing;
   }
 
@@ -722,6 +813,8 @@ export class AiCallBridge {
       this.stats.agentAudio(at);
       this.agentSpoke = true;
       this.callerSpokeSinceAgent = false;
+      this.talkSinceAgentMs = 0;
+      this.turnInHand = null; // heard: too late to take it back
       this.callerLines.agentSpoke();
       if (this.answerOwed) this.unrunEnd = null; // the agent answers them: the call goes on
       this.answerOwed = false;
@@ -783,6 +876,7 @@ export class AiCallBridge {
     this.responsePending = false;
     this.responseCut = false;
     this.cancelWhenCreated = false;
+    if (cut && !played) this.forgetUnheard(response);
     const calls = functionCalls(response);
     // The speech-only goodbye a sent-back end_call asked for: run that end_call now, unless the goodbye was cut.
     const owed = calls.length === 0 ? this.takeOwedEnd(cut, played) : null;
@@ -790,6 +884,17 @@ export class AiCallBridge {
     if (owed !== null) this.endAfterGoodbye(owed.args);
     this.playback.onResponseDone(); // after the tool bookkeeping: a drain notified here sees the batch
     if (calls.length === 0 && owed === null) this.afterResponse();
+  }
+
+  /**
+   * A response cut before a sound of it played was never said, but its lines stay in the conversation and the model
+   * believes it said them (probe 2026-11-16: it quoted a cancelled line back). Delete them; its tool calls stay.
+   */
+  private forgetUnheard(response: Msg): void {
+    const output: readonly unknown[] = Array.isArray(response.output) ? response.output : [];
+    for (const item of output.map(obj)) {
+      if (item.type === 'message' && str(item.id)) this.sockets.sendOpenAi({ type: 'conversation.item.delete', item_id: str(item.id) });
+    }
   }
 
   /** Run a response's tool calls after any earlier batch, then speak, hold, let the caller answer, or end the conversation. */
@@ -828,9 +933,10 @@ export class AiCallBridge {
           this.note('[end_call sent back — asked for a goodbye]');
         }
         if (!batch.carryOn) this.closeConversation();
-        if (followUpAfterTools(calls, batch, spoke)) return this.requestResponse();
+        // A turn waiting out its patience: its answer, when the wait is up, is this batch's follow-up too.
+        if (followUpAfterTools(calls, batch, spoke)) return this.patienceTimer === null ? this.requestResponse() : undefined;
         // Only wait_for_user holds; a note save after a question leaves the floor to the caller (an answer already in is sent).
-        if (!batch.speak) this.holding = !this.wantResponse; // a turn that came in during the batch is answered, not held
+        if (!batch.speak) this.holding = !this.wantResponse && this.patienceTimer === null; // a turn that came in during the batch is answered, not held
         this.afterResponse();
       })
       .catch((e: unknown) => {
@@ -1012,6 +1118,7 @@ export class AiCallBridge {
     this.gate.close();
     this.stats.clearOverlaps();
     this.silenceCheck.cancel();
+    this.dropTurnInHand();
     this.cancelWhenCreated = false;
     // Gate sessions never auto-respond; instant sessions stop VAD responses during the drain.
     if (this.bargeIn === 'gate' || this.autoResponsesOff) return;
@@ -1032,6 +1139,7 @@ export class AiCallBridge {
     if (this.ended) return;
     this.ended = true;
     this.cancelOpener();
+    this.dropTurnInHand();
     this.gate.close();
     this.stats.clearOverlaps();
     this.silenceCheck.cancel();

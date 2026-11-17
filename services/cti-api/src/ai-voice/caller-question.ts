@@ -90,6 +90,11 @@ export class CallerLines {
     this.wake();
   }
 
+  /** A line's words so far ('' when none are in yet). */
+  text(itemId: string): string {
+    return this.words.get(itemId)?.text ?? '';
+  }
+
   sinceAgent(): CallerLine[] {
     return this.since.map((id) => this.words.get(id) ?? { text: '', final: false });
   }

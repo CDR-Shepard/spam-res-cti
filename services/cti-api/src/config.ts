@@ -256,6 +256,16 @@ const schema = z.object({
   /** server_vad only: how long the caller must be silent before their turn is over, in ms. Lower = faster, but answers into pauses more often. */
   AI_VOICE_SILENCE_MS: z.coerce.number().int().min(200).max(2000).default(500),
   /**
+   * Gate mode with server_vad only, for a short AI_VOICE_SILENCE_MS (turn-patience.ts): the extra wait, in ms, before
+   * answering a caller who has talked 2 s or more since the agent spoke (they may only be pausing). 0 = none. Short answers never wait.
+   */
+  AI_VOICE_LONG_TURN_WAIT_MS: z.coerce.number().int().min(0).max(2000).default(0),
+  /**
+   * Gate mode with server_vad only: the extra wait, in ms, before answering words that trail off ("um", "it's, uh",
+   * "... and"). 0 = none. The words come in after the turn ends, so an answer already asked for is taken back unheard.
+   */
+  AI_VOICE_HESITANT_WAIT_MS: z.coerce.number().int().min(0).max(3000).default(0),
+  /**
    * Gate mode only: how the gate tells a real interruption from "mm-hmm" (spec 2026-10-09 §4.5). `sound` = the caller's
    * sound lasting AI_VOICE_STOP_MS stops the agent at once, words still stop it too; `words` = the 2026-10-09 gate (rollback).
    */
