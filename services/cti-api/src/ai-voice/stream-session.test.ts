@@ -146,6 +146,18 @@ describe('runStreamSession — the start frame', () => {
     expect(captured?.opts).toMatchObject({ silenceMs: 250, patience: { longTurnWaitMs: 250, hesitantWaitMs: 700 } });
   });
 
+  it('passes transcript notes to the bridge when they are switched on', async () => {
+    deps.cfg = { ...cfg, AI_VOICE_TRANSCRIPT_NOTES: 'on' } as AppConfig;
+    expect(await begin()).toBe('started');
+    expect(captured?.opts).toMatchObject({ transcriptNotes: true });
+  });
+
+  it('and not when they are off', async () => {
+    deps.cfg = { ...cfg, AI_VOICE_TRANSCRIPT_NOTES: 'off' } as AppConfig;
+    expect(await begin()).toBe('started');
+    expect(captured?.opts).toMatchObject({ transcriptNotes: false });
+  });
+
   it('passes semantic_vad through too (the rollback or instant mode)', async () => {
     deps.cfg = { ...cfg, AI_VOICE_BARGE_IN: 'instant', AI_VOICE_TURN_DETECTION: 'semantic_vad', AI_VOICE_SILENCE_MS: 500 } as AppConfig;
     expect(await begin()).toBe('started');

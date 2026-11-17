@@ -268,6 +268,7 @@ function startBridge(socket: BridgeSocket, entry: ActiveAiCall & { callSid: stri
       vadEagerness: cfg.AI_VOICE_VAD_EAGERNESS,
       bargeIn: cfg.AI_VOICE_BARGE_IN,
       transcribeModel: cfg.AI_VOICE_TRANSCRIBE_MODEL,
+      transcriptNotes: cfg.AI_VOICE_TRANSCRIPT_NOTES === 'on',
       turnDetection: cfg.AI_VOICE_TURN_DETECTION,
       silenceMs: cfg.AI_VOICE_SILENCE_MS,
       patience: { longTurnWaitMs: cfg.AI_VOICE_LONG_TURN_WAIT_MS, hesitantWaitMs: cfg.AI_VOICE_HESITANT_WAIT_MS },

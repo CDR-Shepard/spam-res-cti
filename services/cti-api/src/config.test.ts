@@ -127,7 +127,7 @@ describe('AI voice config', () => {
     'OPENAI_API_KEY', 'AI_VOICE', 'AI_VOICE_MODEL', 'AI_VOICE_REASONING',
     'AI_VOICE_VAD_EAGERNESS', 'AI_VOICE_VOICE', 'AI_VOICE_AGENT_NAME',
     'AI_VOICE_BARGE_IN', 'AI_VOICE_TRANSCRIBE_MODEL', 'AI_VOICE_TURN_DETECTION', 'AI_VOICE_SILENCE_MS',
-    'AI_VOICE_LONG_TURN_WAIT_MS', 'AI_VOICE_HESITANT_WAIT_MS',
+    'AI_VOICE_LONG_TURN_WAIT_MS', 'AI_VOICE_HESITANT_WAIT_MS', 'AI_VOICE_TRANSCRIPT_NOTES',
     'AI_VOICE_OVERLAP_JUDGE', 'AI_VOICE_STOP_MS', 'AI_VOICE_INBOUND', 'AI_VOICE_TEST_TRANSFER',
     'AI_VOICE_TEST_NUMBERS', 'AI_VOICE_MAX_CALL_SECONDS', 'ANTHROPIC_API_KEY',
     'AI_SUMMARY_MODEL', 'OUTREACH_KILL_SWITCH',
@@ -249,6 +249,12 @@ describe('AI voice config', () => {
     }
   });
 
+
+  it('AI_VOICE_TRANSCRIPT_NOTES is off unless set to on', async () => {
+    expect((await loadWith({})).AI_VOICE_TRANSCRIPT_NOTES).toBe('off');
+    expect((await loadWith({ AI_VOICE_TRANSCRIPT_NOTES: 'on' })).AI_VOICE_TRANSCRIPT_NOTES).toBe('on');
+    await expect(loadWith({ AI_VOICE_TRANSCRIPT_NOTES: 'yes' })).rejects.toThrow(/AI_VOICE_TRANSCRIPT_NOTES/);
+  });
   it('the patience waits are integers from 0 (the default: none), up to 2000 and 3000 ms', async () => {
     const none = await loadWith({ AI_VOICE_LONG_TURN_WAIT_MS: '', AI_VOICE_HESITANT_WAIT_MS: '' });
     expect([none.AI_VOICE_LONG_TURN_WAIT_MS, none.AI_VOICE_HESITANT_WAIT_MS]).toEqual([0, 0]);

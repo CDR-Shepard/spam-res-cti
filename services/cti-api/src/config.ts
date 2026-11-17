@@ -266,6 +266,11 @@ const schema = z.object({
    */
   AI_VOICE_HESITANT_WAIT_MS: z.coerce.number().int().min(0).max(3000).default(0),
   /**
+   * `on` = each caller line's final transcript is added to the conversation as a hidden note, so the agent has names,
+   * streets and numbers in writing as well as by ear (transcript-note.ts). `off` = as before.
+   */
+  AI_VOICE_TRANSCRIPT_NOTES: z.enum(['on', 'off']).default('off'),
+  /**
    * Gate mode only: how the gate tells a real interruption from "mm-hmm" (spec 2026-10-09 §4.5). `sound` = the caller's
    * sound lasting AI_VOICE_STOP_MS stops the agent at once, words still stop it too; `words` = the 2026-10-09 gate (rollback).
    */

@@ -60,6 +60,7 @@ import { TurnTiming, heldBy } from './bridge-turn-timing.js';
 import { ANSWER_THEM_FIRST, endCallArgs, endCallOutcome, errText, followUpAfterTools, functionCalls, runToolBatch, type BridgeLog, type FunctionCall, type Spoke, type ToolResult } from './bridge-tools.js';
 import { CallerLines, optedOut, waitingOnAnswer } from './caller-question.js';
 import type { ToolName } from './prompt.js';
+import { transcriptNote, withTranscriptNotesRule } from './transcript-note.js';
 import { NO_PATIENCE, answerWaitMs, type Patience } from './turn-patience.js';
 
 export type { BargeInMode, BridgeLog, BridgeSocket, OverlapJudge, ReasoningEffort, ToolResult, TurnDetection, VadEagerness };
@@ -124,6 +125,8 @@ export interface BridgeOptions {
   bargeIn?: BargeInMode;
   /** Session transcriber (default LEGACY_TRANSCRIBE_MODEL; the service passes AI_VOICE_TRANSCRIBE_MODEL). */
   transcribeModel?: string;
+  /** Add each caller line's final transcript to the conversation as a hidden note (transcript-note.ts; default off; the service passes AI_VOICE_TRANSCRIPT_NOTES). */
+  transcriptNotes?: boolean;
   /** What ends the caller's turn (default `semantic_vad`, as before; the service passes AI_VOICE_TURN_DETECTION). */
   turnDetection?: TurnDetection;
   /** `server_vad` only: the silence that ends the caller's turn, in ms (default 500; the service passes AI_VOICE_SILENCE_MS). */
@@ -180,6 +183,7 @@ export class AiCallBridge {
   /** Gate mode: the event_id of that create, so only an error about it releases it. */
   private pendingCreateId = '';
   private createSeq = 0;
+  private noteSeq = 0;
   /** The active response has forwarded audio to Twilio. */
   private responseHasAudio = false;
   /** We cancelled the active response (the gate cut it, or it was dropped unheard): not the agent speaking, never cancelled twice. */
@@ -314,6 +318,7 @@ export class AiCallBridge {
     this.sockets.start(
       sessionUpdate({
         ...this.opts,
+        instructions: this.opts.transcriptNotes ? withTranscriptNotesRule(this.opts.instructions) : this.opts.instructions,
         ...this.vad,
         bargeIn: this.bargeIn,
         transcribeModel: this.opts.transcribeModel ?? LEGACY_TRANSCRIBE_MODEL,
@@ -413,6 +418,8 @@ export class AiCallBridge {
         return this.transcript('agent', msg.transcript);
       case 'conversation.item.input_audio_transcription.completed':
         this.callerLines.final(str(msg.item_id), str(msg.transcript));
+        // The note first: these words can end a patience wait, and the answer asked for then should have them in writing.
+        this.noteTranscript(str(msg.item_id), str(msg.transcript));
         this.onCallerWords(str(msg.item_id));
         this.transcript('caller', msg.transcript);
         return this.onCallerFinal(str(msg.item_id), str(msg.transcript));
@@ -618,6 +625,16 @@ export class AiCallBridge {
   private dropTurnInHand(): void {
     this.turnInHand = null;
     this.cancelPatience();
+  }
+
+  /** transcriptNotes: the line's words in writing, right after the line, for every reply from here on (transcript-note.ts). */
+  private noteTranscript(itemId: string, transcript: string): void {
+    if (!this.opts.transcriptNotes || !this.sessionReady || this.ended || this.closing) return;
+    // Its own event id: an error naming it is logged, and never taken for a rejected response.create.
+    const note = transcriptNote(itemId, transcript, `ai-note-${this.noteSeq + 1}`);
+    if (note === null) return;
+    this.noteSeq += 1;
+    this.sockets.sendOpenAi(note);
   }
 
   /** The gate depends on transcription: log a failure (its code only — never text or audio); the overlap has no words. */
