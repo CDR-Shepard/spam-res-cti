@@ -6,9 +6,27 @@
  * gated behind an `isMain` check (see the module's bottom) — importing this
  * module for `purchaseFields` never touches either.
  */
-import { unlinkSync } from 'node:fs';
-import { afterEach, describe, expect, it, vi } from 'vitest';
-import { purchaseFields } from './buy-pool-numbers.mjs';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { handoffPath, purchaseFields } from './buy-pool-numbers.mjs';
+
+describe('handoffPath — where purchased numbers are recorded between buy and register', () => {
+  it('POOL_OUTFILE overrides the default', () => {
+    expect(handoffPath({ POOL_OUTFILE: '/somewhere/else/pool.json' })).toBe('/somewhere/else/pool.json');
+  });
+
+  it('defaults to pool-buy.json in services/cti-api — a folder that exists on every checkout, not one machine', () => {
+    const serviceDir = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+    const path = handoffPath({});
+    expect(path).toBe(join(serviceDir, 'pool-buy.json'));
+    // The purchase is charged BEFORE the handoff is written, so a default in
+    // a folder that isn't there loses the only record of a paid-for number.
+    expect(existsSync(dirname(path))).toBe(true);
+  });
+});
 
 describe('purchaseFields — the Twilio purchase request body', () => {
   it('sets VoiceUrl/VoiceMethod AND SmsUrl/SmsMethod=POST, plus PhoneNumber/FriendlyName, and nothing else', () => {
@@ -35,7 +53,13 @@ describe('purchaseFields — the Twilio purchase request body', () => {
 // ---------------------------------------------------------------------------
 
 describe('doBuy — the real Twilio purchase call site (review round 2, B1)', () => {
-  const HANDOFF_PATH = '/private/tmp/claude-501/-Users-cdrshepard-spam-res-cti/afd1f56e-293d-4ea6-9400-11116185f1f2/scratchpad/buy-pool-numbers-test-handoff.json';
+  // Each test gets its own throwaway folder for the handoff file and removes
+  // it afterwards — nothing here depends on a path that exists on one machine.
+  let handoffDir;
+
+  beforeEach(() => {
+    handoffDir = mkdtempSync(join(tmpdir(), 'buy-pool-numbers-test-'));
+  });
 
   afterEach(() => {
     vi.unstubAllGlobals();
@@ -45,20 +69,17 @@ describe('doBuy — the real Twilio purchase call site (review round 2, B1)', ()
     delete process.env.TWILIO_AUTH_TOKEN;
     delete process.env.POOL_API_BASE;
     delete process.env.POOL_OUTFILE;
-    try {
-      unlinkSync(HANDOFF_PATH);
-    } catch {
-      // fine — the test may not have gotten far enough to write it
-    }
+    rmSync(handoffDir, { recursive: true, force: true });
   });
 
   it('the purchase POST body uses the SMS url builder (not the voice url), and includes VoiceMethod', async () => {
+    const handoffFile = join(handoffDir, 'pool-buy.json');
     process.env.MODE = 'buy';
     process.env.CONFIRM_BUY = '1';
     process.env.TWILIO_ACCOUNT_SID = 'ACtest';
     process.env.TWILIO_AUTH_TOKEN = 'test-token';
     process.env.POOL_API_BASE = 'https://ctiapi-production.up.railway.app';
-    process.env.POOL_OUTFILE = HANDOFF_PATH;
+    process.env.POOL_OUTFILE = handoffFile;
 
     const calls = [];
     vi.stubGlobal(
@@ -88,5 +109,10 @@ describe('doBuy — the real Twilio purchase call site (review round 2, B1)', ()
       SmsMethod: 'POST',
       FriendlyName: expect.stringContaining('Dialer Pool'),
     });
+
+    // The handoff landed in this test's own folder: one record per purchase.
+    const handoff = JSON.parse(readFileSync(handoffFile, 'utf8'));
+    expect(handoff).toHaveLength(posts.length);
+    expect(handoff[0]).toMatchObject({ e164: '+16195550100', sid: 'PN00000000000000000000000000000000' });
   });
 });

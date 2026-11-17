@@ -6,8 +6,10 @@
  * Postgres and is gated behind an `isMain` check (see the module's bottom)
  * — importing it for `purchaseFields` never touches either.
  */
-import { unlinkSync } from 'node:fs';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { purchaseFields } from './buy-agent-numbers.js';
 
 describe('purchaseFields — the Twilio purchase request body', () => {
@@ -41,7 +43,13 @@ describe('purchaseFields — the Twilio purchase request body', () => {
 // ---------------------------------------------------------------------------
 
 describe('buyBatch — the real Twilio purchase call site (review round 2, B2)', () => {
-  const HANDOFF_PATH = '/private/tmp/claude-501/-Users-cdrshepard-spam-res-cti/afd1f56e-293d-4ea6-9400-11116185f1f2/scratchpad/buy-agent-numbers-test-handoff.json';
+  // Each test gets its own throwaway folder for the hand-off file and removes
+  // it afterwards — nothing here depends on a path that exists on one machine.
+  let handoffDir: string;
+
+  beforeEach(() => {
+    handoffDir = mkdtempSync(join(tmpdir(), 'buy-agent-numbers-test-'));
+  });
 
   afterEach(() => {
     vi.unstubAllGlobals();
@@ -50,19 +58,16 @@ describe('buyBatch — the real Twilio purchase call site (review round 2, B2)',
     delete process.env.TWILIO_AUTH_TOKEN;
     delete process.env.POOL_API_BASE;
     delete process.env.FLEET_OUTFILE;
-    try {
-      unlinkSync(HANDOFF_PATH);
-    } catch {
-      // fine — the test may not have written it
-    }
+    rmSync(handoffDir, { recursive: true, force: true });
   });
 
   it('the purchase POST body uses the SMS url builder (not the voice url), and includes VoiceMethod', async () => {
+    const handoffFile = join(handoffDir, 'fleet-buy.json');
     process.env.CONFIRM_BUY = '1';
     process.env.TWILIO_ACCOUNT_SID = 'ACtest';
     process.env.TWILIO_AUTH_TOKEN = 'test-token';
     process.env.POOL_API_BASE = 'https://ctiapi-production.up.railway.app';
-    process.env.FLEET_OUTFILE = HANDOFF_PATH;
+    process.env.FLEET_OUTFILE = handoffFile;
 
     const calls: Array<{ url: string; init?: RequestInit }> = [];
     vi.stubGlobal(
@@ -92,5 +97,12 @@ describe('buyBatch — the real Twilio purchase call site (review round 2, B2)',
       SmsMethod: 'POST',
       FriendlyName: 'Agent Test LA',
     });
+
+    // The hand-off landed in this test's own folder, and the atomic write
+    // left no .tmp sibling behind.
+    expect(readdirSync(handoffDir)).toEqual(['fleet-buy.json']);
+    expect(JSON.parse(readFileSync(handoffFile, 'utf8'))).toEqual([
+      { e164: '+16195550100', sid: 'PN00000000000000000000000000000000', kind: 'agent', label: 'Agent Test LA', assignEmail: null },
+    ]);
   });
 });
