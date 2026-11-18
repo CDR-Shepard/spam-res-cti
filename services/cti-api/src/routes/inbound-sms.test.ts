@@ -23,6 +23,9 @@ const state = vi.hoisted(() => ({
   /** Rows the fake inbound_messages table holds, keyed by message_sid (the unique index). */
   rows: new Map<string, Record<string, unknown>>(),
   insertError: null as Error | null,
+  /** Rows the fake opt_outs table holds, keyed by `${orgId}|${e164}` (the unique index). */
+  optOuts: new Map<string, Record<string, unknown>>(),
+  optOutError: null as Error | null,
   stickyAgentId: null as string | null,
   lastDialerId: null as string | null,
   stickyError: null as Error | null,
@@ -73,7 +76,7 @@ vi.mock('@cti/db', async (importOriginal) => {
 import { schema } from '@cti/db';
 import { drizzle } from 'drizzle-orm/node-postgres';
 import { Pool } from 'pg';
-import { EMPTY_TWIML, insertInboundMessage, registerInboundSmsRoutes } from './inbound-sms.js';
+import { EMPTY_TWIML, insertInboundMessage, insertTextOptOut, registerInboundSmsRoutes } from './inbound-sms.js';
 
 function fakeDb() {
   return {
@@ -86,6 +89,18 @@ function fakeDb() {
       },
     },
     insert(table: unknown) {
+      if (table === schema.optOuts) {
+        return {
+          values(v: Record<string, unknown>) {
+            const run = async () => {
+              if (state.optOutError) throw state.optOutError;
+              const key = `${String(v.orgId)}|${String(v.e164)}`;
+              if (!state.optOuts.has(key)) state.optOuts.set(key, v);
+            };
+            return { onConflictDoNothing: () => run() };
+          },
+        };
+      }
       if (table !== schema.inboundMessages) throw new Error('unexpected insert target');
       return {
         values(v: Record<string, unknown>) {
@@ -129,6 +144,8 @@ beforeEach(async () => {
   state.ownedWheres = [];
   state.rows = new Map();
   state.insertError = null;
+  state.optOuts = new Map();
+  state.optOutError = null;
   state.stickyAgentId = null;
   state.lastDialerId = null;
   state.stickyError = null;
@@ -384,6 +401,130 @@ describe('POST /telephony/twilio/sms — a text to an AI (ai_pool) number', () =
     expect(state.aiCallbackRep).toHaveBeenCalledWith(expect.anything(), 'org-1', '+13105550002', '+16197244374');
     expect(state.stickyAgentForCaller).not.toHaveBeenCalled();
     expect(state.lastDialerForCaller).not.toHaveBeenCalled();
+  });
+});
+
+describe('POST /telephony/twilio/sms — a STOP text puts the sender on the do-not-call list', () => {
+  // Someone who texts STOP to a number that keeps calling them is asking us to
+  // stop calling. opt_outs is the list the power dialer and click-to-dial both
+  // check (packages/firewall/src/suppression.ts + evaluate.ts).
+  it('STOP adds the sender to opt_outs for the number’s org, and the text is still stored for the rep', async () => {
+    expectEmptyTwiml(await text({ Body: 'STOP' }));
+    expect([...state.optOuts.values()]).toEqual([
+      { orgId: 'org-1', e164: '+13105550002', source: 'stop_keyword', note: 'Texted STOP to +16195550100' },
+    ]);
+    expect(state.rows.get(SID_1)).toMatchObject({ body: 'STOP', userId: 'rep-1', status: 'pending' });
+  });
+
+  it.each([['stop'], ['  Cancel \n'], ['UNSUBSCRIBE'], ['quit'], ['STOPALL'], ['End']])(
+    '%j (a carrier opt-out word, whole message) also opts the sender out',
+    async (body) => {
+      await text({ Body: body });
+      expect(state.optOuts.get('org-1|+13105550002')).toMatchObject({
+        source: 'stop_keyword',
+        note: `Texted ${body.trim().toUpperCase()} to +16195550100`,
+      });
+    },
+  );
+
+  it.each([['stop calling me'], ['please stop by at 3'], ['cancel my appointment'], [SECRET_BODY], ['']])(
+    '%j is a conversation, not an opt-out — nothing is added',
+    async (body) => {
+      await text({ Body: body });
+      expect(state.optOuts.size).toBe(0);
+    },
+  );
+
+  it('Twilio’s own OptOutType=STOP counts even when the words are not ours', async () => {
+    await text({ Body: 'Stop!!', OptOutType: 'STOP' });
+    expect(state.optOuts.get('org-1|+13105550002')).toMatchObject({
+      source: 'stop_keyword',
+      note: 'Texted STOP (Twilio opt-out) to +16195550100',
+    });
+  });
+
+  it('START or HELP from Twilio never adds (and never removes) anyone', async () => {
+    await text({ Body: 'START', OptOutType: 'START' });
+    await text({ MessageSid: SID_2, Body: 'HELP', OptOutType: 'HELP' });
+    expect(state.optOuts.size).toBe(0);
+  });
+
+  it('a STOP to a pool or unassigned number still opts the sender out', async () => {
+    state.owned = OWNED({ kind: 'dialer_pool', assignedUserId: null, e164: '+16195972933' });
+    await text({ Body: 'STOP', To: '+16195972933' });
+    expect(state.optOuts.get('org-1|+13105550002')).toMatchObject({ note: 'Texted STOP to +16195972933' });
+    expect(state.rows.get(SID_1)).toMatchObject({ status: 'skipped' });
+  });
+
+  it('a Twilio retry of the same STOP is one opt-out', async () => {
+    await text({ Body: 'STOP' });
+    await text({ Body: 'STOP' });
+    expect(state.optOuts.size).toBe(1);
+  });
+
+  it('a STOP to a number we do not know adds nothing (no org to put it in)', async () => {
+    state.owned = null;
+    expectEmptyTwiml(await text({ Body: 'STOP' }));
+    expect(state.optOuts.size).toBe(0);
+  });
+
+  it('a sender that is not a phone number (short code, alphanumeric) is never written', async () => {
+    await text({ Body: 'STOP', From: 'GGHOMES' });
+    expect(state.optOuts.size).toBe(0);
+    expect(state.rows.size).toBe(1);
+  });
+
+  it('a failed opt-out write still stores the text, answers <Response/>, and logs without the body', async () => {
+    state.optOutError = Object.assign(new Error('opt_outs unavailable'), { code: '57P01', detail: 'Failing row (STOP)' });
+    expectEmptyTwiml(await text({ Body: 'STOP' }));
+    expect(state.rows.get(SID_1)).toMatchObject({ body: 'STOP' });
+    const line = logLines.find((l) => l.includes('inbound_sms_opt_out_failed'));
+    expect(line).toBeDefined();
+    expect(line).toContain(SID_1);
+    expect(line).not.toContain('Failing row');
+  });
+
+  it('the opt-out is written BEFORE the text, so a failed text insert cannot lose it', async () => {
+    state.insertError = new Error('inbound_messages unavailable');
+    expectEmptyTwiml(await text({ Body: 'STOP' }));
+    expect(state.rows.size).toBe(0);
+    expect(state.optOuts.get('org-1|+13105550002')).toMatchObject({ source: 'stop_keyword' });
+  });
+
+  it('INBOUND_TEXTS=off still records a STOP — the switch silences alerts, never an opt-out — and stores no text', async () => {
+    state.inboundTexts = 'off';
+    expectEmptyTwiml(await text({ Body: 'STOP' }));
+    expect(state.optOuts.get('org-1|+13105550002')).toMatchObject({ note: 'Texted STOP to +16195550100' });
+    expect(state.rows.size).toBe(0);
+  });
+
+  it('INBOUND_TEXTS=off: a failed STOP lookup still answers <Response/> and logs without the body', async () => {
+    state.inboundTexts = 'off';
+    state.optOutError = Object.assign(new Error('db down'), { detail: 'Failing row (STOP)' });
+    expectEmptyTwiml(await text({ Body: 'STOP' }));
+    expect(logLines.some((l) => l.includes('inbound_sms_opt_out_failed') && l.includes(SID_1))).toBe(true);
+    expect(logLines.join('\n')).not.toContain('Failing row');
+  });
+
+  it('logs that the opt-out was recorded, by MessageSid only', async () => {
+    await text({ Body: 'STOP' });
+    const line = logLines.find((l) => l.includes('inbound_sms_opt_out_recorded'));
+    expect(line).toContain(SID_1);
+    expect(line).not.toContain('+13105550002');
+  });
+});
+
+describe('insertTextOptOut — the emitted SQL', () => {
+  it('is a bare ON CONFLICT DO NOTHING on opt_outs with source stop_keyword', () => {
+    const db = drizzle(new Pool({ connectionString: 'postgres://unused:unused@127.0.0.1:1/unused' }), { schema });
+    const { sql, params } = insertTextOptOut(db, {
+      orgId: '11111111-1111-1111-1111-111111111111',
+      e164: '+13105550002',
+      note: 'Texted STOP to +16195550100',
+    }).toSQL();
+    expect(sql).toMatch(/^insert into "opt_outs" /);
+    expect(sql).toMatch(/on conflict do nothing$/);
+    expect(params).toContain('stop_keyword');
   });
 });
 

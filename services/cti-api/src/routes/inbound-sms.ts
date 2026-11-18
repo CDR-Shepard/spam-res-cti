@@ -20,6 +20,12 @@
  *  - The message body is NEVER logged — log lines carry the MessageSid only, and
  *    errors are reduced to name/code/message (a Postgres constraint error's
  *    `detail` quotes the failing row, body and all).
+ *
+ * A STOP (a carrier opt-out word as the whole message, or Twilio's own
+ * OptOutType=STOP) to one of our numbers also puts the sender on `opt_outs`,
+ * the do-not-call list the dialer and click-to-dial check: people text STOP to
+ * the number that keeps CALLING them (2026-11-18: two did, and both were still
+ * in dialer lists).
  * Design: docs/superpowers/specs/2026-09-25-inbound-texts-design.md.
  */
 import type { FastifyBaseLogger, FastifyInstance, FastifyRequest } from 'fastify';
@@ -30,7 +36,7 @@ import { normalize } from '@cti/phone';
 import { loadConfig } from '../config.js';
 import { getProvider } from '../telephony/index.js';
 import { lastDialerForCaller, stickyAgentForCaller } from '../dialer/sticky.js';
-import { chooseTextRecipient } from '../sms/inbound-text.js';
+import { chooseTextRecipient, isOptOutText } from '../sms/inbound-text.js';
 import { aiCallbackRep } from '../ai-voice/number-pool.js';
 
 export const EMPTY_TWIML = '<?xml version="1.0" encoding="UTF-8"?><Response/>';
@@ -53,6 +59,51 @@ export function insertInboundMessage(db: Db, values: typeof schema.inboundMessag
     .values(values)
     .onConflictDoNothing()
     .returning({ id: schema.inboundMessages.id });
+}
+
+/**
+ * The do-not-call row a STOP text writes. opt_outs is what the power dialer
+ * (session start) and click-to-dial (the firewall) check before dialing. Bare
+ * `onConflictDoNothing()`: opt_outs_org_e164_unique is a full index, and a
+ * second STOP from someone already listed is a no-op.
+ */
+export function insertTextOptOut(db: Db, values: { orgId: string; e164: string; note: string }) {
+  return db
+    .insert(schema.optOuts)
+    .values({ ...values, source: 'stop_keyword' })
+    .onConflictDoNothing();
+}
+
+/** Only a real phone number can be dialed, so only a real one is worth listing. */
+const DIALABLE_E164_RE = /^\+[1-9]\d{6,14}$/;
+
+/** What the opt-out note says the person sent — a carrier keyword, never free text. */
+function optOutKeyword(body: Record<string, string>): string | null {
+  if (isOptOutText(body.Body)) return (body.Body ?? '').trim().toUpperCase();
+  if ((body.OptOutType ?? '').toUpperCase() === 'STOP') return 'STOP (Twilio opt-out)';
+  return null;
+}
+
+/**
+ * Someone texting STOP to a number that keeps calling them is asking us to stop
+ * calling. Written before the text itself so a failed text insert cannot lose
+ * it, and on its own try so a failed opt-out never costs the text.
+ */
+async function recordOptOut(
+  db: Db,
+  owned: OutboundNumber,
+  fromE164: string,
+  keyword: string,
+  log: FastifyBaseLogger,
+  messageSid: string,
+): Promise<void> {
+  if (!DIALABLE_E164_RE.test(fromE164)) return;
+  try {
+    await insertTextOptOut(db, { orgId: owned.orgId, e164: fromE164, note: `Texted ${keyword} to ${owned.e164}` });
+    log.info({ messageSid, numberId: owned.id }, 'inbound_sms_opt_out_recorded');
+  } catch (err) {
+    log.error({ messageSid, err: safeError(err) }, 'inbound_sms_opt_out_failed');
+  }
 }
 
 /** An error reduced to what is safe to log: never `detail`, which can quote the stored row. */
@@ -110,7 +161,16 @@ function parseNumMedia(raw: string | undefined): number {
   return Number.isFinite(n) && n > 0 ? n : 0;
 }
 
-async function storeInboundText(db: Db, body: Record<string, string>, log: FastifyBaseLogger): Promise<void> {
+/**
+ * `storeText: false` (the INBOUND_TEXTS kill switch) records a STOP and nothing
+ * else: no text row, so no Task or alert follows.
+ */
+async function storeInboundText(
+  db: Db,
+  body: Record<string, string>,
+  log: FastifyBaseLogger,
+  { storeText }: { storeText: boolean } = { storeText: true },
+): Promise<void> {
   const messageSid = body.MessageSid ?? '';
   if (!TWILIO_MESSAGE_SID_RE.test(messageSid)) {
     log.warn({ messageSid: messageSid.slice(0, 64) }, 'inbound_sms_bad_message_sid');
@@ -124,6 +184,10 @@ async function storeInboundText(db: Db, body: Record<string, string>, log: Fasti
     log.info({ messageSid, to: toNumber }, 'inbound_sms_unknown_number');
     return;
   }
+
+  const keyword = optOutKeyword(body);
+  if (keyword) await recordOptOut(db, owned, fromE164, keyword, log, messageSid);
+  if (!storeText) return;
 
   const userId = await recipientFor(db, owned, fromE164, log, messageSid);
   const inserted = await insertInboundMessage(db, {
@@ -160,11 +224,19 @@ export async function registerInboundSmsRoutes(app: FastifyInstance): Promise<vo
       return reply.code(403).send('Invalid signature');
     }
     const body = (req.body ?? {}) as Record<string, string>;
-    // Kill switch (config.ts INBOUND_TEXTS): answer as usual, store nothing, so
+    // Kill switch (config.ts INBOUND_TEXTS): answer as usual, store no text, so
     // turning it back on never bursts a backlog of alerts. Twilio keeps the text;
-    // the backfill script can recover it.
+    // the backfill script can recover it. A STOP is still recorded — the switch
+    // silences alerts, never an opt-out — and only a STOP touches the database.
     if (cfg.INBOUND_TEXTS === 'off') {
       req.log.info({ messageSid: (body.MessageSid ?? '').slice(0, 64) }, 'inbound_sms_disabled');
+      if (optOutKeyword(body)) {
+        try {
+          await storeInboundText(getDb(), body, req.log, { storeText: false });
+        } catch (err) {
+          req.log.error({ messageSid: (body.MessageSid ?? '').slice(0, 64), err: safeError(err) }, 'inbound_sms_opt_out_failed');
+        }
+      }
       return reply.type('text/xml').send(EMPTY_TWIML);
     }
     try {
