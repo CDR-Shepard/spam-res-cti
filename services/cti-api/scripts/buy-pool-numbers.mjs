@@ -18,12 +18,15 @@
  * MODE=both (default) does buy+register in one process (only works where one
  * env has BOTH Twilio creds and a reachable DATABASE_URL, e.g. local dev).
  *
+ * The handoff file is services/cti-api/pool-buy.json (gitignored) wherever
+ * you run from; set POOL_OUTFILE on BOTH steps to put it somewhere else.
+ *
  * Registers as kind='dialer_pool', inbound_enabled=true, unassigned (shared
  * pool), provider='twilio'. Idempotent DB insert (skips an existing e164).
  */
 import pg from 'pg';
 import { readFileSync, writeFileSync } from 'node:fs';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 // Same URL builder set-sms-webhooks.mjs uses, so a newly-bought number's
 // SmsUrl is byte-for-byte the URL Twilio's signature check expects — a
 // number bought here would otherwise sit with no SmsUrl at all until someone
@@ -37,8 +40,16 @@ const PLAN = [
 
 const MODE = process.env.MODE || 'both'; // buy | register | both
 const CONFIRM = process.env.CONFIRM_BUY === '1';
-const HANDOFF = process.env.POOL_OUTFILE ||
-  '/private/tmp/claude-501/-Users-cdrshepard-spam-res-cti/afd1f56e-293d-4ea6-9400-11116185f1f2/scratchpad/pool-buy.json';
+/** Where purchased numbers are recorded between the buy and register steps:
+ *  POOL_OUTFILE if set, else services/cti-api/pool-buy.json (gitignored).
+ *  Script-relative like buy-agent-numbers.ts's fleet-buy.json, NOT cwd-relative
+ *  or a temp folder — the handoff is the only local record of numbers already
+ *  charged to the account, so both steps must find the same file wherever
+ *  they are run from, and its folder must exist on every checkout. */
+export function handoffPath(env = process.env) {
+  return env.POOL_OUTFILE || fileURLToPath(new URL('../pool-buy.json', import.meta.url));
+}
+const HANDOFF = handoffPath();
 const ACCOUNT = process.env.TWILIO_ACCOUNT_SID;
 const TOKEN = process.env.TWILIO_AUTH_TOKEN;
 const API_BASE = process.env.POOL_API_BASE || process.env.API_PUBLIC_URL;
